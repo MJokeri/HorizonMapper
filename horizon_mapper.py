@@ -22,6 +22,7 @@ except ImportError:  # GUI will complain later
     Image = None
 
 APP_NAME = "Horizon Mapper for NINA"
+APP_VERSION = "1.0.1"
 
 # =============================================================================
 #  Small numeric helpers (no scipy needed)
@@ -922,7 +923,7 @@ def run_gui():
         ImageTk = None
 
     root = tk.Tk()
-    root.title(APP_NAME)
+    root.title(f"{APP_NAME}  v{APP_VERSION}")
     root.geometry("1280x860")
     nb = ttk.Notebook(root); nb.pack(fill="both", expand=True)
 
@@ -1173,10 +1174,7 @@ def run_gui():
     labeled(box, 5, "Solid: darker than", pvar("solid", "0.60"), tip="× sky")
     labeled(box, 6, "Branches: darker than", pvar("thin", "0.85"), tip="× sky")
     labeled(box, 7, "Bias level (blank = auto)", pvar("bias", ""))
-    labeled(box, 8, "Side margin at steep edges (°)", pvar("side", "0"), tip="0 = off")
-    labeled(box, 9, "Steep = steeper than (°/°)", pvar("steep", "3"), tip="alt per az")
-    for k in ("side", "steep"):
-        pv[k].trace_add("write", lambda *a: (redraw_lines(), update_stats()) if E.get("solid") is not None else None)
+    pvar("side", "0"); pvar("steep", "3")   # shown in the toolbar above the image
     pv["cache"] = tk.BooleanVar(value=True)
     ttk.Checkbutton(box, text="Cache reduced frames (fast re-runs)", variable=pv["cache"]).grid(row=10, column=0, columnspan=2, sticky="w")
     ttk.Button(box, text="Clear cache", command=lambda: messagebox.showinfo(
@@ -1204,6 +1202,12 @@ def run_gui():
     zc.pack(side="left")
     ttk.Button(tb, text="Undo", command=lambda: undo()).pack(side="left", padx=6)
     ttk.Button(tb, text="Reset edits", command=lambda: reset_edits()).pack(side="left")
+    tb2 = ttk.Frame(pr); tb2.pack(fill="x", pady=(3, 0))
+    ttk.Label(tb2, text="Side margin at steep edges (°)").pack(side="left")
+    ttk.Spinbox(tb2, textvariable=pv["side"], from_=0, to=10, increment=0.5, width=5).pack(side="left", padx=(2, 8))
+    ttk.Label(tb2, text="steep = more than").pack(side="left")
+    ttk.Spinbox(tb2, textvariable=pv["steep"], from_=0.5, to=20, increment=0.5, width=5).pack(side="left", padx=2)
+    ttk.Label(tb2, text="° altitude per ° azimuth   (0 = off; 1–2° recommended)", foreground="#666").pack(side="left")
     ttk.Label(pr, text="Left-drag on the image to redraw the selected line · right-click: restore detected value · Ctrl+Z: undo",
               foreground="#666").pack(anchor="w")
     cf = ttk.Frame(pr); cf.pack(fill="both", expand=True)
@@ -1421,6 +1425,8 @@ def run_gui():
         redraw_lines(); update_stats()
 
     current_hz.trace_add("write", lambda *a: redraw_all())
+    for k in ("side", "steep"):
+        pv[k].trace_add("write", lambda *a: (redraw_lines(), update_stats()) if E.get("solid") is not None else None)
     cv.bind("<ButtonPress-1>", lambda e: paint(e, True))
     cv.bind("<B1-Motion>", lambda e: paint(e, False))
     cv.bind("<ButtonRelease-1>", lambda e: update_stats())
@@ -1531,7 +1537,7 @@ def run_gui():
     root.mainloop()
 
 
-HELP_TEXT = """HORIZON MAPPER FOR NINA
+HELP_TEXT = """HORIZON MAPPER FOR NINA   (the version is shown in the window title)
 
 WORKFLOW
 1. Plan sequence
@@ -1563,7 +1569,7 @@ WORKFLOW
    • 'Plan fill-in frames…' turns those areas into a short NINA sequence (camera, rotator and
      exposure settings come from the Plan tab). Shoot it, add its folder and build again.
    • 'Re-detect' applies new thresholds instantly without re-reading the frames.
-   • 'Side margin at steep edges': where the horizon rises or drops steeply (the side of a
+   • 'Side margin at steep edges' (toolbar above the image): where the horizon rises or drops steeply (the side of a
      tree, the end of a roof), the higher value is extended that many degrees sideways, so a
      target just beside the obstruction isn't scheduled too early. Gentle slopes are not
      changed. 'Steep' means more than the given degrees of altitude per degree of azimuth

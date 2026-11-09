@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 1.0.1 – 2026-11-09
+
+### Changed
+- **Side margin at steep edges:** the setting and its steepness threshold moved from the Build tab's
+  Settings box to the toolbar directly above the image, as spin boxes. The lines on screen update as
+  you change them. On smaller screens the old place could be cut off and hard to find.
+- The window title shows the version number, so you can tell which build you are running.
+
+## 1.0.0 – 2026-11-09
 
 ### Added
 - **Plan fill-in frames:** finds the azimuths whose horizon reached the edge of the imaged area
