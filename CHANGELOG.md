@@ -13,6 +13,10 @@
 
   Saved files use the edited lines.
 - **Re-detect** applies new detection thresholds without re-reading the frames.
+- **Side margin at steep edges:** where the horizon rises or drops more steeply than a set slope
+  (default 3° of altitude per degree of azimuth), the higher value is extended a chosen number of
+  degrees sideways. Gentle slopes are unchanged. It's in the GUI Settings, and on the command line as
+  `--side-margin` and `--steep-slope`. The value is recorded in the details JSON. Off by default.
 - **Frame cache:** reduced frames are stored in `%LOCALAPPDATA%\HorizonMapper\cache` and reused, and
   frames are read in parallel. On a 129-frame set a rebuild took 6 s instead of 59 s. `--no-cache`
   and **Clear cache** control it.
