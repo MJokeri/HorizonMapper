@@ -14,9 +14,9 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -46,13 +46,13 @@ jobs:
           Copy-Item dist\HorizonMapper.exe, README.md, LICENSE package\
           Compress-Archive -Path package\* -DestinationPath HorizonMapper-windows.zip -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: HorizonMapper-windows
           path: HorizonMapper-windows.zip
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: HorizonMapper-windows.zip
