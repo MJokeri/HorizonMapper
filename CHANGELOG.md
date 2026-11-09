@@ -11,8 +11,15 @@
 - **Build tab – Fill-in: extra frames at steep edges:** the same idea for **Plan fill-in frames…**.
   Fields below the button set the number of extra frame widths (default 1, 0 = off) and the
   steepness threshold. A fill-in area whose side lies at a steep rise or drop of the measured
-  (and edited) horizon is extended sideways and made tall enough to cover the whole jump; it is
-  labelled "+ steep edge". CLI: `build --fillin-edge-frames N --fillin-edge-slope S`.
+  (and edited) horizon is extended sideways, keeping its altitude range; it is labelled
+  "+ steep edge". CLI: `build --fillin-edge-frames N --fillin-edge-slope S`.
+- **Build tab – Show fill-in frames:** draws the fill-in areas, their frames and the shooting order
+  on the horizon image, updating live.
+- **Plan tab – Show shooting order:** the preview shows the order of frames as a colour-graded path
+  (green = first → magenta = last) with row numbers, Start/End and the meridian flip.
+
+### Fixed
+- Fill-in frames shared by overlapping areas are now shot only once.
 
 ### Changed
 - **Side margin at steep edges:** the setting and its steepness threshold moved from the Build tab's

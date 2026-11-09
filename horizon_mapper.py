@@ -410,7 +410,8 @@ def widen_fillin_boxes(boxes, az, alt, frame_w, edge_frames=1.0, edge_slope=3.0,
     `az`/`alt` is the measured horizon line, `frame_w` the frame width in degrees on the sky.
     Within `look` degrees of a box side, if the horizon changes faster than `edge_slope`
     (deg altitude per deg azimuth), that side is pushed out by `edge_frames` frame widths
-    (scaled by 1/cos(alt)) and the box is made tall enough to cover the whole jump.
+    (scaled by 1/cos(alt)). The altitude range stays the same: the main run has already imaged
+    the rest of the jump, and stretching every area to the full jump height multiplies the frames.
     """
     if edge_frames <= 0 or not boxes:
         return boxes
@@ -425,15 +426,65 @@ def widen_fillin_boxes(boxes, az, alt, frame_w, edge_frames=1.0, edge_slope=3.0,
             win = np.abs(d) <= look
             if not win.any() or slope[win].max() < edge_slope:
                 continue
-            top = float(alt[win].max()) + 2.0; bot = float(alt[win].min()) - 2.0
-            w = edge_frames * frame_w / max(math.cos(math.radians(min(max(top, h1), 80.0))), 0.17)
+            w = edge_frames * frame_w / max(math.cos(math.radians(min(h1, 80.0))), 0.17)
             if side == a0:
                 a0 = a0 - w
             else:
                 a1 = a1 + w
-            h0 = max(floor, min(h0, bot)); h1 = min(ceiling, max(h1, top)); added = True
+            added = True
         out.append((a0, a1, h0, h1, label + (" + steep edge" if added else "")))
     return out
+
+
+def order_color(t):
+    """Colour for position t (0 = first frame, 1 = last): green → yellow → magenta."""
+    stops = [(0.0, (0, 170, 80)), (0.5, (240, 200, 0)), (1.0, (220, 0, 160))]
+    t = min(max(t, 0.0), 1.0)
+    for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+        if t <= t1:
+            u = (t - t0) / (t1 - t0)
+            return "#%02x%02x%02x" % tuple(int(a + (b - a) * u) for a, b in zip(c0, c1))
+    return "#dc00a0"
+
+
+def draw_order(canvas, plan, X, Y, tag="order", numbers="rows", flip=True, width=2):
+    """Draw the shooting order of plan['frames'] on a Tk canvas: a colour-graded path with arrows,
+    frame numbers (at row starts or on every frame), Start/End markers and the meridian flip."""
+    fr = plan["frames"]; n = len(fr)
+    if not n:
+        return
+    pts = [(X(a), Y(alt)) for alt, a, _ in fr]
+    step = max(1, n // 150)
+    for i in range(n - 1):
+        (xa, ya), (xb, yb) = pts[i], pts[i + 1]
+        col = order_color(i / max(n - 1, 1))
+        if abs(xb - xa) > abs(X(180) - X(0)):        # wraps over 0°/360°: no line across the image
+            continue
+        canvas.create_line(xa, ya, xb, yb, fill=col, width=width, tags=tag,
+                           arrow="last" if i % step == 0 else "none", arrowshape=(7, 8, 3))
+    idx = range(n) if numbers == "all" else []
+    if numbers == "rows":
+        fi = 0; idx = []
+        for _, azs in plan["grid"]:
+            if azs:
+                idx.append(fi)
+            fi += len(azs)
+    for i in idx:
+        x, y = pts[i]
+        canvas.create_text(x, y - 9, text=str(i + 1), font=("Segoe UI", 8, "bold"),
+                           fill=order_color(i / max(n - 1, 1)), tags=tag)
+    for i, txt in ((0, "Start"), (n - 1, "End")):
+        x, y = pts[i]
+        canvas.create_oval(x - 5, y - 5, x + 5, y + 5, outline="black", width=2,
+                           fill=order_color(i / max(n - 1, 1)), tags=tag)
+        canvas.create_text(x + 8, y + 10, text=txt, anchor="w", font=("Segoe UI", 9, "bold"), tags=tag)
+    if flip:
+        for i in range(1, n):
+            if fr[i - 1][1] < 180 <= fr[i][1]:
+                x, y = pts[i]
+                canvas.create_text(x, y + 14, text="↻ meridian flip", font=("Segoe UI", 8),
+                                   fill="#b00060", tags=tag)
+                break
 
 
 def plan_fillin(p, boxes):
@@ -446,7 +497,15 @@ def plan_fillin(p, boxes):
     order = sorted(east, key=lambda b: (b[0] + b[1]) / 2 % 360) + \
         sorted(west, key=lambda b: (b[0] + b[1]) / 2 % 360) if p.meridian_split else \
         sorted(boxes, key=lambda b: (b[0] + b[1]) / 2 % 360)
-    grid = []; labels = []
+    grid = []; labels = []; done = []          # done: centres of frames already planned
+
+    def covered(alt, az):
+        for h, z in done:
+            if abs(alt - h) < fh * (0.5 - ov / 2) and \
+                    abs((az - z + 180) % 360 - 180) < fw / max(math.cos(math.radians(h)), 1e-3) * (0.5 - ov / 2):
+                return True
+        return False
+
     for a0, a1, h0, h1, label in order:
         span_h = h1 - h0
         nr = 1 if span_h <= fh else math.ceil((span_h - fh) / (fh * (1 - ov))) + 1
@@ -456,9 +515,12 @@ def plan_fillin(p, boxes):
             span_a = a1 - a0
             n = 1 if span_a <= cov else math.ceil((span_a - cov) / (cov * (1 - ov))) + 1
             azs = [(a0 + a1) / 2] if n == 1 else [a0 + cov / 2 + k * (span_a - cov) / (n - 1) for k in range(n)]
-            azs = [z % 360 for z in azs]
+            azs = [z % 360 for z in azs if not covered(alt, z % 360)]   # overlapping areas: shoot once
+            if not azs:
+                continue
             if ri % 2:
                 azs.reverse()
+            done.extend((alt, z) for z in azs)
             grid.append((alt, azs)); labels.append(label)
     frames, rot_moves = assign_rotator(p, grid, "landscape")
     secs = len(frames) * (p.sec_per_frame + p.exposure) + rot_moves * p.sec_per_rot
@@ -1164,6 +1226,10 @@ def run_gui():
             line = [c for a in az for c in (X(a), Y(hrz_alt(pts, a)))]
             canvas.create_line(*line, fill=colors[i % 2], width=2)
         canvas.create_line(x0, Y(p.floor), x1, Y(p.floor), fill="#e0b000", dash=(4, 3))
+        if show_order.get():
+            draw_order(canvas, plan, X, Y, flip=p.meridian_split)
+            canvas.create_text(x1, y0 + 2, anchor="ne", font=("Segoe UI", 9),
+                               text="Shooting order: green = first → yellow → magenta = last · numbers = first frame of each row")
 
     def preview():
         try:
@@ -1208,6 +1274,9 @@ def run_gui():
 
     ttk.Button(btns, text="Preview plan", command=preview).pack(side="left", padx=3)
     ttk.Button(btns, text="Save NINA sequence…", command=save).pack(side="left", padx=3)
+    show_order = tk.BooleanVar(value=True)
+    ttk.Checkbutton(btns, text="Show shooting order", variable=show_order,
+                    command=lambda: draw_plan()).pack(side="left", padx=6)
     sun_lon = tk.StringVar(value="25.0")
     sb = ttk.Frame(left); sb.pack(fill="x")
     ttk.Label(sb, text="Longitude (°E)").pack(side="left", padx=4)
@@ -1275,6 +1344,9 @@ def run_gui():
     ttk.Label(tb2, text="steep = more than").pack(side="left")
     ttk.Spinbox(tb2, textvariable=pv["steep"], from_=0.5, to=20, increment=0.5, width=5).pack(side="left", padx=2)
     ttk.Label(tb2, text="° altitude per ° azimuth   (0 = off; 1–2° recommended)", foreground="#666").pack(side="left")
+    show_fill = tk.BooleanVar(value=False)
+    ttk.Checkbutton(tb2, text="Show fill-in frames", variable=show_fill,
+                    command=lambda: draw_fill()).pack(side="left", padx=(12, 2))
     ttk.Label(pr, text="Left-drag on the image to redraw the selected line · right-click: restore detected value · Ctrl+Z: undo",
               foreground="#666").pack(anchor="w")
     cf = ttk.Frame(pr); cf.pack(fill="both", expand=True)
@@ -1455,6 +1527,7 @@ def run_gui():
                 cv.coords(E["items"][key], *c)
             else:
                 E["items"][key] = cv.create_line(*c, fill=col, width=w)
+        draw_fill()
 
     def paint(ev, push):
         tgt = ed["target"].get()
@@ -1547,23 +1620,60 @@ def run_gui():
         messagebox.showinfo(APP_NAME, f"Saved the {which} horizon:\n{f}\n\n"
                                       "In NINA: Options → General → Astrometry → Horizon.")
 
-    def plan_fill():
+    def compute_fill():
+        """(params, boxes, plan) for the fill-in frames; raises ValueError with a readable message."""
         if "det" not in result:
-            messagebox.showerror(APP_NAME, "Build the horizon first."); return
+            raise ValueError("Build the horizon first.")
         try:
             p = collect(require_area=False)
         except Exception as e:
-            messagebox.showerror(APP_NAME, f"Check the settings on the Plan tab: {e}"); return
+            raise ValueError(f"Check the settings on the Plan tab: {e}")
         boxes = fillin_boxes(result["det"], floor=p.floor, ceiling=p.ceiling)
         try:
             ef = max(float(fill_edge.get()), 0.0); es = max(float(fill_slope.get()), 0.1)
         except ValueError:
-            messagebox.showerror(APP_NAME, "Check the fill-in steep-edge values."); return
+            raise ValueError("Check the fill-in steep-edge values.")
         az_, s_, b_ = final_lines()
         boxes = widen_fillin_boxes(boxes, az_, np.maximum(s_, b_), max(p.fov), ef, es, p.floor, p.ceiling)
+        return p, boxes, (plan_fillin(p, boxes) if boxes else None)
+
+    def draw_fill():
+        cv.delete("fill")
+        if not show_fill.get() or "mos" not in result or E.get("solid") is None:
+            return
+        try:
+            p, boxes, plan = compute_fill()
+        except ValueError:
+            return
+        if not boxes:
+            return
+        X = lambda a: to_xy(a, 0)[0]; Y = lambda h: to_xy(0, h)[1]
+        for a0, a1, h0, h1, label in boxes:
+            for sh in (0, 360, -360):
+                if a1 + sh < 0 or a0 + sh > 360:
+                    continue
+                cv.create_rectangle(X(a0 + sh), Y(h1), X(a1 + sh), Y(h0), outline="#ff60ff", dash=(5, 3),
+                                    width=2, tags="fill")
+            cv.create_text(X(max(a0, 0)) + 3, Y(h1) - 8, anchor="w", text=label, fill="#ff9cff",
+                           font=("Segoe UI", 8), tags="fill")
+        for alt, a, rot in plan["frames"]:
+            cw = plan["fw"] / max(math.cos(math.radians(alt)), 0.05) / 2; ch = plan["fh"] / 2
+            for sh in (0, 360, -360):
+                if a + cw + sh < 0 or a - cw + sh > 360:
+                    continue
+                cv.create_rectangle(X(a - cw + sh), Y(alt + ch), X(a + cw + sh), Y(alt - ch),
+                                    outline="#ffa000", width=1, tags="fill")
+        draw_order(cv, plan, lambda a: X(a % 360), Y, tag="fill",
+                   numbers="all" if zoom() >= 20 else "rows", flip=False, width=1)
+
+    def plan_fill():
+        try:
+            p, boxes, plan = compute_fill()
+        except ValueError as e:
+            messagebox.showerror(APP_NAME, str(e)); return
         if not boxes:
             messagebox.showinfo(APP_NAME, "Nothing to fill in – every azimuth is resolved."); return
-        plan = plan_fillin(p, boxes)
+        show_fill.set(True); draw_fill()
         msg = (f"{len(boxes)} areas, {len(plan['frames'])} frames, ~{plan['seconds'] / 60:.0f} min\n\n" +
                "\n".join(b[4] for b in boxes[:15]) + ("\n…" if len(boxes) > 15 else "") +
                "\n\nCamera, rotator and exposure settings come from the Plan tab.")
@@ -1585,6 +1695,8 @@ def run_gui():
     ttk.Label(fe, text="steep = more than").pack(side="left")
     ttk.Spinbox(fe, textvariable=fill_slope, from_=0.5, to=20, increment=0.5, width=4).pack(side="left", padx=2)
     ttk.Label(fe, text="°/°  (0 = off)", foreground="#666").pack(side="left")
+    for _v in (fill_edge, fill_slope):
+        _v.trace_add("write", lambda *a: draw_fill())
     sv = ttk.Frame(bb); sv.grid(row=1, column=1, padx=2, pady=2, sticky="ew")
     save_which = tk.StringVar(value="solid")
     ttk.Combobox(sv, textvariable=save_which, values=["solid", "with branches"], width=12,
@@ -1630,6 +1742,9 @@ WORKFLOW
      widened sideways by this many frame widths and covers the whole height of the jump, so
      the sides of trees and roofs are imaged. 1 is a good default; 0 = off.
    • 'Lowest altitude' keeps frames (and the sun) out of the low sky.
+   • 'Preview plan' draws the frames; with 'Show shooting order' (on by default) a colour-graded
+     path shows the order (green = first → yellow → magenta = last), with the first frame number
+     of each row, Start/End markers and the meridian flip.
    • Rotator: keeps every frame level with the horizon, so overlap can be ~10 %.
      Offset = sky position angle − mechanical angle (from NINA's rotator panel after a
      plate solve). A wrong 180° doesn't matter here.
@@ -1653,8 +1768,13 @@ WORKFLOW
    • 'Plan fill-in frames…' turns those areas into a short NINA sequence (camera, rotator and
      exposure settings come from the Plan tab). Shoot it, add its folder and build again.
      'Fill-in: extra frames at steep edges' (below the button): where a fill-in area ends at a
-     steep rise or drop of the measured horizon, it is extended by this many frame widths and
-     made tall enough to cover the whole jump ("+ steep edge" in the list). 0 = off.
+     steep rise or drop of the measured horizon, that side is extended by this many frame
+     widths ("+ steep edge" in the list). 0 = off. Frames shared by overlapping areas are
+     shot only once.
+   • 'Show fill-in frames' (toolbar above the image) draws the fill-in areas (dashed magenta),
+     their frames (orange) and the shooting order (green = first → magenta = last, numbers =
+     first frame of each row; every frame is numbered at zoom 20). It follows your edits and
+     the fill-in settings live, and turns on by itself when you use 'Plan fill-in frames…'.
    • 'Re-detect' applies new thresholds instantly without re-reading the frames.
    • 'Side margin at steep edges' (toolbar above the image): where the horizon rises or drops steeply (the side of a
      tree, the end of a roof), the higher value is extended that many degrees sideways, so a
