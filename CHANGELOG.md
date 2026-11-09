@@ -29,6 +29,13 @@
   the altitude range shown.
 
 ### Changed
+- **Saving:** **Save horizon file…** now writes a single `.hrz` file, with a file dialog. A selector
+  next to the button picks the solid line or the line with branches. The GUI no longer writes the
+  mosaic PNG and details JSON. The command-line `build` still writes all outputs.
+- **Current horizon:** the Plan tab's horizon field is now labelled **Current horizon (.hrz)**. The
+  first file added there is filled in automatically as the Build tab's comparison and gap-filling
+  horizon. Clearing it on the Plan tab clears it there too. The Build tab box is renamed **Current
+  horizon (compare / fill gaps)**.
 - When you edit, the branches line may now go below the solid line. The lines are no longer forced
   together on screen or when saving. Detection still starts the branches line at or above the solid
   line.

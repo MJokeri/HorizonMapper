@@ -20,8 +20,9 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   in sensor, pixel size, focal length and latitude.
 - **Area:**
   - **Fixed altitude band**, or
-  - **Around horizon file(s):** add your current `.hrz`, or two files (for example your old horizon and a
-    rough estimate). The strip covers both, plus the margins.
+  - **Around current horizon:** under **Current horizon (.hrz)**, add the horizon file you use now. An
+    optional second file (for example an all-sky estimate) widens the strip to cover both, plus the
+    margins. The first file is also filled in automatically on the Build tab.
   - **Lowest altitude** sets a floor for the strip. Keep it well above the sun when you shoot by day
     (use **Sun check**).
 - **Rotator:** keeps every frame level, so 10% overlap is enough.
@@ -37,13 +38,15 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
 - Add the folder(s) with the frames. Subfolders are searched too.
 - Leave **Calibrate rotation from overlaps** on. If you don't know the rotator offset at all, also tick
   **Full 360° search**.
-- Add your old `.hrz` under **Compare**. It is used for the comparison, and for any azimuths that
-  weren't imaged.
-- Click **Build mosaic & horizon**, then **Save results…**. You get:
-  - `horizon_DATE.hrz`: solid obstructions (trees, roofs, walls)
-  - `horizon_DATE_with_branches.hrz`: also avoids thin bare branches
-  - `horizon_DATE_mosaic.png`: the 360° mosaic with the horizons drawn on it
-  - `horizon_DATE_details.json`: per-azimuth details
+- **Current horizon (compare / fill gaps):** filled in from the Plan tab, or chosen with **Browse…**. It
+  is drawn in yellow, used for the usable-sky comparison, and used for any azimuths that weren't
+  imaged.
+- Click **Build mosaic & horizon**.
+- **Save horizon file…** saves one NINA `.hrz` file. Choose the line next to the button:
+  - **solid:** trees, roofs and walls
+  - **with branches:** also avoids thin bare branches
+
+  Edits and the side margin are included. Save twice if you want both files.
 - Azimuths reported as **clear to bottom** or **blocked to top** reached the edge of the imaged area.
   **Plan fill-in frames…** turns them into a short NINA sequence. Shoot it, add its folder, and build
   again. Thanks to the cache, only the new frames are read.

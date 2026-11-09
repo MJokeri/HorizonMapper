@@ -939,6 +939,7 @@ def run_gui():
     right = ttk.Frame(plan_tab); right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
     P = PlanParams()
     V = {}
+    current_hz = tk.StringVar(value="")   # shared: Plan tab horizon file -> Build tab comparison
 
     def var(name, value, kind=tk.StringVar):
         V[name] = kind(value=value); return V[name]
@@ -972,18 +973,35 @@ def run_gui():
     labeled(box, 0, "Latitude (°)", var("lat", P.lat))
     V["mode"] = tk.StringVar(value="horizon")
     ttk.Radiobutton(box, text="Fixed altitude band", variable=V["mode"], value="band").grid(row=1, column=0, sticky="w")
-    ttk.Radiobutton(box, text="Around horizon file(s)", variable=V["mode"], value="horizon").grid(row=1, column=1, sticky="w")
+    ttk.Radiobutton(box, text="Around current horizon", variable=V["mode"], value="horizon").grid(row=1, column=1, sticky="w")
     labeled(box, 2, "Band: alt min (°)", var("alt_min", P.alt_min))
     labeled(box, 3, "Band: alt max (°)", var("alt_max", P.alt_max))
-    hz_list = tk.Listbox(box, height=2, width=34); hz_list.grid(row=4, column=0, columnspan=2, sticky="w", padx=4)
+    hzf = ttk.Frame(box); hzf.grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 0))
+    ttk.Label(hzf, text="Current horizon (.hrz)").pack(anchor="w")
+    hz_list = tk.Listbox(hzf, height=2, width=40); hz_list.pack(anchor="w")
+
+    def sync_current():
+        files = list(hz_list.get(0, "end"))
+        if files:
+            current_hz.set(files[0])
 
     def add_hz():
-        for f in filedialog.askopenfilenames(title="Horizon file(s)", filetypes=[("Horizon", "*.hrz *.txt *.csv"), ("All", "*.*")]):
+        for f in filedialog.askopenfilenames(title="Current horizon file", filetypes=[("Horizon", "*.hrz *.txt *.csv"), ("All", "*.*")]):
             if hz_list.size() < 2:
                 hz_list.insert("end", f)
-    ttk.Button(box, text="Add .hrz…", command=add_hz).grid(row=5, column=0, sticky="w", padx=4)
-    ttk.Button(box, text="Clear", command=lambda: hz_list.delete(0, "end")).grid(row=5, column=1, sticky="w")
-    ttk.Label(box, text="Two files (e.g. old + all-sky estimate): the strip spans both.", foreground="#666").grid(row=6, column=0, columnspan=3, sticky="w", padx=4)
+        sync_current()
+
+    def clear_hz():
+        files = list(hz_list.get(0, "end"))
+        hz_list.delete(0, "end")
+        if files and current_hz.get() == files[0]:
+            current_hz.set("")
+    hzb = ttk.Frame(hzf); hzb.pack(anchor="w", pady=2)
+    ttk.Button(hzb, text="Add current horizon…", command=add_hz).pack(side="left")
+    ttk.Button(hzb, text="Clear", command=clear_hz).pack(side="left", padx=4)
+    ttk.Label(hzf, text="The first file is your current horizon; it is also used on the Build tab.\n"
+                        "Optional second file (e.g. an all-sky estimate): the strip spans both.",
+              foreground="#666", justify="left").pack(anchor="w")
     labeled(box, 7, "Margin below (°)", var("margin_below", P.margin_below))
     labeled(box, 8, "Margin above (°)", var("margin_above", P.margin_above))
     labeled(box, 9, "Lowest altitude (°)", var("floor", P.floor))
@@ -1037,7 +1055,7 @@ def run_gui():
         p.orientation = V["orientation"].get(); p.mode = V["mode"].get()
         p.horizon_files = list(hz_list.get(0, "end"))
         if p.mode == "horizon" and not p.horizon_files and require_area:
-            raise ValueError("Add at least one horizon file, or choose 'Fixed altitude band'.")
+            raise ValueError("Add your current horizon file, or choose 'Fixed altitude band'.")
         return p
 
     def update_fov(*_):
@@ -1163,11 +1181,11 @@ def run_gui():
     ttk.Checkbutton(box, text="Cache reduced frames (fast re-runs)", variable=pv["cache"]).grid(row=10, column=0, columnspan=2, sticky="w")
     ttk.Button(box, text="Clear cache", command=lambda: messagebox.showinfo(
         APP_NAME, f"Removed {clear_cache(default_cache_dir())} cached frames.")).grid(row=10, column=2, sticky="w")
-    box = ttk.LabelFrame(pl, text="Compare / fill gaps with"); box.pack(fill="x", pady=3)
-    old_var = tk.StringVar(value="")
+    box = ttk.LabelFrame(pl, text="Current horizon (compare / fill gaps)"); box.pack(fill="x", pady=3)
+    old_var = current_hz   # filled automatically from the Plan tab
     ttk.Entry(box, textvariable=old_var, width=40).pack(side="left", padx=4)
-    ttk.Button(box, text="Old .hrz…", command=lambda: (old_var.set(filedialog.askopenfilename(
-        filetypes=[("Horizon", "*.hrz *.txt"), ("All", "*.*")]) or old_var.get()), redraw_all())).pack(side="left")
+    ttk.Button(box, text="Browse…", command=lambda: old_var.set(filedialog.askopenfilename(
+        filetypes=[("Horizon", "*.hrz *.txt"), ("All", "*.*")]) or old_var.get())).pack(side="left")
     bb = ttk.Frame(pl); bb.pack(fill="x", pady=4)
     pb = ttk.Progressbar(pl, length=340, maximum=1.0); pb.pack(fill="x", pady=4)
     status = ttk.Label(pl, text="Idle"); status.pack(anchor="w")
@@ -1257,7 +1275,7 @@ def run_gui():
             try:
                 return load_hrz(old_var.get())
             except Exception as e:
-                log(f"Old horizon: {e}")
+                log(f"Current horizon file: {e}")
         return None
 
     def base_det():
@@ -1402,6 +1420,7 @@ def run_gui():
         E[tgt][m] = np.asarray(d[tgt])[m]
         redraw_lines(); update_stats()
 
+    current_hz.trace_add("write", lambda *a: redraw_all())
     cv.bind("<ButtonPress-1>", lambda e: paint(e, True))
     cv.bind("<B1-Motion>", lambda e: paint(e, False))
     cv.bind("<ButtonRelease-1>", lambda e: update_stats())
@@ -1423,12 +1442,12 @@ def run_gui():
         op = old_pts()
         if op is not None:
             azf = np.arange(0, 360, 0.1); a_o = sky_area_sqdeg(azf, hrz_array(op, azf))
-            txt += (f"\nOld horizon {a_o:,.0f} sq.deg → with branches {a_b - a_o:+,.0f} "
+            txt += (f"\nCurrent horizon {a_o:,.0f} sq.deg → new with branches {a_b - a_o:+,.0f} "
                     f"({(a_b / a_o - 1) * 100:+.1f}%), solid {a_s - a_o:+,.0f} ({(a_s / a_o - 1) * 100:+.1f}%)")
         if not result["det"]["measured"].all():
             frac = result["det"]["measured"].mean() * 100
             txt += (f"\nOnly {frac:.0f}% of azimuths were imaged; the rest "
-                    + ("uses the old horizon." if op is not None else "is interpolated – load the old horizon to fill it."))
+                    + ("uses the current horizon." if op is not None else "is interpolated – load the current horizon to fill it."))
         stats_lbl.config(text=txt)
 
     def report_uncertain():
@@ -1443,26 +1462,17 @@ def run_gui():
     def save_outputs():
         if E["solid"] is None:
             messagebox.showerror(APP_NAME, "Build the horizon first."); return
-        d = filedialog.askdirectory(title="Folder for results")
-        if not d:
-            return
-        base = os.path.join(d, time.strftime("horizon_%Y-%m-%d"))
+        which = save_which.get()
         az, s_, b_ = final_lines()
-        write_hrz(base + ".hrz", az, s_)
-        write_hrz(base + "_with_branches.hrz", az, b_)
-        lines = [("Solid obstructions", az, s_, (230, 40, 30)), ("Incl. thin branches", az, b_, (0, 200, 240))]
-        op = old_pts()
-        if op is not None:
-            azf = np.arange(0, 360, 0.25); lines.append(("Old horizon", azf, hrz_array(op, azf), (240, 200, 0)))
-        render_mosaic(result["mos"], lines, scale=2).save(base + "_mosaic.png")
-        with open(base + "_details.json", "w") as f:
-            side, steep = side_settings()
-            json.dump(dict(rotation_offset=result["K"], latitude=result["lat"], edited=bool(E["undo"]),
-                           side_margin_deg=side, steep_slope=steep,
-                           details=result["det"]["details"]), f, indent=1)
-        messagebox.showinfo(APP_NAME, f"Saved to {d}:\n{os.path.basename(base)}.hrz\n"
-                                      f"{os.path.basename(base)}_with_branches.hrz\n"
-                                      f"{os.path.basename(base)}_mosaic.png\n{os.path.basename(base)}_details.json")
+        vals = b_ if which == "with branches" else s_
+        name = time.strftime("horizon_%Y-%m-%d") + ("_with_branches" if which == "with branches" else "") + ".hrz"
+        f = filedialog.asksaveasfilename(title="Save horizon file", defaultextension=".hrz", initialfile=name,
+                                         filetypes=[("NINA horizon", "*.hrz"), ("All", "*.*")])
+        if not f:
+            return
+        write_hrz(f, az, vals)
+        messagebox.showinfo(APP_NAME, f"Saved the {which} horizon:\n{f}\n\n"
+                                      "In NINA: Options → General → Astrometry → Horizon.")
 
     def plan_fill():
         if "det" not in result:
@@ -1489,7 +1499,11 @@ def run_gui():
     ttk.Button(bb, text="Build mosaic & horizon", command=start).grid(row=0, column=0, padx=2, pady=2, sticky="ew")
     ttk.Button(bb, text="Re-detect (new thresholds)", command=redetect).grid(row=0, column=1, padx=2, pady=2, sticky="ew")
     ttk.Button(bb, text="Plan fill-in frames…", command=plan_fill).grid(row=1, column=0, padx=2, pady=2, sticky="ew")
-    ttk.Button(bb, text="Save results…", command=save_outputs).grid(row=1, column=1, padx=2, pady=2, sticky="ew")
+    sv = ttk.Frame(bb); sv.grid(row=1, column=1, padx=2, pady=2, sticky="ew")
+    save_which = tk.StringVar(value="solid")
+    ttk.Combobox(sv, textvariable=save_which, values=["solid", "with branches"], width=12,
+                 state="readonly").pack(side="left")
+    ttk.Button(sv, text="Save horizon file…", command=save_outputs).pack(side="left", padx=2)
 
     def poll():
         try:
@@ -1522,8 +1536,9 @@ HELP_TEXT = """HORIZON MAPPER FOR NINA
 WORKFLOW
 1. Plan sequence
    • Enter camera/telescope (or 'Read from a FITS file…'). The field of view is computed.
-   • Choose the area: a fixed altitude band, or a strip around one or two horizon files
-     (e.g. your current horizon and a rough estimate). The strip spans both, plus margins.
+   • Choose the area: a fixed altitude band, or a strip around your current horizon file
+     (optionally plus a second estimate, e.g. from an all-sky camera); the strip spans both,
+     plus margins. The current horizon is also filled in on the Build tab for comparison.
    • 'Lowest altitude' keeps frames (and the sun) out of the low sky.
    • Rotator: keeps every frame level with the horizon, so overlap can be ~10 %.
      Offset = sky position angle − mechanical angle (from NINA's rotator panel after a
@@ -1561,7 +1576,8 @@ WORKFLOW
      Ctrl+Z to undo. Zoom and scroll to work precisely. Edits are used when saving.
    • Reduced frames are cached (in %LOCALAPPDATA%\\HorizonMapper\\cache), so building again
      – e.g. after adding fill-in frames – only reads the new files. 'Clear cache' frees the space.
-   • 'Save results…' writes two .hrz files, a mosaic PNG and a details JSON.
+   • 'Save horizon file…' saves one NINA .hrz file: choose 'solid' or 'with branches' next to
+     the button. Edits and the side margin are included.
      In NINA: Options → General → Astrometry → Horizon file.
 
 NOTES
