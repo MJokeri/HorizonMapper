@@ -1,0 +1,58 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip numpy pillow pyinstaller
+
+      - name: Smoke test (command line)
+        run: |
+          python horizon_mapper.py plan --band 20 45 -o smoke.json
+          python horizon_mapper.py plan --band 20 45 --template -o smoke_tpl.json
+          python -c "import json; k=chr(36)+'values'; d=json.load(open('smoke.json')); assert d['Items'][k][1]['Items'][k], 'empty plan'"
+
+      - name: Build exe
+        run: pyinstaller --noconfirm --onefile --windowed --name HorizonMapper horizon_mapper.py
+
+      - name: Check exe runs (command line mode)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\HorizonMapper.exe -ArgumentList 'plan','--band','20','45','-o','exe_smoke.json' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "exe exited with $($p.ExitCode)" }
+          if (-not (Test-Path exe_smoke.json)) { throw "exe did not write the plan" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item dist\HorizonMapper.exe, README.md, LICENSE package\
+          Compress-Archive -Path package\* -DestinationPath HorizonMapper-windows.zip -Force
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: HorizonMapper-windows
+          path: HorizonMapper-windows.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: HorizonMapper-windows.zip
