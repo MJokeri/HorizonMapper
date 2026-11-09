@@ -37,6 +37,9 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   - Being off by 180° doesn't matter.
 - **Preview plan**, then **Save NINA sequence…**. Open the file in the Advanced Sequencer with
   **Load sequence**. Templates go into NINA's template folder.
+  - **Show shooting order** (on by default) draws the order over the preview: a path from green
+    (first frame) through yellow to magenta (last), with arrows, the first frame number of each row,
+    Start/End markers and the meridian flip.
 - **Conditions:** even overcast daylight gives the sharpest silhouettes. Take one test frame first;
   open sky should read about 10,000–30,000 ADU.
 
@@ -59,9 +62,14 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   again. Thanks to the cache, only the new frames are read.
   - **Fill-in: extra frames at steep edges** (below the button): when a fill-in area ends at a steep
     rise or drop of the measured horizon (steeper than **steep = more than**, default 3°/°), that side
-    is extended by this many frame widths and the area is made tall enough to cover the whole jump.
-    Default 1, 0 = off. Areas widened this way are labelled "+ steep edge". CLI:
+    is extended by this many frame widths, keeping its altitude range (the main run already imaged
+    the rest of the jump). Default 1, 0 = off. Areas widened this way are labelled "+ steep edge".
+    Frames shared by overlapping areas are shot only once. CLI:
     `build … --fillin FILE.json --fillin-edge-frames N --fillin-edge-slope S`.
+- **Show fill-in frames** (toolbar above the image) draws the fill-in areas (dashed magenta), their
+  frames (orange) and the shooting order: a path from green (first) to magenta (last), with the first
+  frame of each row numbered (every frame at zoom 20). It updates live as you edit the lines or change
+  the fill-in settings, and switches on by itself when you click **Plan fill-in frames…**.
 - **Re-detect** applies new thresholds instantly, without re-reading the frames.
 - **Side margin at steep edges** (in the toolbar above the image): where the horizon rises or drops steeply (the side of a tree, the
   end of a roof), the higher value is extended this many degrees sideways. That stops NINA
