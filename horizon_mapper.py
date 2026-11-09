@@ -12,7 +12,8 @@ Requires: Python 3.9+, numpy, Pillow   (pip install numpy pillow)
 Run:      python horizon_mapper.py      (GUI)
           python horizon_mapper.py --help (command line)
 """
-import argparse, json, math, os, queue, sys, threading, time, traceback
+import argparse, hashlib, json, math, os, queue, sys, threading, time, traceback
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 try:
@@ -312,6 +313,13 @@ def make_plan(p):
         g = _grid(p, fw, fh, lim)
         options.append((sum(len(z) for _, z in g), o, g, fw, fh))
     n, orient, grid, fw, fh = min(options, key=lambda t: t[0])
+    frames, rot_moves = assign_rotator(p, grid, orient)
+    secs = len(frames) * (p.sec_per_frame + p.exposure) + rot_moves * p.sec_per_rot
+    return dict(grid=grid, frames=frames, orientation=orient, fw=fw, fh=fh, rot_moves=rot_moves,
+                seconds=secs, lim=lim)
+
+
+def assign_rotator(p, grid, orient="landscape"):
     frames = []; current = None; rot_moves = 0
     for alt, azs in grid:
         for az in azs:
@@ -324,9 +332,72 @@ def make_plan(p):
                 if current is None or abs(tgt - current) > p.rot_tolerance:
                     rot = tgt; current = tgt; rot_moves += 1
             frames.append((alt, az, rot))
+    return frames, rot_moves
+
+
+def fillin_boxes(det, extra_below=8.0, extra_above=6.0, floor=0.0, ceiling=85.0, pad_az=1.0):
+    """Turn 'clear to bottom' / 'blocked to top' azimuths into (az0, az1, alt0, alt1, label) boxes."""
+    items = sorted((o["az"], o["flag"], o["lo"], o["hi"]) for o in det["details"]
+                   if o["flag"] in ("clear_to_bottom", "blocked_to_top"))
+    groups = []
+    for az, flag, lo, hi in items:
+        if groups and groups[-1]["flag"] == flag and az - groups[-1]["az1"] <= 1.01:
+            g = groups[-1]; g["az1"] = az; g["lo"] = min(g["lo"], lo); g["hi"] = max(g["hi"], hi)
+        else:
+            groups.append(dict(flag=flag, az0=az, az1=az, lo=lo, hi=hi))
+    # merge a group that wraps over 0/360
+    if len(groups) > 1 and groups[0]["flag"] == groups[-1]["flag"] and groups[0]["az0"] <= 0.01 \
+            and groups[-1]["az1"] >= 359.0:
+        g = groups.pop(); groups[0]["az0"] = g["az0"] - 360
+        groups[0]["lo"] = min(groups[0]["lo"], g["lo"]); groups[0]["hi"] = max(groups[0]["hi"], g["hi"])
+    merged = []
+    for g in groups:   # merge areas whose padded ranges touch
+        if merged and merged[-1]["flag"] == g["flag"] and g["az0"] - merged[-1]["az1"] <= 2 * pad_az + 0.5:
+            m = merged[-1]; m["az1"] = g["az1"]; m["lo"] = min(m["lo"], g["lo"]); m["hi"] = max(m["hi"], g["hi"])
+        else:
+            merged.append(dict(g))
+    boxes = []
+    for g in merged:
+        a0, a1 = g["az0"] - pad_az, g["az1"] + 0.5 + pad_az
+        if g["flag"] == "clear_to_bottom":
+            h0, h1 = max(floor, g["lo"] - extra_below), g["lo"] + 1.0
+            label = f"Az {a0 % 360:.0f}-{a1 % 360:.0f} below {g['lo']:.0f}°"
+        else:
+            h0, h1 = g["hi"] - 1.0, min(ceiling, g["hi"] + extra_above)
+            label = f"Az {a0 % 360:.0f}-{a1 % 360:.0f} above {g['hi']:.0f}°"
+        if h1 > h0:
+            boxes.append((a0, a1, h0, h1, label))
+    return boxes
+
+
+def plan_fillin(p, boxes):
+    """Plan frames covering the given boxes (az0, az1, alt0, alt1, label)."""
+    w, h = p.fov
+    fw, fh = _effective_fov(w, h, p.rot_tolerance) if p.rotator else (w, h)
+    ov = p.overlap
+    east = [b for b in boxes if ((b[0] + b[1]) / 2) % 360 < 180]
+    west = [b for b in boxes if ((b[0] + b[1]) / 2) % 360 >= 180]
+    order = sorted(east, key=lambda b: (b[0] + b[1]) / 2 % 360) + \
+        sorted(west, key=lambda b: (b[0] + b[1]) / 2 % 360) if p.meridian_split else \
+        sorted(boxes, key=lambda b: (b[0] + b[1]) / 2 % 360)
+    grid = []; labels = []
+    for a0, a1, h0, h1, label in order:
+        span_h = h1 - h0
+        nr = 1 if span_h <= fh else math.ceil((span_h - fh) / (fh * (1 - ov))) + 1
+        rows = [(h0 + h1) / 2] if nr == 1 else [h0 + fh / 2 + i * (span_h - fh) / (nr - 1) for i in range(nr)]
+        for ri, alt in enumerate(rows):
+            cov = fw / max(math.cos(math.radians(max(alt - fh / 2, 0))), 1e-3)
+            span_a = a1 - a0
+            n = 1 if span_a <= cov else math.ceil((span_a - cov) / (cov * (1 - ov))) + 1
+            azs = [(a0 + a1) / 2] if n == 1 else [a0 + cov / 2 + k * (span_a - cov) / (n - 1) for k in range(n)]
+            azs = [z % 360 for z in azs]
+            if ri % 2:
+                azs.reverse()
+            grid.append((alt, azs)); labels.append(label)
+    frames, rot_moves = assign_rotator(p, grid, "landscape")
     secs = len(frames) * (p.sec_per_frame + p.exposure) + rot_moves * p.sec_per_rot
-    return dict(grid=grid, frames=frames, orientation=orient, fw=fw, fh=fh, rot_moves=rot_moves,
-                seconds=secs, lim=lim)
+    return dict(grid=grid, frames=frames, orientation="landscape", fw=fw, fh=fh, rot_moves=rot_moves,
+                seconds=secs, lim=lambda az: (0, 0), labels=labels)
 
 
 def plan_to_nina(p, plan, name="Horizon mapping"):
@@ -343,10 +414,12 @@ def plan_to_nina(p, plan, name="Horizon mapping"):
     if p.unpark:
         start["Items"]["$values"].append(_item(ids, "Telescope.UnparkScope", sid))
     fi = 0
-    for alt, azs in plan["grid"]:
+    for gi, (alt, azs) in enumerate(plan["grid"]):
         side = "E" if azs and azs[0] < 180 else "W"
-        row, rowid = _container(ids, "SequentialContainer",
-                                f"Alt {alt:.1f}° {side} ({len(azs)} frames)", bid, not p.collapsed)
+        title = f"Alt {alt:.1f}° {side} ({len(azs)} frames)"
+        if plan.get("labels"):
+            title = f"{plan['labels'][gi]} – " + title
+        row, rowid = _container(ids, "SequentialContainer", title, bid, not p.collapsed)
         for az in azs:
             a, z, rot = plan["frames"][fi]; fi += 1
             row["Items"]["$values"].append(_slew(ids, rowid, z, a))
@@ -470,35 +543,91 @@ def sample_frame(img, fr, delta, scale, AZ, ALT):
     return out
 
 
-def load_frames(paths, log, progress, bias=None):
-    frames = []; skipped = 0; lat = None
-    for i, pth in enumerate(paths):
+def default_cache_dir():
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "HorizonMapper", "cache")
+
+
+def _cache_key(path):
+    st = os.stat(path)
+    return hashlib.sha1(f"{os.path.abspath(path)}|{st.st_size}|{st.st_mtime_ns}|v1".encode()).hexdigest()
+
+
+def _load_one(path, cache_dir):
+    """Return (meta dict, reduced image) or (None, reason). Uses/creates a cache entry."""
+    cf = None
+    if cache_dir:
         try:
-            h, a = read_fits(pth)
-            if "CENTALT" not in h or "CENTAZ" not in h:
-                skipped += 1; continue
-            if str(h.get("IMAGETYP", "LIGHT")).upper() not in ("LIGHT", "SNAPSHOT"):
-                skipped += 1; continue
-            bayer = bool(str(h.get("BAYERPAT", "")).strip())
-            img, k = reduce_frame(a, bayer)
-            fr = Frame(); fr.path = pth
-            fr.alt = float(h["CENTALT"]); fr.az = float(h["CENTAZ"])
-            fr.rot = float(h.get("ROTATOR", h.get("ROTATANG", 0.0)) or 0.0)
-            fr.pier = h.get("PIERSIDE", "")
-            fr.t = h.get("DATE-LOC", "")
-            pix = float(h.get("XPIXSZ", 0) or 0); foc = float(h.get("FOCALLEN", 0) or 0)
-            if pix <= 0 or foc <= 0:
-                raise ValueError("XPIXSZ/FOCALLEN missing in header")
-            fr.scale = 206.265 * pix / foc / 3600.0 * k        # deg per reduced pixel
-            fr.img = img
-            if lat is None and "SITELAT" in h:
-                lat = float(h["SITELAT"])
-            frames.append(fr)
+            cf = os.path.join(cache_dir, _cache_key(path) + ".npz")
+            if os.path.exists(cf):
+                z = np.load(cf, allow_pickle=False)
+                meta = json.loads(str(z["meta"]))
+                return meta, z["img"].astype(np.float32)
+        except Exception:
+            cf = None
+    h, a = read_fits(path)
+    if "CENTALT" not in h or "CENTAZ" not in h:
+        return None, "no CENTALT/CENTAZ (mount not connected?)"
+    if str(h.get("IMAGETYP", "LIGHT")).upper() not in ("LIGHT", "SNAPSHOT"):
+        return None, f"image type {h.get('IMAGETYP')}"
+    pix = float(h.get("XPIXSZ", 0) or 0); foc = float(h.get("FOCALLEN", 0) or 0)
+    if pix <= 0 or foc <= 0:
+        return None, "XPIXSZ/FOCALLEN missing in header"
+    bayer = bool(str(h.get("BAYERPAT", "")).strip())
+    img, k = reduce_frame(a, bayer)
+    meta = dict(alt=float(h["CENTALT"]), az=float(h["CENTAZ"]),
+                rot=float(h.get("ROTATOR", h.get("ROTATANG", 0.0)) or 0.0),
+                pier=str(h.get("PIERSIDE", "")), t=str(h.get("DATE-LOC", "")),
+                scale=206.265 * pix / foc / 3600.0 * k,
+                lat=float(h["SITELAT"]) if "SITELAT" in h else None)
+    if cf:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            tmp = cf + ".tmp.npz"
+            np.savez(tmp, img=np.clip(img, -65000, 65000).astype(np.float16), meta=json.dumps(meta))
+            os.replace(tmp, cf)
+        except Exception:
+            pass
+    return meta, img
+
+
+def load_frames(paths, log, progress, bias=None, cache_dir=None, workers=None):
+    """Read and reduce all frames (in parallel, using the cache when possible)."""
+    frames = []; skipped = 0; lat = None; done = 0; cached_before = 0
+    if cache_dir:
+        try:
+            names = set(os.listdir(cache_dir))
+            cached_before = sum(1 for p in paths if _cache_key(p) + ".npz" in names)
+        except Exception:
+            cached_before = 0
+    workers = workers or min(8, (os.cpu_count() or 4))
+    results = [None] * len(paths)
+
+    def job(i):
+        try:
+            return i, _load_one(paths[i], cache_dir)
         except Exception as e:
+            return i, (None, str(e))
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for i, res in ex.map(job, range(len(paths))):
+            results[i] = res; done += 1
+            if done % 20 == 0 or done == len(paths):
+                progress(done / max(len(paths), 1) * 0.35, f"Reading frames {done}/{len(paths)}")
+    for pth, (meta, img) in zip(paths, results):
+        if meta is None:
             skipped += 1
-            log(f"  skipped {os.path.basename(pth)}: {e}")
-        if i % 20 == 0:
-            progress(i / max(len(paths), 1) * 0.35, f"Reading frames {i}/{len(paths)}")
+            log(f"  skipped {os.path.basename(pth)}: {img}")
+            continue
+        fr = Frame(); fr.path = pth
+        fr.alt, fr.az, fr.rot, fr.pier, fr.t, fr.scale = (meta["alt"], meta["az"], meta["rot"],
+                                                          meta["pier"], meta["t"], meta["scale"])
+        fr.img = img
+        if lat is None and meta.get("lat") is not None:
+            lat = meta["lat"]
+        frames.append(fr)
+    if cache_dir and cached_before:
+        log(f"{cached_before} of {len(paths)} frames came from the cache")
     # bias: lowest percentile over all frames (dark obstructions approach the bias)
     if frames:
         b = bias if bias is not None else min(float(np.percentile(f.img, 0.1)) for f in frames) - 5
@@ -509,6 +638,18 @@ def load_frames(paths, log, progress, bias=None):
             log("  Warning: no dark frames found, so the automatic bias level may be too high. "
                 "Enter the camera's bias level (e.g. ~500 ADU for offset 50) in Settings.")
     return frames, lat
+
+
+def clear_cache(cache_dir):
+    n = 0
+    if cache_dir and os.path.isdir(cache_dir):
+        for fn in os.listdir(cache_dir):
+            if fn.endswith(".npz"):
+                try:
+                    os.remove(os.path.join(cache_dir, fn)); n += 1
+                except OSError:
+                    pass
+    return n
 
 
 def _highpass(img):
@@ -676,6 +817,35 @@ def detect_horizon(mos, solid_frac=0.6, thin_frac=0.85, step=0.5, max_branch_gap
     return dict(az=az, solid=solid_f, branches=branches, details=out, uncertain=unsure, measured=measured)
 
 
+def widen_steep_edges(az, alt, side_deg=0.0, steep_slope=3.0):
+    """Extend the horizon sideways at steep edges.
+
+    Where the horizon rises or falls faster than `steep_slope` degrees of altitude per degree of
+    azimuth, the higher side is extended `side_deg` degrees sideways (a local maximum filter).
+    Gentle slopes and flat stretches are left unchanged.
+    """
+    alt = np.asarray(alt, float)
+    if side_deg <= 0 or len(alt) < 3:
+        return alt.copy()
+    az = np.asarray(az, float)
+    step = float(np.median(np.diff(np.sort(az)))) or 0.5
+    k = max(1, int(round(side_deg / step)))
+    # steep segments between neighbouring samples (wrap-around included)
+    slope = np.abs(np.roll(alt, -1) - alt) / step
+    steep = slope >= steep_slope
+    out = alt.copy()
+    for i in np.where(steep)[0]:
+        j = (i + 1) % len(alt)
+        hi_idx, hi = (i, alt[i]) if alt[i] >= alt[j] else (j, alt[j])
+        # spread the higher value k samples into the lower side
+        direction = 1 if hi_idx == i else -1
+        for d in range(1, k + 1):
+            n = (hi_idx + direction * d) % len(alt)
+            if out[n] < hi:
+                out[n] = hi
+    return out
+
+
 def fill_unmeasured(det, old_pts):
     """Use the old horizon wherever nothing was imaged (partial-sky runs)."""
     if old_pts is None or det["measured"].all():
@@ -769,6 +939,7 @@ def run_gui():
     right = ttk.Frame(plan_tab); right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
     P = PlanParams()
     V = {}
+    current_hz = tk.StringVar(value="")   # shared: Plan tab horizon file -> Build tab comparison
 
     def var(name, value, kind=tk.StringVar):
         V[name] = kind(value=value); return V[name]
@@ -802,18 +973,35 @@ def run_gui():
     labeled(box, 0, "Latitude (°)", var("lat", P.lat))
     V["mode"] = tk.StringVar(value="horizon")
     ttk.Radiobutton(box, text="Fixed altitude band", variable=V["mode"], value="band").grid(row=1, column=0, sticky="w")
-    ttk.Radiobutton(box, text="Around horizon file(s)", variable=V["mode"], value="horizon").grid(row=1, column=1, sticky="w")
+    ttk.Radiobutton(box, text="Around current horizon", variable=V["mode"], value="horizon").grid(row=1, column=1, sticky="w")
     labeled(box, 2, "Band: alt min (°)", var("alt_min", P.alt_min))
     labeled(box, 3, "Band: alt max (°)", var("alt_max", P.alt_max))
-    hz_list = tk.Listbox(box, height=2, width=34); hz_list.grid(row=4, column=0, columnspan=2, sticky="w", padx=4)
+    hzf = ttk.Frame(box); hzf.grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 0))
+    ttk.Label(hzf, text="Current horizon (.hrz)").pack(anchor="w")
+    hz_list = tk.Listbox(hzf, height=2, width=40); hz_list.pack(anchor="w")
+
+    def sync_current():
+        files = list(hz_list.get(0, "end"))
+        if files:
+            current_hz.set(files[0])
 
     def add_hz():
-        for f in filedialog.askopenfilenames(title="Horizon file(s)", filetypes=[("Horizon", "*.hrz *.txt *.csv"), ("All", "*.*")]):
+        for f in filedialog.askopenfilenames(title="Current horizon file", filetypes=[("Horizon", "*.hrz *.txt *.csv"), ("All", "*.*")]):
             if hz_list.size() < 2:
                 hz_list.insert("end", f)
-    ttk.Button(box, text="Add .hrz…", command=add_hz).grid(row=5, column=0, sticky="w", padx=4)
-    ttk.Button(box, text="Clear", command=lambda: hz_list.delete(0, "end")).grid(row=5, column=1, sticky="w")
-    ttk.Label(box, text="Two files (e.g. old + all-sky estimate): the strip spans both.", foreground="#666").grid(row=6, column=0, columnspan=3, sticky="w", padx=4)
+        sync_current()
+
+    def clear_hz():
+        files = list(hz_list.get(0, "end"))
+        hz_list.delete(0, "end")
+        if files and current_hz.get() == files[0]:
+            current_hz.set("")
+    hzb = ttk.Frame(hzf); hzb.pack(anchor="w", pady=2)
+    ttk.Button(hzb, text="Add current horizon…", command=add_hz).pack(side="left")
+    ttk.Button(hzb, text="Clear", command=clear_hz).pack(side="left", padx=4)
+    ttk.Label(hzf, text="The first file is your current horizon; it is also used on the Build tab.\n"
+                        "Optional second file (e.g. an all-sky estimate): the strip spans both.",
+              foreground="#666", justify="left").pack(anchor="w")
     labeled(box, 7, "Margin below (°)", var("margin_below", P.margin_below))
     labeled(box, 8, "Margin above (°)", var("margin_above", P.margin_above))
     labeled(box, 9, "Lowest altitude (°)", var("floor", P.floor))
@@ -851,7 +1039,7 @@ def run_gui():
     canvas = tk.Canvas(right, bg="white", height=560); canvas.pack(fill="both", expand=True)
     state = {"plan": None, "params": None}
 
-    def collect():
+    def collect(require_area=True):
         p = PlanParams()
         num = ["sensor_w_px", "sensor_h_px", "pixel_um", "focal_mm", "lat", "alt_min", "alt_max", "margin_below",
                "margin_above", "floor", "az_start", "az_end", "overlap", "rot_offset", "rot_tolerance", "exposure",
@@ -866,8 +1054,8 @@ def run_gui():
             setattr(p, k, bool(V[k].get()))
         p.orientation = V["orientation"].get(); p.mode = V["mode"].get()
         p.horizon_files = list(hz_list.get(0, "end"))
-        if p.mode == "horizon" and not p.horizon_files:
-            raise ValueError("Add at least one horizon file, or choose 'Fixed altitude band'.")
+        if p.mode == "horizon" and not p.horizon_files and require_area:
+            raise ValueError("Add your current horizon file, or choose 'Fixed altitude band'.")
         return p
 
     def update_fov(*_):
@@ -967,7 +1155,7 @@ def run_gui():
     pl = ttk.Frame(proc); pl.pack(side="left", fill="y", padx=6, pady=6)
     pr = ttk.Frame(proc); pr.pack(side="left", fill="both", expand=True, padx=6, pady=6)
     box = ttk.LabelFrame(pl, text="FITS folders (searched recursively)"); box.pack(fill="x", pady=3)
-    folders = tk.Listbox(box, height=6, width=48); folders.pack(fill="x", padx=4, pady=2)
+    folders = tk.Listbox(box, height=5, width=48); folders.pack(fill="x", padx=4, pady=2)
     fb = ttk.Frame(box); fb.pack(fill="x")
     ttk.Button(fb, text="Add folder…", command=lambda: (lambda d: d and folders.insert("end", d))(
         filedialog.askdirectory())).pack(side="left", padx=3)
@@ -985,17 +1173,50 @@ def run_gui():
     labeled(box, 5, "Solid: darker than", pvar("solid", "0.60"), tip="× sky")
     labeled(box, 6, "Branches: darker than", pvar("thin", "0.85"), tip="× sky")
     labeled(box, 7, "Bias level (blank = auto)", pvar("bias", ""))
-    box = ttk.LabelFrame(pl, text="Compare"); box.pack(fill="x", pady=3)
-    old_var = tk.StringVar(value="")
+    labeled(box, 8, "Side margin at steep edges (°)", pvar("side", "0"), tip="0 = off")
+    labeled(box, 9, "Steep = steeper than (°/°)", pvar("steep", "3"), tip="alt per az")
+    for k in ("side", "steep"):
+        pv[k].trace_add("write", lambda *a: (redraw_lines(), update_stats()) if E.get("solid") is not None else None)
+    pv["cache"] = tk.BooleanVar(value=True)
+    ttk.Checkbutton(box, text="Cache reduced frames (fast re-runs)", variable=pv["cache"]).grid(row=10, column=0, columnspan=2, sticky="w")
+    ttk.Button(box, text="Clear cache", command=lambda: messagebox.showinfo(
+        APP_NAME, f"Removed {clear_cache(default_cache_dir())} cached frames.")).grid(row=10, column=2, sticky="w")
+    box = ttk.LabelFrame(pl, text="Current horizon (compare / fill gaps)"); box.pack(fill="x", pady=3)
+    old_var = current_hz   # filled automatically from the Plan tab
     ttk.Entry(box, textvariable=old_var, width=40).pack(side="left", padx=4)
-    ttk.Button(box, text="Old .hrz…", command=lambda: old_var.set(filedialog.askopenfilename(
+    ttk.Button(box, text="Browse…", command=lambda: old_var.set(filedialog.askopenfilename(
         filetypes=[("Horizon", "*.hrz *.txt"), ("All", "*.*")]) or old_var.get())).pack(side="left")
+    bb = ttk.Frame(pl); bb.pack(fill="x", pady=4)
     pb = ttk.Progressbar(pl, length=340, maximum=1.0); pb.pack(fill="x", pady=4)
     status = ttk.Label(pl, text="Idle"); status.pack(anchor="w")
-    logbox = tk.Text(pl, height=14, width=58, wrap="word"); logbox.pack(fill="both", expand=True, pady=3)
-    img_lbl = ttk.Label(pr); img_lbl.pack(fill="both", expand=True)
-    stats_lbl = ttk.Label(pr, text="", justify="left"); stats_lbl.pack(anchor="w")
+    logbox = tk.Text(pl, height=10, width=58, wrap="word"); logbox.pack(fill="both", expand=True, pady=3)
+
+    # ---- editor (right side)
+    tb = ttk.Frame(pr); tb.pack(fill="x")
+    ed = {"target": tk.StringVar(value="none"), "brush": tk.StringVar(value="1.0"), "zoom": tk.StringVar(value="6")}
+    ttk.Label(tb, text="Edit:").pack(side="left")
+    for txt, val in (("off", "none"), ("solid line", "solid"), ("branches line", "branches")):
+        ttk.Radiobutton(tb, text=txt, variable=ed["target"], value=val).pack(side="left", padx=2)
+    ttk.Label(tb, text="   brush width (°)").pack(side="left")
+    ttk.Entry(tb, textvariable=ed["brush"], width=5).pack(side="left")
+    ttk.Label(tb, text="   zoom (px/°)").pack(side="left")
+    zc = ttk.Combobox(tb, textvariable=ed["zoom"], values=["3", "6", "12", "20"], width=4, state="readonly")
+    zc.pack(side="left")
+    ttk.Button(tb, text="Undo", command=lambda: undo()).pack(side="left", padx=6)
+    ttk.Button(tb, text="Reset edits", command=lambda: reset_edits()).pack(side="left")
+    ttk.Label(pr, text="Left-drag on the image to redraw the selected line · right-click: restore detected value · Ctrl+Z: undo",
+              foreground="#666").pack(anchor="w")
+    cf = ttk.Frame(pr); cf.pack(fill="both", expand=True)
+    cv = tk.Canvas(cf, bg="#1c1c24", highlightthickness=0)
+    hs = ttk.Scrollbar(cf, orient="horizontal", command=cv.xview)
+    vs = ttk.Scrollbar(cf, orient="vertical", command=cv.yview)
+    cv.configure(xscrollcommand=hs.set, yscrollcommand=vs.set)
+    cv.grid(row=0, column=0, sticky="nsew"); vs.grid(row=0, column=1, sticky="ns"); hs.grid(row=1, column=0, sticky="ew")
+    cf.rowconfigure(0, weight=1); cf.columnconfigure(0, weight=1)
+    stats_lbl = ttk.Label(pr, text="", justify="left"); stats_lbl.pack(anchor="w", pady=3)
     q = queue.Queue(); result = {}
+    E = {"solid": None, "branches": None, "undo": [], "bg": {}, "items": {}}
+    MARG = 40
 
     def log(m): q.put(("log", m))
     def progress(f, m): q.put(("prog", (f, m)))
@@ -1004,7 +1225,8 @@ def run_gui():
         try:
             paths = find_fits(opts["folders"])
             log(f"Found {len(paths)} FITS files")
-            frames, lat_f = load_frames(paths, log, progress, opts["bias"])
+            frames, lat_f = load_frames(paths, log, progress, opts["bias"],
+                                        default_cache_dir() if opts["cache"] else None)
             if not frames:
                 raise RuntimeError("No frames with CENTALT/CENTAZ found.")
             lat = opts["lat"] if opts["lat"] is not None else lat_f
@@ -1017,96 +1239,271 @@ def run_gui():
             mos = build_mosaic(frames, lat, K, opts["res"], log, progress)
             progress(0.88, "Detecting horizon")
             det = detect_horizon(mos, opts["solid"], opts["thin"], log=log)
-            if det["uncertain"]:
-                log("Check these azimuths (edge of imaged area): " +
-                    ", ".join(f"{a:.1f}° {f.replace('_', ' ')}" for a, f in det["uncertain"][:30]))
             q.put(("done", dict(mos=mos, det=det, K=K, lat=lat, n=len(frames))))
         except Exception as e:
             q.put(("error", f"{e}\n{traceback.format_exc()}"))
+
+    def read_opts():
+        return dict(folders=list(folders.get(0, "end")), K=float(pv["K"].get()), auto=pv["auto"].get(),
+                    full=pv["full"].get(), lat=float(pv["lat"].get()) if pv["lat"].get().strip() else None,
+                    res=float(pv["res"].get()), solid=float(pv["solid"].get()), thin=float(pv["thin"].get()),
+                    bias=float(pv["bias"].get()) if pv["bias"].get().strip() else None, cache=pv["cache"].get())
 
     def start():
         if not folders.size():
             messagebox.showerror(APP_NAME, "Add at least one folder with FITS frames."); return
         try:
-            opts = dict(folders=list(folders.get(0, "end")), K=float(pv["K"].get()), auto=pv["auto"].get(),
-                        full=pv["full"].get(), lat=float(pv["lat"].get()) if pv["lat"].get().strip() else None,
-                        res=float(pv["res"].get()), solid=float(pv["solid"].get()), thin=float(pv["thin"].get()),
-                        bias=float(pv["bias"].get()) if pv["bias"].get().strip() else None)
+            opts = read_opts()
         except ValueError as e:
             messagebox.showerror(APP_NAME, f"Check settings: {e}"); return
-        logbox.delete("1.0", "end"); result.clear()
+        logbox.delete("1.0", "end"); result.clear(); E["bg"].clear()
         threading.Thread(target=worker, args=(opts,), daemon=True).start()
 
-    def current_det():
-        det = result["det"]
+    def redetect():
+        if "mos" not in result:
+            messagebox.showerror(APP_NAME, "Build the mosaic first."); return
+        try:
+            o = read_opts()
+        except ValueError as e:
+            messagebox.showerror(APP_NAME, f"Check settings: {e}"); return
+        result["det"] = detect_horizon(result["mos"], o["solid"], o["thin"], log=log)
+        log(f"Re-detected with solid {o['solid']:.2f}, branches {o['thin']:.2f}")
+        reset_edits(); report_uncertain()
+
+    def old_pts():
         if old_var.get().strip():
             try:
-                det = fill_unmeasured(det, load_hrz(old_var.get()))
+                return load_hrz(old_var.get())
             except Exception as e:
-                log(f"Old horizon: {e}")
-        return det
+                log(f"Current horizon file: {e}")
+        return None
 
-    def lines_for_display():
-        det = current_det()
-        L = [("Solid obstructions", det["az"], det["solid"], (230, 40, 30)),
-             ("Incl. thin branches", det["az"], det["branches"], (0, 200, 240))]
-        if old_var.get().strip():
-            try:
-                pts = load_hrz(old_var.get()); az = np.arange(0, 360, 0.25)
-                L.append(("Old horizon", az, hrz_array(pts, az), (240, 200, 0)))
-            except Exception as e:
-                log(f"Old horizon: {e}")
-        return L
+    def base_det():
+        return fill_unmeasured(result["det"], old_pts())
 
-    def show_result():
+    def reset_edits():
         if "det" not in result:
             return
-        im = render_mosaic(result["mos"], lines_for_display(), scale=2)
-        result["image"] = im
-        if ImageTk:
-            w = max(pr.winfo_width() - 10, 600)
-            disp = im.resize((w, int(im.height * w / im.width)))
-            result["tk"] = ImageTk.PhotoImage(disp); img_lbl.config(image=result["tk"])
-        det = current_det()
-        a_s = sky_area_sqdeg(det["az"], det["solid"]); a_b = sky_area_sqdeg(det["az"], det["branches"])
-        txt = (f"{result['n']} frames · rotation offset {result['K']:.1f}° · latitude {result['lat']:.3f}°\n"
+        d = base_det()
+        E["solid"] = np.array(d["solid"], float); E["branches"] = np.array(d["branches"], float)
+        E["undo"].clear(); redraw_all()
+
+    def undo():
+        if E["undo"]:
+            E["solid"], E["branches"] = E["undo"].pop(); redraw_lines(); update_stats()
+
+    def side_settings():
+        try:
+            return max(float(pv["side"].get()), 0.0), max(float(pv["steep"].get()), 0.1)
+        except ValueError:
+            return 0.0, 3.0
+
+    def final_lines():
+        az = result["det"]["az"]; side, steep = side_settings()
+        # The two lines are independent: an edited branches line may go below the solid line.
+        s_ = widen_steep_edges(az, E["solid"], side, steep)
+        b_ = widen_steep_edges(az, E["branches"], side, steep)
+        return az, s_, b_
+
+    def zoom():
+        try:
+            return float(ed["zoom"].get())
+        except ValueError:
+            return 6.0
+
+    def geom():
+        mos = result["mos"]; z = zoom()
+        top = mos["alt0"] + mos["M"].shape[0] * mos["res"]
+        return z, mos["alt0"], top
+
+    def to_xy(az, alt):
+        z, a0, top = geom()
+        return MARG + az * z, MARG + (top - alt) * z
+
+    def from_xy(x, y):
+        z, a0, top = geom()
+        return (x - MARG) / z, top - (y - MARG) / z
+
+    def background():
+        z = zoom()
+        if z in E["bg"]:
+            return E["bg"][z]
+        mos = result["mos"]; M = mos["M"]
+        v = M[np.isfinite(M)]
+        lo, hi = np.percentile(v, [1, 99.5]) if v.size else (0, 1)
+        g = (np.nan_to_num(np.clip((M - lo) / max(hi - lo, 1e-6), 0, 1), nan=0) * 255).astype(np.uint8)
+        rgb = np.dstack([g, g, g]); rgb[np.isnan(M)] = (28, 28, 36)
+        W = int(360 * z); H = int(M.shape[0] * mos["res"] * z)
+        im = Image.fromarray(rgb[::-1]).resize((max(W, 1), max(H, 1)), Image.BILINEAR)
+        E["bg"][z] = ImageTk.PhotoImage(im) if ImageTk else None
+        return E["bg"][z]
+
+    def redraw_all(*_):
+        cv.delete("all")
+        if "mos" not in result or E["solid"] is None:
+            return
+        z, a0, top = geom()
+        bg = background()
+        if bg is not None:
+            cv.create_image(MARG, MARG, anchor="nw", image=bg)
+        for a in range(0, 361, 10):
+            x, _ = to_xy(a, top)
+            cv.create_line(x, MARG, x, MARG + (top - a0) * z, fill="#3f6fb0" if a % 30 else "#6fa0e0")
+            if a % 30 == 0 or z >= 12:
+                cv.create_text(x, MARG - 12, text=f"{a}°", fill="#ddd")
+        for hgt in range(int(math.ceil(a0 / 5) * 5), int(top) + 1, 5):
+            _, y = to_xy(0, hgt)
+            cv.create_line(MARG, y, MARG + 360 * z, y, fill="#3f6fb0")
+            cv.create_text(MARG - 18, y, text=f"{hgt}°", fill="#ddd")
+        cv.configure(scrollregion=(0, 0, MARG * 2 + 360 * z, MARG * 2 + (top - a0) * z))
+        E["items"] = {}
+        redraw_lines(); update_stats()
+
+    def coords(az, alt):
+        z, a0, top = geom()
+        order = np.argsort(az); az = np.asarray(az)[order]; alt = np.clip(np.asarray(alt)[order], a0, top)
+        az = np.concatenate([az, [az[0] + 360]]); alt = np.concatenate([alt, [alt[0]]])
+        pts = []
+        for a, h in zip(az, alt):
+            pts += list(to_xy(a, h))
+        return pts
+
+    def redraw_lines():
+        if E["solid"] is None:
+            return
+        az, s_, b_ = final_lines()
+        specs = [("solid", s_, "#ff3c28", 2), ("branches", b_, "#00dcff", 2)]
+        op = old_pts()
+        if op is not None:
+            specs.insert(0, ("old", hrz_array(op, az), "#f0c800", 2))
+        elif "old" in E["items"]:
+            cv.delete(E["items"].pop("old"))
+        for key, vals, col, w in specs:
+            c = coords(az, vals)
+            if key in E["items"]:
+                cv.coords(E["items"][key], *c)
+            else:
+                E["items"][key] = cv.create_line(*c, fill=col, width=w)
+
+    def paint(ev, push):
+        tgt = ed["target"].get()
+        if tgt == "none" or E["solid"] is None:
+            return
+        if push:
+            E["undo"].append((E["solid"].copy(), E["branches"].copy()))
+            E["undo"][:] = E["undo"][-50:]
+        x, y = cv.canvasx(ev.x), cv.canvasy(ev.y)
+        a, h = from_xy(x, y)
+        _, a0, top = geom()
+        h = min(max(h, max(a0, 0.0)), min(top, 90.0))   # keep edits inside the shown altitude range
+        try:
+            bw = max(float(ed["brush"].get()), 0.1)
+        except ValueError:
+            bw = 1.0
+        az = result["det"]["az"]
+        m = np.abs((az - a + 180) % 360 - 180) <= bw / 2
+        E[tgt][m] = h
+        redraw_lines()
+
+    def restore(ev):
+        tgt = ed["target"].get()
+        if tgt == "none" or E["solid"] is None:
+            return
+        E["undo"].append((E["solid"].copy(), E["branches"].copy()))
+        a, _ = from_xy(cv.canvasx(ev.x), cv.canvasy(ev.y))
+        try:
+            bw = max(float(ed["brush"].get()), 0.1)
+        except ValueError:
+            bw = 1.0
+        d = base_det(); az = result["det"]["az"]
+        m = np.abs((az - a + 180) % 360 - 180) <= bw / 2
+        E[tgt][m] = np.asarray(d[tgt])[m]
+        redraw_lines(); update_stats()
+
+    current_hz.trace_add("write", lambda *a: redraw_all())
+    cv.bind("<ButtonPress-1>", lambda e: paint(e, True))
+    cv.bind("<B1-Motion>", lambda e: paint(e, False))
+    cv.bind("<ButtonRelease-1>", lambda e: update_stats())
+    cv.bind("<Button-3>", restore)
+    cv.bind("<MouseWheel>", lambda e: cv.xview_scroll(int(-e.delta / 40), "units"))
+    root.bind("<Control-z>", lambda e: undo())
+    zc.bind("<<ComboboxSelected>>", redraw_all)
+
+    def update_stats():
+        if E["solid"] is None:
+            return
+        az, s_, b_ = final_lines()
+        a_s = sky_area_sqdeg(az, s_); a_b = sky_area_sqdeg(az, b_)
+        txt = (f"{result['n']} frames · rotation offset {result['K']:.1f}° · latitude {result['lat']:.3f}°"
+               f"{'  · edited' if E['undo'] else ''}"
+               f"{'  · side margin %.1f° at steep edges' % side_settings()[0] if side_settings()[0] > 0 else ''}\n"
                f"Usable sky above horizon:  solid {a_s:,.0f} sq.deg ({a_s / 206.26:.1f}% of hemisphere)   "
                f"with branches {a_b:,.0f} sq.deg ({a_b / 206.26:.1f}%)")
-        if old_var.get().strip():
-            try:
-                pts = load_hrz(old_var.get()); az = np.arange(0, 360, 0.1)
-                a_o = sky_area_sqdeg(az, hrz_array(pts, az))
-                txt += (f"\nOld horizon {a_o:,.0f} sq.deg → with branches {a_b - a_o:+,.0f} "
-                        f"({(a_b / a_o - 1) * 100:+.1f}%), solid {a_s - a_o:+,.0f} ({(a_s / a_o - 1) * 100:+.1f}%)")
-            except Exception:
-                pass
+        op = old_pts()
+        if op is not None:
+            azf = np.arange(0, 360, 0.1); a_o = sky_area_sqdeg(azf, hrz_array(op, azf))
+            txt += (f"\nCurrent horizon {a_o:,.0f} sq.deg → new with branches {a_b - a_o:+,.0f} "
+                    f"({(a_b / a_o - 1) * 100:+.1f}%), solid {a_s - a_o:+,.0f} ({(a_s / a_o - 1) * 100:+.1f}%)")
         if not result["det"]["measured"].all():
             frac = result["det"]["measured"].mean() * 100
             txt += (f"\nOnly {frac:.0f}% of azimuths were imaged; the rest "
-                    + ("uses the old horizon." if old_var.get().strip() else "is interpolated – load the old horizon to fill it."))
+                    + ("uses the current horizon." if op is not None else "is interpolated – load the current horizon to fill it."))
         stats_lbl.config(text=txt)
 
+    def report_uncertain():
+        unc = result["det"]["uncertain"]
+        if unc:
+            boxes = fillin_boxes(result["det"])
+            log(f"{len(unc)} azimuth samples reached the edge of the imaged area "
+                f"({len(boxes)} areas) – use 'Plan fill-in frames…' to shoot them.")
+        else:
+            log("No uncertain areas – every azimuth has sky and obstruction inside the imaged area.")
+
     def save_outputs():
+        if E["solid"] is None:
+            messagebox.showerror(APP_NAME, "Build the horizon first."); return
+        which = save_which.get()
+        az, s_, b_ = final_lines()
+        vals = b_ if which == "with branches" else s_
+        name = time.strftime("horizon_%Y-%m-%d") + ("_with_branches" if which == "with branches" else "") + ".hrz"
+        f = filedialog.asksaveasfilename(title="Save horizon file", defaultextension=".hrz", initialfile=name,
+                                         filetypes=[("NINA horizon", "*.hrz"), ("All", "*.*")])
+        if not f:
+            return
+        write_hrz(f, az, vals)
+        messagebox.showinfo(APP_NAME, f"Saved the {which} horizon:\n{f}\n\n"
+                                      "In NINA: Options → General → Astrometry → Horizon.")
+
+    def plan_fill():
         if "det" not in result:
             messagebox.showerror(APP_NAME, "Build the horizon first."); return
-        d = filedialog.askdirectory(title="Folder for results")
-        if not d:
+        try:
+            p = collect(require_area=False)
+        except Exception as e:
+            messagebox.showerror(APP_NAME, f"Check the settings on the Plan tab: {e}"); return
+        boxes = fillin_boxes(result["det"], floor=p.floor, ceiling=p.ceiling)
+        if not boxes:
+            messagebox.showinfo(APP_NAME, "Nothing to fill in – every azimuth is resolved."); return
+        plan = plan_fillin(p, boxes)
+        msg = (f"{len(boxes)} areas, {len(plan['frames'])} frames, ~{plan['seconds'] / 60:.0f} min\n\n" +
+               "\n".join(b[4] for b in boxes[:15]) + ("\n…" if len(boxes) > 15 else "") +
+               "\n\nCamera, rotator and exposure settings come from the Plan tab.")
+        if not messagebox.askokcancel(APP_NAME, msg):
             return
-        base = os.path.join(d, time.strftime("horizon_%Y-%m-%d"))
-        det = current_det()
-        write_hrz(base + ".hrz", det["az"], det["solid"])
-        write_hrz(base + "_with_branches.hrz", det["az"], det["branches"])
-        render_mosaic(result["mos"], lines_for_display(), scale=2).save(base + "_mosaic.png")
-        with open(base + "_details.json", "w") as f:
-            json.dump(dict(rotation_offset=result["K"], latitude=result["lat"], details=det["details"]), f, indent=1)
-        messagebox.showinfo(APP_NAME, f"Saved to {d}:\n{os.path.basename(base)}.hrz\n"
-                                      f"{os.path.basename(base)}_with_branches.hrz\n"
-                                      f"{os.path.basename(base)}_mosaic.png\n{os.path.basename(base)}_details.json")
+        f = filedialog.asksaveasfilename(defaultextension=".json", initialfile="Horizon fill-in.json",
+                                         filetypes=[("NINA sequence", "*.json")])
+        if f:
+            out = save_plan(p, plan, f)
+            messagebox.showinfo(APP_NAME, f"Saved:\n{out}")
 
-    bb = ttk.Frame(pl); bb.pack(fill="x", pady=4)
-    ttk.Button(bb, text="Build mosaic & horizon", command=start).pack(side="left", padx=3)
-    ttk.Button(bb, text="Refresh view", command=show_result).pack(side="left", padx=3)
-    ttk.Button(bb, text="Save results…", command=save_outputs).pack(side="left", padx=3)
+    ttk.Button(bb, text="Build mosaic & horizon", command=start).grid(row=0, column=0, padx=2, pady=2, sticky="ew")
+    ttk.Button(bb, text="Re-detect (new thresholds)", command=redetect).grid(row=0, column=1, padx=2, pady=2, sticky="ew")
+    ttk.Button(bb, text="Plan fill-in frames…", command=plan_fill).grid(row=1, column=0, padx=2, pady=2, sticky="ew")
+    sv = ttk.Frame(bb); sv.grid(row=1, column=1, padx=2, pady=2, sticky="ew")
+    save_which = tk.StringVar(value="solid")
+    ttk.Combobox(sv, textvariable=save_which, values=["solid", "with branches"], width=12,
+                 state="readonly").pack(side="left")
+    ttk.Button(sv, text="Save horizon file…", command=save_outputs).pack(side="left", padx=2)
 
     def poll():
         try:
@@ -1117,7 +1514,8 @@ def run_gui():
                 elif kind == "prog":
                     pb["value"] = val[0]; status.config(text=val[1])
                 elif kind == "done":
-                    result.update(val); pb["value"] = 1.0; status.config(text="Done"); show_result()
+                    result.update(val); pb["value"] = 1.0; status.config(text="Done")
+                    reset_edits(); report_uncertain()
                 elif kind == "error":
                     status.config(text="Error"); logbox.insert("end", val + "\n")
                     messagebox.showerror(APP_NAME, val.splitlines()[0])
@@ -1138,8 +1536,9 @@ HELP_TEXT = """HORIZON MAPPER FOR NINA
 WORKFLOW
 1. Plan sequence
    • Enter camera/telescope (or 'Read from a FITS file…'). The field of view is computed.
-   • Choose the area: a fixed altitude band, or a strip around one or two horizon files
-     (e.g. your current horizon and a rough estimate). The strip spans both, plus margins.
+   • Choose the area: a fixed altitude band, or a strip around your current horizon file
+     (optionally plus a second estimate, e.g. from an all-sky camera); the strip spans both,
+     plus margins. The current horizon is also filled in on the Build tab for comparison.
    • 'Lowest altitude' keeps frames (and the sun) out of the low sky.
    • Rotator: keeps every frame level with the horizon, so overlap can be ~10 %.
      Offset = sky position angle − mechanical angle (from NINA's rotator panel after a
@@ -1161,7 +1560,24 @@ WORKFLOW
        branches   – darker than 0.85 × sky (also thin bare branches)
    • Azimuths listed as 'clear to bottom' or 'blocked to top' reached the edge of the
      imaged area – shoot a few extra frames there for a precise value.
-   • 'Save results…' writes two .hrz files, a mosaic PNG and a details JSON.
+   • 'Plan fill-in frames…' turns those areas into a short NINA sequence (camera, rotator and
+     exposure settings come from the Plan tab). Shoot it, add its folder and build again.
+   • 'Re-detect' applies new thresholds instantly without re-reading the frames.
+   • 'Side margin at steep edges': where the horizon rises or drops steeply (the side of a
+     tree, the end of a roof), the higher value is extended that many degrees sideways, so a
+     target just beside the obstruction isn't scheduled too early. Gentle slopes are not
+     changed. 'Steep' means more than the given degrees of altitude per degree of azimuth
+     (3 ≈ a 72° slope). 1-2° is a sensible margin; 0 switches it off. The lines on screen and
+     the saved files include the margin; your edits are made on the unwidened line.
+   • The two lines are edited independently – the branches line may be drawn below the solid
+     line (e.g. where the "solid" part is really a thin, see-through tree top).
+   • Editing: choose 'solid line' or 'branches line' above the image, then left-drag to
+     redraw the line (brush width in degrees), right-click to restore the detected value,
+     Ctrl+Z to undo. Zoom and scroll to work precisely. Edits are used when saving.
+   • Reduced frames are cached (in %LOCALAPPDATA%\\HorizonMapper\\cache), so building again
+     – e.g. after adding fill-in frames – only reads the new files. 'Clear cache' frees the space.
+   • 'Save horizon file…' saves one NINA .hrz file: choose 'solid' or 'with branches' next to
+     the button. Edits and the side margin are included.
      In NINA: Options → General → Astrometry → Horizon file.
 
 NOTES
@@ -1176,6 +1592,11 @@ NOTES
 # =============================================================================
 
 def main():
+    # A windowed .exe has no console: give print() somewhere harmless to write.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
     ap = argparse.ArgumentParser(description=APP_NAME)
     sub = ap.add_subparsers(dest="cmd")
     pp = sub.add_parser("plan", help="generate a NINA sequence")
@@ -1205,6 +1626,17 @@ def main():
     bp.add_argument("--lat", type=float)
     bp.add_argument("--res", type=float, default=0.03)
     bp.add_argument("--old", help="old .hrz for comparison")
+    bp.add_argument("--side-margin", type=float, default=0.0,
+                    help="extend the higher side of steep horizon edges this many degrees sideways")
+    bp.add_argument("--steep-slope", type=float, default=3.0,
+                    help="an edge is steep above this many degrees altitude per degree azimuth")
+    bp.add_argument("--no-cache", action="store_true", help="don't use/create the frame cache")
+    bp.add_argument("--fillin", metavar="FILE.json", help="also write a NINA fill-in sequence for uncertain areas")
+    bp.add_argument("--fillin-exposure", type=float, default=0.008)
+    bp.add_argument("--fillin-floor", type=float, default=15.0)
+    bp.add_argument("--sensor", nargs=3, type=float, metavar=("WPX", "HPX", "UM"), default=[6248, 4176, 3.76],
+                    help="for --fillin: unbinned sensor size and pixel size")
+    bp.add_argument("--focal", type=float, default=408, help="for --fillin: focal length (mm)")
     bp.add_argument("-o", "--outbase", default="horizon")
     a = ap.parse_args()
 
@@ -1228,13 +1660,19 @@ def main():
         t0 = time.time()
         log = lambda m: print(m, flush=True)
         prog = lambda f, m: None
-        frames, lat_f = load_frames(find_fits(a.folders), log, prog)
+        frames, lat_f = load_frames(find_fits(a.folders), log, prog,
+                                    cache_dir=None if a.no_cache else default_cache_dir())
         lat = a.lat if a.lat is not None else lat_f
         K = a.rot_offset if a.no_calibrate else calibrate_rotation(frames, lat, a.rot_offset, log, a.full_search)
         mos = build_mosaic(frames, lat, K, a.res, log, prog)
         det = detect_horizon(mos, log=log)
         if a.old:
             det = fill_unmeasured(det, load_hrz(a.old))
+        if a.side_margin > 0:
+            det = dict(det)
+            det["solid"] = widen_steep_edges(det["az"], det["solid"], a.side_margin, a.steep_slope)
+            det["branches"] = np.maximum(widen_steep_edges(det["az"], det["branches"], a.side_margin, a.steep_slope),
+                                         det["solid"])
         write_hrz(a.outbase + ".hrz", det["az"], det["solid"])
         write_hrz(a.outbase + "_with_branches.hrz", det["az"], det["branches"])
         lines = [("Solid obstructions", det["az"], det["solid"], (230, 40, 30)),
@@ -1245,7 +1683,16 @@ def main():
         print(f"usable sky: solid {sky_area_sqdeg(det['az'], det['solid']):.0f} sq.deg, "
               f"branches {sky_area_sqdeg(det['az'], det['branches']):.0f} sq.deg")
         if det["uncertain"]:
-            print("check:", ", ".join(f"{x:.1f}°({f})" for x, f in det["uncertain"]))
+            boxes = fillin_boxes(det, floor=a.fillin_floor)
+            print(f"{len(det['uncertain'])} uncertain azimuth samples in {len(boxes)} areas:",
+                  "; ".join(b[4] for b in boxes))
+            if a.fillin and boxes:
+                p = PlanParams(sensor_w_px=int(a.sensor[0]), sensor_h_px=int(a.sensor[1]), pixel_um=a.sensor[2],
+                               focal_mm=a.focal, lat=lat, rot_offset=a.rot_offset, exposure=a.fillin_exposure,
+                               floor=a.fillin_floor)
+                plan = plan_fillin(p, boxes)
+                print(f"fill-in: {save_plan(p, plan, a.fillin)} ({len(plan['frames'])} frames, "
+                      f"~{plan['seconds'] / 60:.0f} min)")
         print(f"done in {time.time() - t0:.0f} s")
 
 
