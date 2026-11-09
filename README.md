@@ -57,6 +57,11 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
 - Azimuths reported as **clear to bottom** or **blocked to top** reached the edge of the imaged area.
   **Plan fill-in frames…** turns them into a short NINA sequence. Shoot it, add its folder, and build
   again. Thanks to the cache, only the new frames are read.
+  - **Fill-in: extra frames at steep edges** (below the button): when a fill-in area ends at a steep
+    rise or drop of the measured horizon (steeper than **steep = more than**, default 3°/°), that side
+    is extended by this many frame widths and the area is made tall enough to cover the whole jump.
+    Default 1, 0 = off. Areas widened this way are labelled "+ steep edge". CLI:
+    `build … --fillin FILE.json --fillin-edge-frames N --fillin-edge-slope S`.
 - **Re-detect** applies new thresholds instantly, without re-reading the frames.
 - **Side margin at steep edges** (in the toolbar above the image): where the horizon rises or drops steeply (the side of a tree, the
   end of a roof), the higher value is extended this many degrees sideways. That stops NINA

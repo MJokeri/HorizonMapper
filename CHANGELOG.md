@@ -8,6 +8,11 @@
   widened sideways by the chosen number of frame widths (default 1, 0 = off) and spans the full
   height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With the sample site horizon,
   0 / 1 / 2 extra frames give 647 / 733 / 819 frames.
+- **Build tab – Fill-in: extra frames at steep edges:** the same idea for **Plan fill-in frames…**.
+  Fields below the button set the number of extra frame widths (default 1, 0 = off) and the
+  steepness threshold. A fill-in area whose side lies at a steep rise or drop of the measured
+  (and edited) horizon is extended sideways and made tall enough to cover the whole jump; it is
+  labelled "+ steep edge". CLI: `build --fillin-edge-frames N --fillin-edge-slope S`.
 
 ### Changed
 - **Side margin at steep edges:** the setting and its steepness threshold moved from the Build tab's

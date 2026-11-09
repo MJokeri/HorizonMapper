@@ -403,6 +403,39 @@ def fillin_boxes(det, extra_below=8.0, extra_above=6.0, floor=0.0, ceiling=85.0,
     return boxes
 
 
+def widen_fillin_boxes(boxes, az, alt, frame_w, edge_frames=1.0, edge_slope=3.0,
+                       floor=0.0, ceiling=85.0, look=2.0):
+    """Widen fill-in boxes whose side lies at a steep rise or drop of the measured horizon.
+
+    `az`/`alt` is the measured horizon line, `frame_w` the frame width in degrees on the sky.
+    Within `look` degrees of a box side, if the horizon changes faster than `edge_slope`
+    (deg altitude per deg azimuth), that side is pushed out by `edge_frames` frame widths
+    (scaled by 1/cos(alt)) and the box is made tall enough to cover the whole jump.
+    """
+    if edge_frames <= 0 or not boxes:
+        return boxes
+    az = np.asarray(az, float); alt = np.asarray(alt, float)
+    step = float(np.median(np.diff(az))) if len(az) > 1 else 0.5
+    slope = np.abs(np.roll(alt, -1) - alt) / step
+    out = []
+    for a0, a1, h0, h1, label in boxes:
+        added = False
+        for side in (a0, a1):
+            d = (az - side + 180) % 360 - 180
+            win = np.abs(d) <= look
+            if not win.any() or slope[win].max() < edge_slope:
+                continue
+            top = float(alt[win].max()) + 2.0; bot = float(alt[win].min()) - 2.0
+            w = edge_frames * frame_w / max(math.cos(math.radians(min(max(top, h1), 80.0))), 0.17)
+            if side == a0:
+                a0 = a0 - w
+            else:
+                a1 = a1 + w
+            h0 = max(floor, min(h0, bot)); h1 = min(ceiling, max(h1, top)); added = True
+        out.append((a0, a1, h0, h1, label + (" + steep edge" if added else "")))
+    return out
+
+
 def plan_fillin(p, boxes):
     """Plan frames covering the given boxes (az0, az1, alt0, alt1, label)."""
     w, h = p.fov
@@ -1522,6 +1555,12 @@ def run_gui():
         except Exception as e:
             messagebox.showerror(APP_NAME, f"Check the settings on the Plan tab: {e}"); return
         boxes = fillin_boxes(result["det"], floor=p.floor, ceiling=p.ceiling)
+        try:
+            ef = max(float(fill_edge.get()), 0.0); es = max(float(fill_slope.get()), 0.1)
+        except ValueError:
+            messagebox.showerror(APP_NAME, "Check the fill-in steep-edge values."); return
+        az_, s_, b_ = final_lines()
+        boxes = widen_fillin_boxes(boxes, az_, np.maximum(s_, b_), max(p.fov), ef, es, p.floor, p.ceiling)
         if not boxes:
             messagebox.showinfo(APP_NAME, "Nothing to fill in – every azimuth is resolved."); return
         plan = plan_fillin(p, boxes)
@@ -1539,6 +1578,13 @@ def run_gui():
     ttk.Button(bb, text="Build mosaic & horizon", command=start).grid(row=0, column=0, padx=2, pady=2, sticky="ew")
     ttk.Button(bb, text="Re-detect (new thresholds)", command=redetect).grid(row=0, column=1, padx=2, pady=2, sticky="ew")
     ttk.Button(bb, text="Plan fill-in frames…", command=plan_fill).grid(row=1, column=0, padx=2, pady=2, sticky="ew")
+    fe = ttk.Frame(bb); fe.grid(row=2, column=0, columnspan=2, padx=2, pady=2, sticky="w")
+    fill_edge = tk.StringVar(value="1"); fill_slope = tk.StringVar(value="3")
+    ttk.Label(fe, text="Fill-in: extra frames at steep edges").pack(side="left")
+    ttk.Spinbox(fe, textvariable=fill_edge, from_=0, to=5, increment=0.5, width=4).pack(side="left", padx=(2, 8))
+    ttk.Label(fe, text="steep = more than").pack(side="left")
+    ttk.Spinbox(fe, textvariable=fill_slope, from_=0.5, to=20, increment=0.5, width=4).pack(side="left", padx=2)
+    ttk.Label(fe, text="°/°  (0 = off)", foreground="#666").pack(side="left")
     sv = ttk.Frame(bb); sv.grid(row=1, column=1, padx=2, pady=2, sticky="ew")
     save_which = tk.StringVar(value="solid")
     ttk.Combobox(sv, textvariable=save_which, values=["solid", "with branches"], width=12,
@@ -1606,6 +1652,9 @@ WORKFLOW
      imaged area – shoot a few extra frames there for a precise value.
    • 'Plan fill-in frames…' turns those areas into a short NINA sequence (camera, rotator and
      exposure settings come from the Plan tab). Shoot it, add its folder and build again.
+     'Fill-in: extra frames at steep edges' (below the button): where a fill-in area ends at a
+     steep rise or drop of the measured horizon, it is extended by this many frame widths and
+     made tall enough to cover the whole jump ("+ steep edge" in the list). 0 = off.
    • 'Re-detect' applies new thresholds instantly without re-reading the frames.
    • 'Side margin at steep edges' (toolbar above the image): where the horizon rises or drops steeply (the side of a
      tree, the end of a roof), the higher value is extended that many degrees sideways, so a
@@ -1682,6 +1731,10 @@ def main():
     bp.add_argument("--fillin", metavar="FILE.json", help="also write a NINA fill-in sequence for uncertain areas")
     bp.add_argument("--fillin-exposure", type=float, default=0.008)
     bp.add_argument("--fillin-floor", type=float, default=15.0)
+    bp.add_argument("--fillin-edge-frames", type=float, default=1.0,
+                    help="for --fillin: extra frame widths beside steep horizon edges (0 = off)")
+    bp.add_argument("--fillin-edge-slope", type=float, default=3.0,
+                    help="for --fillin: steep = more than this many deg altitude per deg azimuth")
     bp.add_argument("--sensor", nargs=3, type=float, metavar=("WPX", "HPX", "UM"), default=[6248, 4176, 3.76],
                     help="for --fillin: unbinned sensor size and pixel size")
     bp.add_argument("--focal", type=float, default=408, help="for --fillin: focal length (mm)")
@@ -1739,6 +1792,9 @@ def main():
                 p = PlanParams(sensor_w_px=int(a.sensor[0]), sensor_h_px=int(a.sensor[1]), pixel_um=a.sensor[2],
                                focal_mm=a.focal, lat=lat, rot_offset=a.rot_offset, exposure=a.fillin_exposure,
                                floor=a.fillin_floor)
+                boxes = widen_fillin_boxes(boxes, det["az"], np.maximum(det["solid"], det["branches"]),
+                                           max(p.fov), a.fillin_edge_frames, a.fillin_edge_slope,
+                                           p.floor, p.ceiling)
                 plan = plan_fillin(p, boxes)
                 print(f"fill-in: {save_plan(p, plan, a.fillin)} ({len(plan['frames'])} frames, "
                       f"~{plan['seconds'] / 60:.0f} min)")
