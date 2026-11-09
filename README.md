@@ -70,3 +70,7 @@ python horizon_mapper.py build "Y:\Photo Import\New Horizons" --old old.hrz -o h
 - NINA FITS files with `CENTALT`, `CENTAZ`, `XPIXSZ` and `FOCALLEN` in the header (NINA writes these
   when the mount is connected).
 - `ROTATOR` and `PIERSIDE` are used when present. Colour (Bayer) and mono cameras both work.
+
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md).
