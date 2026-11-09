@@ -163,6 +163,8 @@ class PlanParams:
         self.horizon_files = []       # 1 or 2 files for mode "horizon"
         self.margin_below = 4.0; self.margin_above = 4.0
         self.floor = 20.0; self.ceiling = 85.0
+        self.edge_frames = 1.0        # extra frame widths beside steep horizon edges (0 = off)
+        self.edge_slope = 3.0         # "steep" = more than this many deg altitude per deg azimuth
         self.overlap = 0.10
         # rotator
         self.rotator = True; self.rot_offset = -58.04; self.rot_sign = 1; self.rot_tolerance = 3.0
@@ -239,14 +241,44 @@ def _expose(ids, pid, p):
 
 
 def band_limits(p):
-    """Return function az -> (lo, hi) of the strip to image."""
-    if p.mode == "horizon" and p.horizon_files:
-        hz = [load_hrz(f) for f in p.horizon_files]
-        def f(az):
-            v = [hrz_alt(h, az) for h in hz]
-            return max(min(v) - p.margin_below, p.floor), min(max(v) + p.margin_above, p.ceiling)
-        return f
-    return lambda az: (max(p.alt_min, p.floor), min(p.alt_max, p.ceiling))
+    """Return function az -> (lo, hi) of the strip to image.
+
+    In horizon mode the strip follows the current horizon (and an optional second file) with
+    margins. Where a horizon rises or drops more steeply than `p.edge_slope`, the strip is
+    widened sideways by `p.edge_frames` frame widths and spans the whole height of the jump,
+    so both sides of tree and roof edges are imaged.
+    """
+    if not (p.mode == "horizon" and p.horizon_files):
+        return lambda az: (max(p.alt_min, p.floor), min(p.alt_max, p.ceiling))
+    hz = [load_hrz(f) for f in p.horizon_files]
+    step = 0.25
+    grid = np.arange(0, 360, step)
+    vals = np.array([[hrz_alt(h, a) for a in grid] for h in hz])          # (files, n)
+    lo = vals.min(0) - p.margin_below
+    hi = vals.max(0) + p.margin_above
+    if p.edge_frames > 0:
+        fw = max(p.fov)            # wider side: safe whichever way the camera is turned
+        n = len(grid)
+        lo_new, hi_new = lo.copy(), hi.copy()
+        for v in vals:
+            slope = np.abs(np.roll(v, -1) - v) / step
+            for i in np.where(slope >= p.edge_slope)[0]:
+                j = (i + 1) % n
+                top = max(v[i], v[j]) + p.margin_above
+                bot = min(v[i], v[j]) - p.margin_below
+                w = p.edge_frames * fw / max(math.cos(math.radians(min(top, 80.0))), 0.17)
+                k = int(math.ceil(w / step))
+                idx = np.arange(i - k, j + k + 1) % n
+                lo_new[idx] = np.minimum(lo_new[idx], bot)
+                hi_new[idx] = np.maximum(hi_new[idx], top)
+        lo, hi = lo_new, hi_new
+    lo = np.maximum(lo, p.floor); hi = np.minimum(hi, p.ceiling)
+
+    def f(az):
+        x = (az % 360) / step
+        i0 = int(math.floor(x)) % len(grid); i1 = (i0 + 1) % len(grid); t = x - math.floor(x)
+        return lo[i0] * (1 - t) + lo[i1] * t, hi[i0] * (1 - t) + hi[i1] * t
+    return f
 
 
 def _effective_fov(w, h, tilt):
@@ -1006,6 +1038,8 @@ def run_gui():
     labeled(box, 7, "Margin below (°)", var("margin_below", P.margin_below))
     labeled(box, 8, "Margin above (°)", var("margin_above", P.margin_above))
     labeled(box, 9, "Lowest altitude (°)", var("floor", P.floor))
+    labeled(box, 13, "Extra frames at steep edges", var("edge_frames", P.edge_frames), tip="0 = off")
+    labeled(box, 14, "Steep = more than (°/°)", var("edge_slope", P.edge_slope), tip="alt per az")
     labeled(box, 10, "Azimuth start (°)", var("az_start", P.az_start))
     labeled(box, 11, "Azimuth end (°)", var("az_end", P.az_end))
     labeled(box, 12, "Overlap (0-1)", var("overlap", P.overlap))
@@ -1044,7 +1078,7 @@ def run_gui():
         p = PlanParams()
         num = ["sensor_w_px", "sensor_h_px", "pixel_um", "focal_mm", "lat", "alt_min", "alt_max", "margin_below",
                "margin_above", "floor", "az_start", "az_end", "overlap", "rot_offset", "rot_tolerance", "exposure",
-               "sec_per_frame", "sec_per_rot"]
+               "sec_per_frame", "sec_per_rot", "edge_frames", "edge_slope"]
         for k in num:
             setattr(p, k, float(V[k].get()))
         for k in ("sensor_w_px", "sensor_h_px"):
@@ -1545,6 +1579,10 @@ WORKFLOW
    • Choose the area: a fixed altitude band, or a strip around your current horizon file
      (optionally plus a second estimate, e.g. from an all-sky camera); the strip spans both,
      plus margins. The current horizon is also filled in on the Build tab for comparison.
+   • 'Extra frames at steep edges' (horizon mode): where the current horizon rises or drops
+     more steeply than 'Steep = more than' (altitude ° per azimuth °, 3 ≈ 72°), the strip is
+     widened sideways by this many frame widths and covers the whole height of the jump, so
+     the sides of trees and roofs are imaged. 1 is a good default; 0 = off.
    • 'Lowest altitude' keeps frames (and the sun) out of the low sky.
    • Rotator: keeps every frame level with the horizon, so overlap can be ~10 %.
      Offset = sky position angle − mechanical angle (from NINA's rotator panel after a
@@ -1614,6 +1652,10 @@ def main():
     pp.add_argument("--hrz", nargs="+", help="1-2 horizon files")
     pp.add_argument("--below", type=float, default=4); pp.add_argument("--above", type=float, default=4)
     pp.add_argument("--floor", type=float, default=20)
+    pp.add_argument("--edge-frames", type=float, default=1.0,
+                    help="extra frame widths beside steep edges of the horizon file(s) (0 = off)")
+    pp.add_argument("--edge-slope", type=float, default=3.0,
+                    help="an edge is steep above this many degrees altitude per degree azimuth")
     pp.add_argument("--az", nargs=2, type=float, default=[0, 360])
     pp.add_argument("--overlap", type=float, default=0.10)
     pp.add_argument("--no-rotator", action="store_true")
@@ -1653,7 +1695,8 @@ def main():
                        focal_mm=a.focal, lat=a.lat, floor=a.floor, az_start=a.az[0], az_end=a.az[1],
                        overlap=a.overlap, rotator=not a.no_rotator, rot_offset=a.rot_offset,
                        rot_tolerance=a.rot_tol, exposure=a.exposure, gain=a.gain, binning=a.bin,
-                       template=a.template, margin_below=a.below, margin_above=a.above)
+                       template=a.template, margin_below=a.below, margin_above=a.above,
+                       edge_frames=a.edge_frames, edge_slope=a.edge_slope)
         if a.hrz:
             p.mode = "horizon"; p.horizon_files = a.hrz
         else:
