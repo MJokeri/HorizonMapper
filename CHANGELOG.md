@@ -24,7 +24,14 @@
   smoke-tests it, uploads it as an artifact and attaches it to `v*` releases. `build_exe.bat`
   builds it locally.
 
+### Fixed
+- Dragging outside the image while editing no longer sets impossible altitudes. Edits are clamped to
+  the altitude range shown.
+
 ### Changed
+- When you edit, the branches line may now go below the solid line. The lines are no longer forced
+  together on screen or when saving. Detection still starts the branches line at or above the solid
+  line.
 - The build workflow uses Node.js 24 action versions (`checkout` v6, `setup-python` v6,
   `upload-artifact` v6, `action-gh-release` v3).
 - A windowed `.exe` started with command-line arguments no longer fails on the missing console.
