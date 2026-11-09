@@ -1282,9 +1282,10 @@ def run_gui():
 
     def final_lines():
         az = result["det"]["az"]; side, steep = side_settings()
+        # The two lines are independent: an edited branches line may go below the solid line.
         s_ = widen_steep_edges(az, E["solid"], side, steep)
-        b_ = widen_steep_edges(az, np.maximum(E["branches"], E["solid"]), side, steep)
-        return az, s_, np.maximum(b_, s_)
+        b_ = widen_steep_edges(az, E["branches"], side, steep)
+        return az, s_, b_
 
     def zoom():
         try:
@@ -1375,6 +1376,8 @@ def run_gui():
             E["undo"][:] = E["undo"][-50:]
         x, y = cv.canvasx(ev.x), cv.canvasy(ev.y)
         a, h = from_xy(x, y)
+        _, a0, top = geom()
+        h = min(max(h, max(a0, 0.0)), min(top, 90.0))   # keep edits inside the shown altitude range
         try:
             bw = max(float(ed["brush"].get()), 0.1)
         except ValueError:
@@ -1551,6 +1554,8 @@ WORKFLOW
      changed. 'Steep' means more than the given degrees of altitude per degree of azimuth
      (3 ≈ a 72° slope). 1-2° is a sensible margin; 0 switches it off. The lines on screen and
      the saved files include the margin; your edits are made on the unwidened line.
+   • The two lines are edited independently – the branches line may be drawn below the solid
+     line (e.g. where the "solid" part is really a thin, see-through tree top).
    • Editing: choose 'solid line' or 'branches line' above the image, then left-drag to
      redraw the line (brush width in degrees), right-click to restore the detected value,
      Ctrl+Z to undo. Zoom and scroll to work precisely. Edits are used when saving.

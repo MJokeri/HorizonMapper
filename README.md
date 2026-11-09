@@ -60,7 +60,9 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   - **right-click** to restore the detected value,
   - **Ctrl+Z** to undo.
 
-  Zoom (up to 20 px/°) and scroll to work precisely. Your edits are what gets saved.
+  Zoom (up to 20 px/°) and scroll to work precisely. Your edits are what gets saved. The two lines are
+  independent: you can draw the branches line below the solid line, for example where the "solid" part
+  is really a thin tree top you can see through.
 - **Frame cache:** reduced frames are cached in `%LOCALAPPDATA%\HorizonMapper\cache` (about 200 kB per
   frame), so rebuilding takes seconds instead of minutes. **Clear cache** frees the space.
 - Use the result in NINA: Options → General → Astrometry → Horizon.
