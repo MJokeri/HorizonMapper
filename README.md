@@ -3,10 +3,16 @@
 Plans a NINA Advanced Sequencer run that photographs the sky around your horizon, then turns the
 FITS frames into a measured NINA horizon file (`.hrz`).
 
-## Install (Windows, once)
+## Install (Windows)
 
-1. Install Python 3.10 or newer from https://www.python.org (tick **"Add python.exe to PATH"**).
-2. Double-click **`Start Horizon Mapper.bat`**. The first time, it installs `numpy` and `Pillow`.
+**Easiest:** download `HorizonMapper-windows.zip` from the repository's
+[Releases](../../releases) page. If there's no release yet, open the latest
+[Actions → Build Windows exe](../../actions) run and download the build from there.
+Unzip it and run `HorizonMapper.exe`. No Python is needed.
+
+**From source:** install Python 3.10 or newer from https://www.python.org (tick **"Add python.exe to PATH"**).
+Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `numpy` and `Pillow`.
+`build_exe.bat` builds the `.exe` yourself.
 
 ## 1. Plan sequence
 
@@ -39,14 +45,24 @@ FITS frames into a measured NINA horizon file (`.hrz`).
   - `horizon_DATE_mosaic.png`: the 360° mosaic with the horizons drawn on it
   - `horizon_DATE_details.json`: per-azimuth details
 - Azimuths reported as **clear to bottom** or **blocked to top** reached the edge of the imaged area.
-  Shoot a few extra frames there for an exact value.
+  **Plan fill-in frames…** turns them into a short NINA sequence. Shoot it, add its folder, and build
+  again. Thanks to the cache, only the new frames are read.
+- **Re-detect** applies new thresholds instantly, without re-reading the frames.
+- **Editing the line:** above the image, choose **solid line** or **branches line**, then:
+  - **left-drag** to redraw it (the brush width is in degrees),
+  - **right-click** to restore the detected value,
+  - **Ctrl+Z** to undo.
+
+  Zoom (up to 20 px/°) and scroll to work precisely. Your edits are what gets saved.
+- **Frame cache:** reduced frames are cached in `%LOCALAPPDATA%\HorizonMapper\cache` (about 200 kB per
+  frame), so rebuilding takes seconds instead of minutes. **Clear cache** frees the space.
 - Use the result in NINA: Options → General → Astrometry → Horizon.
 
 ## Command line (optional)
 
 ```
 python horizon_mapper.py plan --hrz old.hrz --floor 20 --exposure 0.008 -o "Horizon mapping.json"
-python horizon_mapper.py build "Y:\Photo Import\New Horizons" --old old.hrz -o horizon
+python horizon_mapper.py build "Y:\Photo Import\New Horizons" --old old.hrz -o horizon --fillin "Horizon fill-in.json"
 ```
 
 ## Requirements of the frames
