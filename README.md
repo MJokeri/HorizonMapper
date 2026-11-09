@@ -48,6 +48,13 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   **Plan fill-in frames…** turns them into a short NINA sequence. Shoot it, add its folder, and build
   again. Thanks to the cache, only the new frames are read.
 - **Re-detect** applies new thresholds instantly, without re-reading the frames.
+- **Side margin at steep edges:** where the horizon rises or drops steeply (the side of a tree, the
+  end of a roof), the higher value is extended this many degrees sideways. That stops NINA
+  starting a target that is still right next to the obstruction. Gentle slopes stay unchanged.
+  - "Steep" means more than the given degrees of altitude per degree of azimuth (default 3, about a
+    72° slope).
+  - 1–2° is a sensible margin; 0 switches it off.
+  - The lines on screen and the saved files include the margin.
 - **Editing the line:** above the image, choose **solid line** or **branches line**, then:
   - **left-drag** to redraw it (the brush width is in degrees),
   - **right-click** to restore the detected value,
@@ -62,7 +69,7 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
 
 ```
 python horizon_mapper.py plan --hrz old.hrz --floor 20 --exposure 0.008 -o "Horizon mapping.json"
-python horizon_mapper.py build "Y:\Photo Import\New Horizons" --old old.hrz -o horizon --fillin "Horizon fill-in.json"
+python horizon_mapper.py build "Y:\Photo Import\New Horizons" --old old.hrz -o horizon --fillin "Horizon fill-in.json" --side-margin 2
 ```
 
 ## Requirements of the frames

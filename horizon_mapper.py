@@ -817,6 +817,35 @@ def detect_horizon(mos, solid_frac=0.6, thin_frac=0.85, step=0.5, max_branch_gap
     return dict(az=az, solid=solid_f, branches=branches, details=out, uncertain=unsure, measured=measured)
 
 
+def widen_steep_edges(az, alt, side_deg=0.0, steep_slope=3.0):
+    """Extend the horizon sideways at steep edges.
+
+    Where the horizon rises or falls faster than `steep_slope` degrees of altitude per degree of
+    azimuth, the higher side is extended `side_deg` degrees sideways (a local maximum filter).
+    Gentle slopes and flat stretches are left unchanged.
+    """
+    alt = np.asarray(alt, float)
+    if side_deg <= 0 or len(alt) < 3:
+        return alt.copy()
+    az = np.asarray(az, float)
+    step = float(np.median(np.diff(np.sort(az)))) or 0.5
+    k = max(1, int(round(side_deg / step)))
+    # steep segments between neighbouring samples (wrap-around included)
+    slope = np.abs(np.roll(alt, -1) - alt) / step
+    steep = slope >= steep_slope
+    out = alt.copy()
+    for i in np.where(steep)[0]:
+        j = (i + 1) % len(alt)
+        hi_idx, hi = (i, alt[i]) if alt[i] >= alt[j] else (j, alt[j])
+        # spread the higher value k samples into the lower side
+        direction = 1 if hi_idx == i else -1
+        for d in range(1, k + 1):
+            n = (hi_idx + direction * d) % len(alt)
+            if out[n] < hi:
+                out[n] = hi
+    return out
+
+
 def fill_unmeasured(det, old_pts):
     """Use the old horizon wherever nothing was imaged (partial-sky runs)."""
     if old_pts is None or det["measured"].all():
@@ -1126,10 +1155,14 @@ def run_gui():
     labeled(box, 5, "Solid: darker than", pvar("solid", "0.60"), tip="× sky")
     labeled(box, 6, "Branches: darker than", pvar("thin", "0.85"), tip="× sky")
     labeled(box, 7, "Bias level (blank = auto)", pvar("bias", ""))
+    labeled(box, 8, "Side margin at steep edges (°)", pvar("side", "0"), tip="0 = off")
+    labeled(box, 9, "Steep = steeper than (°/°)", pvar("steep", "3"), tip="alt per az")
+    for k in ("side", "steep"):
+        pv[k].trace_add("write", lambda *a: (redraw_lines(), update_stats()) if E.get("solid") is not None else None)
     pv["cache"] = tk.BooleanVar(value=True)
-    ttk.Checkbutton(box, text="Cache reduced frames (fast re-runs)", variable=pv["cache"]).grid(row=8, column=0, columnspan=2, sticky="w")
+    ttk.Checkbutton(box, text="Cache reduced frames (fast re-runs)", variable=pv["cache"]).grid(row=10, column=0, columnspan=2, sticky="w")
     ttk.Button(box, text="Clear cache", command=lambda: messagebox.showinfo(
-        APP_NAME, f"Removed {clear_cache(default_cache_dir())} cached frames.")).grid(row=8, column=2, sticky="w")
+        APP_NAME, f"Removed {clear_cache(default_cache_dir())} cached frames.")).grid(row=10, column=2, sticky="w")
     box = ttk.LabelFrame(pl, text="Compare / fill gaps with"); box.pack(fill="x", pady=3)
     old_var = tk.StringVar(value="")
     ttk.Entry(box, textvariable=old_var, width=40).pack(side="left", padx=4)
@@ -1241,9 +1274,17 @@ def run_gui():
         if E["undo"]:
             E["solid"], E["branches"] = E["undo"].pop(); redraw_lines(); update_stats()
 
+    def side_settings():
+        try:
+            return max(float(pv["side"].get()), 0.0), max(float(pv["steep"].get()), 0.1)
+        except ValueError:
+            return 0.0, 3.0
+
     def final_lines():
-        s_ = E["solid"]; b_ = np.maximum(E["branches"], E["solid"])
-        return result["det"]["az"], s_, b_
+        az = result["det"]["az"]; side, steep = side_settings()
+        s_ = widen_steep_edges(az, E["solid"], side, steep)
+        b_ = widen_steep_edges(az, np.maximum(E["branches"], E["solid"]), side, steep)
+        return az, s_, np.maximum(b_, s_)
 
     def zoom():
         try:
@@ -1372,7 +1413,8 @@ def run_gui():
         az, s_, b_ = final_lines()
         a_s = sky_area_sqdeg(az, s_); a_b = sky_area_sqdeg(az, b_)
         txt = (f"{result['n']} frames · rotation offset {result['K']:.1f}° · latitude {result['lat']:.3f}°"
-               f"{'  · edited' if E['undo'] else ''}\n"
+               f"{'  · edited' if E['undo'] else ''}"
+               f"{'  · side margin %.1f° at steep edges' % side_settings()[0] if side_settings()[0] > 0 else ''}\n"
                f"Usable sky above horizon:  solid {a_s:,.0f} sq.deg ({a_s / 206.26:.1f}% of hemisphere)   "
                f"with branches {a_b:,.0f} sq.deg ({a_b / 206.26:.1f}%)")
         op = old_pts()
@@ -1411,7 +1453,9 @@ def run_gui():
             azf = np.arange(0, 360, 0.25); lines.append(("Old horizon", azf, hrz_array(op, azf), (240, 200, 0)))
         render_mosaic(result["mos"], lines, scale=2).save(base + "_mosaic.png")
         with open(base + "_details.json", "w") as f:
+            side, steep = side_settings()
             json.dump(dict(rotation_offset=result["K"], latitude=result["lat"], edited=bool(E["undo"]),
+                           side_margin_deg=side, steep_slope=steep,
                            details=result["det"]["details"]), f, indent=1)
         messagebox.showinfo(APP_NAME, f"Saved to {d}:\n{os.path.basename(base)}.hrz\n"
                                       f"{os.path.basename(base)}_with_branches.hrz\n"
@@ -1501,6 +1545,12 @@ WORKFLOW
    • 'Plan fill-in frames…' turns those areas into a short NINA sequence (camera, rotator and
      exposure settings come from the Plan tab). Shoot it, add its folder and build again.
    • 'Re-detect' applies new thresholds instantly without re-reading the frames.
+   • 'Side margin at steep edges': where the horizon rises or drops steeply (the side of a
+     tree, the end of a roof), the higher value is extended that many degrees sideways, so a
+     target just beside the obstruction isn't scheduled too early. Gentle slopes are not
+     changed. 'Steep' means more than the given degrees of altitude per degree of azimuth
+     (3 ≈ a 72° slope). 1-2° is a sensible margin; 0 switches it off. The lines on screen and
+     the saved files include the margin; your edits are made on the unwidened line.
    • Editing: choose 'solid line' or 'branches line' above the image, then left-drag to
      redraw the line (brush width in degrees), right-click to restore the detected value,
      Ctrl+Z to undo. Zoom and scroll to work precisely. Edits are used when saving.
@@ -1555,6 +1605,10 @@ def main():
     bp.add_argument("--lat", type=float)
     bp.add_argument("--res", type=float, default=0.03)
     bp.add_argument("--old", help="old .hrz for comparison")
+    bp.add_argument("--side-margin", type=float, default=0.0,
+                    help="extend the higher side of steep horizon edges this many degrees sideways")
+    bp.add_argument("--steep-slope", type=float, default=3.0,
+                    help="an edge is steep above this many degrees altitude per degree azimuth")
     bp.add_argument("--no-cache", action="store_true", help="don't use/create the frame cache")
     bp.add_argument("--fillin", metavar="FILE.json", help="also write a NINA fill-in sequence for uncertain areas")
     bp.add_argument("--fillin-exposure", type=float, default=0.008)
@@ -1593,6 +1647,11 @@ def main():
         det = detect_horizon(mos, log=log)
         if a.old:
             det = fill_unmeasured(det, load_hrz(a.old))
+        if a.side_margin > 0:
+            det = dict(det)
+            det["solid"] = widen_steep_edges(det["az"], det["solid"], a.side_margin, a.steep_slope)
+            det["branches"] = np.maximum(widen_steep_edges(det["az"], det["branches"], a.side_margin, a.steep_slope),
+                                         det["solid"])
         write_hrz(a.outbase + ".hrz", det["az"], det["solid"])
         write_hrz(a.outbase + "_with_branches.hrz", det["az"], det["branches"])
         lines = [("Solid obstructions", det["az"], det["solid"], (230, 40, 30)),
