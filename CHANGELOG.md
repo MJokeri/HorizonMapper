@@ -2,6 +2,13 @@
 
 ## 1.0.1 – 2026-11-09
 
+### Added
+- **Plan tab – Extra frames at steep edges:** where the current horizon rises or drops steeply
+  (threshold **Steep = more than**, default 3° altitude per degree of azimuth), the planned strip is
+  widened sideways by the chosen number of frame widths (default 1, 0 = off) and spans the full
+  height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With the Tikankuja horizon,
+  0 / 1 / 2 extra frames give 647 / 733 / 819 frames.
+
 ### Changed
 - **Side margin at steep edges:** the setting and its steepness threshold moved from the Build tab's
   Settings box to the toolbar directly above the image, as spin boxes. The lines on screen update as

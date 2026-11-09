@@ -25,6 +25,11 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   - **Around current horizon:** under **Current horizon (.hrz)**, add the horizon file you use now. An
     optional second file (for example an all-sky estimate) widens the strip to cover both, plus the
     margins. The first file is also filled in automatically on the Build tab.
+  - **Extra frames at steep edges** (horizon mode): where the current horizon rises or drops more
+    steeply than **Steep = more than (°/°)** (default 3° altitude per 1° azimuth, about 72°), the strip
+    is widened sideways by this many frame widths on both sides and covers the whole height of the
+    jump. This images the sides of trees and roofs properly. Default 1; 0 = off; 2 for extra safety.
+    Each extra frame width costs roughly 10–15% more frames with a typical tree line.
   - **Lowest altitude** sets a floor for the strip. Keep it well above the sun when you shoot by day
     (use **Sun check**).
 - **Rotator:** keeps every frame level, so 10% overlap is enough.
