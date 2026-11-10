@@ -30,7 +30,14 @@
 - **Plan tab – Show shooting order:** the preview shows the order of frames as a colour-graded path
   (green = first → magenta = last) with row numbers, Start/End and the meridian flip.
 
+- **Mouse zoom:** the wheel zooms the Plan preview (drag moves it, double-click shows the whole sky)
+  and the Build tab image (around the pointer, 2–24 px/°; Shift+wheel or middle-drag moves it)
+  instead of scrolling sideways.
+- **Scrollable settings panels:** the left-hand panels on both tabs get a scrollbar (and wheel
+  scrolling) when the window is too small for them.
+
 ### Fixed
+- Plan preview: a frame lying across 0°/360° was drawn as a box across the whole preview.
 - Fill-in areas are checked against the solid and branches lines (with edits). Before, the detector's
   raw "blocked to top" flags also fired on dark frame edges high in the sky that the lines had
   rejected, which planned many useless frames at the top of the imaged area.

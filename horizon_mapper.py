@@ -1182,6 +1182,43 @@ def run_gui():
     root.title(f"{APP_NAME}  v{APP_VERSION}")
     root.geometry("1280x860")
     nb = ttk.Notebook(root); nb.pack(fill="both", expand=True)
+    scroll_panels = []          # (outer frame, canvas) of the scrollable left panels
+
+    def scrollable(parent):
+        """A left-hand panel that gets a vertical scrollbar when its content is taller than the window."""
+        outer = ttk.Frame(parent); outer.pack(side="left", fill="y", padx=6, pady=6)
+        c = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        sb = ttk.Scrollbar(outer, orient="vertical", command=c.yview)
+        inner = ttk.Frame(c)
+        c.create_window(0, 0, anchor="nw", window=inner)
+        c.configure(yscrollcommand=sb.set)
+        c.pack(side="left", fill="y", expand=True)
+
+        def update(_=None):
+            c.configure(scrollregion=(0, 0, inner.winfo_reqwidth(), inner.winfo_reqheight()),
+                        width=inner.winfo_reqwidth())
+            if inner.winfo_reqheight() > c.winfo_height() > 1:
+                if not sb.winfo_ismapped():
+                    sb.pack(side="right", fill="y")
+            else:
+                if sb.winfo_ismapped():
+                    sb.pack_forget()
+                c.yview_moveto(0)
+        inner.bind("<Configure>", update); c.bind("<Configure>", update)
+        scroll_panels.append((outer, c, sb))
+        return inner
+
+    def panel_wheel(e):
+        """Mouse wheel over a left panel scrolls it (lists and text boxes keep their own scrolling)."""
+        w = root.winfo_containing(e.x_root, e.y_root)
+        if w is None or w.winfo_class() in ("Listbox", "Text", "TCombobox", "TSpinbox"):
+            return
+        for outer, c, sb in scroll_panels:
+            if str(w).startswith(str(outer)) and sb.winfo_ismapped():
+                step = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
+                c.yview_scroll(step * 3, "units"); return
+    root.bind_all("<MouseWheel>", panel_wheel, add="+")
+    root.bind_all("<Button-4>", panel_wheel, add="+"); root.bind_all("<Button-5>", panel_wheel, add="+")
 
     def labeled(parent, r, text, var, width=10, col=0, tip=None):
         ttk.Label(parent, text=text).grid(row=r, column=col, sticky="w", padx=4, pady=2)
@@ -1192,7 +1229,7 @@ def run_gui():
 
     # ------------------------------------------------------------------ PLAN
     plan_tab = ttk.Frame(nb); nb.add(plan_tab, text="1. Plan sequence")
-    left = ttk.Frame(plan_tab); left.pack(side="left", fill="y", padx=6, pady=6)
+    left = scrollable(plan_tab)
     right = ttk.Frame(plan_tab); right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
     P = PlanParams()
     V = {}
@@ -1295,8 +1332,9 @@ def run_gui():
 
     btns = ttk.Frame(left); btns.pack(fill="x", pady=6)
     plan_info = ttk.Label(right, text="", font=("Segoe UI", 10, "bold")); plan_info.pack(anchor="w")
+    ttk.Label(right, text="Wheel: zoom · drag: move · double-click: whole sky", foreground="#666").pack(anchor="w")
     canvas = tk.Canvas(right, bg="white", height=560); canvas.pack(fill="both", expand=True)
-    state = {"plan": None, "params": None}
+    state = {"plan": None, "params": None, "view": (0.0, 360.0, 0.0, 90.0), "box": (50, 20, 900, 540)}
 
     def collect(require_area=True):
         p = PlanParams()
@@ -1334,21 +1372,32 @@ def run_gui():
             return
         W = canvas.winfo_width() or 900; H = canvas.winfo_height() or 540
         x0, y0, x1, y1 = 50, 20, W - 15, H - 35
-        amin, amax = 0, 90
-        X = lambda a: x0 + (a % 360) / 360 * (x1 - x0)
+        az0, az1, amin, amax = state["view"]
+        state["box"] = (x0, y0, x1, y1)
+        X = lambda a: x0 + ((a % 360) - az0) / (az1 - az0) * (x1 - x0)
         Y = lambda h: y1 - (h - amin) / (amax - amin) * (y1 - y0)
-        for a in range(0, 361, 30):
-            canvas.create_line(X(a) if a < 360 else x1, y0, X(a) if a < 360 else x1, y1, fill="#ddd")
-            canvas.create_text(X(a) if a < 360 else x1, y1 + 14, text=f"{a}°")
-        for h in range(0, 91, 10):
-            canvas.create_line(x0, Y(h), x1, Y(h), fill="#ddd"); canvas.create_text(x0 - 22, Y(h), text=f"{h}°")
-        az = np.arange(0, 360, 1.0)
+
+        def ticks(lo, hi, steps):
+            st = next((t for t in steps if (hi - lo) / t <= 12), steps[-1])
+            return [v for v in np.arange(math.ceil(lo / st) * st, hi + 1e-9, st)]
+        XA = lambda a: x0 + (a - az0) / (az1 - az0) * (x1 - x0)       # no wrap, for tick marks
+        a_ticks = ticks(az0, az1, (1, 2, 5, 10, 15, 30)); h_ticks = ticks(amin, amax, (1, 2, 5, 10))
+        for a in a_ticks:
+            canvas.create_line(XA(a), y0, XA(a), y1, fill="#ddd")
+        for h in h_ticks:
+            canvas.create_line(x0, Y(h), x1, Y(h), fill="#ddd")
+        az = np.arange(0, 360, 0.25)
         lo_hi = [plan["lim"](a) for a in az]
         poly = [(X(a), Y(hi)) for a, (lo, hi) in zip(az, lo_hi)] + [(X(a), Y(lo)) for a, (lo, hi) in reversed(list(zip(az, lo_hi)))]
         canvas.create_polygon(*[c for pt in poly for c in pt], fill="#d6e6ff", outline="")
+        kx = (x1 - x0) / (az1 - az0)
         for alt, a, rot in plan["frames"]:
             cw = plan["fw"] / max(math.cos(math.radians(alt)), 0.05) / 2; ch = plan["fh"] / 2
-            canvas.create_rectangle(X(a - cw), Y(alt + ch), X(a + cw), Y(alt - ch), outline="#4a7bd0")
+            for sh in (0, 360, -360):              # a frame across 0°/360° is drawn on both sides
+                xc = XA(a % 360 + sh)
+                if xc + cw * kx < x0 - 50 or xc - cw * kx > x1 + 50:
+                    continue
+                canvas.create_rectangle(xc - cw * kx, Y(alt + ch), xc + cw * kx, Y(alt - ch), outline="#4a7bd0")
         colors = ["#d00000", "#00a000"]
         for i, f in enumerate(p.horizon_files):
             pts = load_hrz(f)
@@ -1357,7 +1406,16 @@ def run_gui():
         canvas.create_line(x0, Y(p.floor), x1, Y(p.floor), fill="#e0b000", dash=(4, 3))
         if show_order.get():
             draw_order(canvas, plan, X, Y, flip=p.meridian_split)
-            canvas.create_text(x1, y0 + 2, anchor="ne", font=("Segoe UI", 9),
+        # Tk does not clip: cover what lies outside the plot area, then draw the axis labels on top
+        for r in ((0, 0, W, y0), (0, y1, W, H), (0, 0, x0, H), (x1, 0, W, H)):
+            canvas.create_rectangle(*r, fill="white", outline="")
+        canvas.create_rectangle(x0, y0, x1, y1, outline="#bbb")
+        for a in a_ticks:
+            canvas.create_text(XA(a), y1 + 14, text=f"{a:g}°")
+        for h in h_ticks:
+            canvas.create_text(x0 - 22, Y(h), text=f"{h:g}°")
+        if show_order.get():
+            canvas.create_text(x1, y0 - 10, anchor="ne", font=("Segoe UI", 9),
                                text="Shooting order: green = first → yellow → magenta = last · numbers = first frame of each row")
 
     def preview():
@@ -1412,13 +1470,46 @@ def run_gui():
     ttk.Entry(sb, textvariable=sun_lon, width=8).pack(side="left")
     ttk.Button(sb, text="Sun check", command=sun_check).pack(side="left", padx=4)
     canvas.bind("<Configure>", lambda e: draw_plan())
+
+    def plan_point(x, y):
+        x0, y0, x1, y1 = state["box"]; az0, az1, h0, h1 = state["view"]
+        return az0 + (x - x0) / (x1 - x0) * (az1 - az0), h0 + (y1 - y) / (y1 - y0) * (h1 - h0)
+
+    def set_view(az0, az1, h0, h1):
+        w = min(max(az1 - az0, 5.0), 360.0); h = min(max(h1 - h0, 3.0), 90.0)
+        az0 = min(max(az0, 0.0), 360.0 - w); h0 = min(max(h0, 0.0), 90.0 - h)
+        state["view"] = (az0, az0 + w, h0, h0 + h); draw_plan()
+
+    def plan_wheel(e):
+        a, h = plan_point(e.x, e.y)
+        up = getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0
+        f = 0.8 if up else 1.25
+        az0, az1, h0, h1 = state["view"]
+        set_view(a - (a - az0) * f, a + (az1 - a) * f, h - (h - h0) * f, h + (h1 - h) * f)
+        return "break"
+
+    def plan_drag_start(e):
+        state["drag"] = (e.x, e.y, state["view"])
+
+    def plan_drag(e):
+        if "drag" not in state:
+            return
+        sx, sy, (az0, az1, h0, h1) = state["drag"]
+        x0, y0, x1, y1 = state["box"]
+        da = -(e.x - sx) / (x1 - x0) * (az1 - az0); dh = (e.y - sy) / (y1 - y0) * (h1 - h0)
+        set_view(az0 + da, az1 + da, h0 + dh, h1 + dh)
+
+    canvas.bind("<MouseWheel>", plan_wheel)
+    canvas.bind("<Button-4>", plan_wheel); canvas.bind("<Button-5>", plan_wheel)
+    canvas.bind("<ButtonPress-1>", plan_drag_start); canvas.bind("<B1-Motion>", plan_drag)
+    canvas.bind("<Double-Button-1>", lambda e: set_view(0, 360, 0, 90))
     for k in ("sensor_w_px", "sensor_h_px", "pixel_um", "focal_mm"):
         V[k].trace_add("write", update_fov)
     update_fov()
 
     # ------------------------------------------------------------------ PROCESS
     proc = ttk.Frame(nb); nb.add(proc, text="2. Build horizon")
-    pl = ttk.Frame(proc); pl.pack(side="left", fill="y", padx=6, pady=6)
+    pl = scrollable(proc)
     pr = ttk.Frame(proc); pr.pack(side="left", fill="both", expand=True, padx=6, pady=6)
     box = ttk.LabelFrame(pl, text="FITS folders (searched recursively)"); box.pack(fill="x", pady=3)
     folders = tk.Listbox(box, height=5, width=48); folders.pack(fill="x", padx=4, pady=2)
@@ -1477,7 +1568,8 @@ def run_gui():
     ttk.Checkbutton(tb2, text="Show fill-in frames", variable=show_fill,
                     command=lambda: generate_fill(quiet=True) if show_fill.get() and fill["plan"] is None
                     else draw_fill()).pack(side="left", padx=(12, 2))
-    ttk.Label(pr, text="Left-drag on the image to redraw the selected line · right-click: restore detected value · Ctrl+Z: undo",
+    ttk.Label(pr, text="Wheel: zoom · Shift+wheel / middle-drag / scrollbars: move · left-drag: redraw the selected line"
+              " · right-click: restore detected value · Ctrl+Z: undo",
               foreground="#666").pack(anchor="w")
     cf = ttk.Frame(pr); cf.pack(fill="both", expand=True)
     cv = tk.Canvas(cf, bg="#1c1c24", highlightthickness=0)
@@ -1609,6 +1701,8 @@ def run_gui():
         W = int(360 * z); H = int(M.shape[0] * mos["res"] * z)
         im = Image.fromarray(rgb[::-1]).resize((max(W, 1), max(H, 1)), Image.BILINEAR)
         E["bg"][z] = ImageTk.PhotoImage(im) if ImageTk else None
+        while len(E["bg"]) > 4:                         # keep memory in check while zooming
+            E["bg"].pop(next(iter(E["bg"])))
         return E["bg"][z]
 
     def redraw_all(*_):
@@ -1701,7 +1795,26 @@ def run_gui():
     cv.bind("<B1-Motion>", lambda e: paint(e, False))
     cv.bind("<ButtonRelease-1>", lambda e: (update_stats(), refresh_fill()))
     cv.bind("<Button-3>", restore)
-    cv.bind("<MouseWheel>", lambda e: cv.xview_scroll(int(-e.delta / 40), "units"))
+    def wheel_zoom(e):
+        if "mos" not in result or E.get("solid") is None:
+            return
+        x, y = cv.canvasx(e.x), cv.canvasy(e.y)
+        a, h = from_xy(x, y)                                  # keep this point under the mouse
+        up = getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0
+        z = zoom(); nz = min(max(z * (1.25 if up else 0.8), 2.0), 24.0)
+        if abs(nz - z) < 1e-6:
+            return
+        ed["zoom"].set(f"{nz:.3g}"); redraw_all()
+        nx, ny = to_xy(a, h); z2, a0, top = geom()
+        W = MARG * 2 + 360 * z2; H = MARG * 2 + (top - a0) * z2
+        cv.xview_moveto(max(nx - e.x, 0) / W); cv.yview_moveto(max(ny - e.y, 0) / H)
+        return "break"
+
+    cv.bind("<MouseWheel>", wheel_zoom)
+    cv.bind("<Button-4>", wheel_zoom); cv.bind("<Button-5>", wheel_zoom)
+    cv.bind("<Shift-MouseWheel>", lambda e: cv.xview_scroll(int(-e.delta / 40), "units"))
+    cv.bind("<ButtonPress-2>", lambda e: cv.scan_mark(e.x, e.y))
+    cv.bind("<B2-Motion>", lambda e: cv.scan_dragto(e.x, e.y, gain=1))
     root.bind("<Control-z>", lambda e: undo())
     zc.bind("<<ComboboxSelected>>", redraw_all)
 
@@ -1928,6 +2041,8 @@ WORKFLOW
    • 'Preview plan' draws the frames; with 'Show shooting order' (on by default) a colour-graded
      path shows the order (green = first → yellow → magenta = last), with the first frame number
      of each row, Start/End markers and the meridian flip.
+     Mouse wheel zooms around the pointer, drag moves the view, double-click shows the whole sky.
+   • The settings on the left scroll (wheel or scrollbar) when the window is too small for them.
    • Rotator: keeps every frame level with the horizon, so overlap can be ~10 %.
      Offset = sky position angle − mechanical angle (from NINA's rotator panel after a
      plate solve). A wrong 180° doesn't matter here.
@@ -1976,7 +2091,9 @@ WORKFLOW
      line (e.g. where the "solid" part is really a thin, see-through tree top).
    • Editing: choose 'solid line' or 'branches line' above the image, then left-drag to
      redraw the line (brush width in degrees), right-click to restore the detected value,
-     Ctrl+Z to undo. Zoom and scroll to work precisely. Edits are used when saving.
+     Ctrl+Z to undo. Edits are used when saving.
+   • Mouse wheel zooms the image around the pointer (2–24 px/°, or pick a level in 'zoom');
+     Shift+wheel, middle-drag or the scrollbars move it.
    • Reduced frames are cached (in %LOCALAPPDATA%\\HorizonMapper\\cache), so building again
      – e.g. after adding fill-in frames – only reads the new files. 'Clear cache' frees the space.
    • 'Save horizon file…' (below the fill-in buttons) saves one NINA .hrz file: choose 'solid'
