@@ -1,11 +1,14 @@
 # Horizon Mapper for NINA
 
-The version is shown in the window title (currently 1.0.1).
+The version is shown in the window title (currently 1.1.0).
 
-Plans a NINA Advanced Sequencer run that photographs the sky around your horizon, then turns the
-FITS frames into a measured NINA horizon file (`.hrz`).
+Plans the frames that photograph the sky around your horizon, shoots them (through NINA's Advanced
+API plugin, or by saving a NINA Advanced Sequencer sequence), then turns the FITS frames into a
+measured NINA horizon file (`.hrz`).
 
-On both tabs the settings sit in a bar across the top and the picture fills the width below it.
+Tabs: **1. Plan sequence** → **2. Capture (NINA)** → **3. Build horizon**.
+
+On every tab the settings sit in a bar across the top and the picture fills the width below it.
 The bar scrolls sideways (mouse wheel or scrollbar) when the window is too narrow; the Plan
 buttons (and the log on the Build tab) on its right always stay visible. At start the window is made
 wide enough for all groups if the screen allows. Closing the window asks first if the horizon has
@@ -54,7 +57,46 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
 - **Conditions:** even overcast daylight gives the sharpest silhouettes. Take one test frame first;
   open sky should read about 10,000–30,000 ADU.
 
-## 2. Build horizon
+## 2. Capture (NINA)
+
+Shoots the frames directly from Horizon Mapper. NINA still talks to the equipment; Horizon Mapper
+tells it what to do through the **Advanced API** plugin, one frame at a time. (Saving a sequence on
+the Plan tab and running it in NINA still works as before.)
+
+**Setup (once):** in NINA install **Advanced API** (Plugins tab), enable its server in the plugin
+settings (default port 1888), and set NINA to save **FITS** files. Connect the mount, camera and
+rotator in NINA as usual. Don't run a NINA sequence at the same time.
+
+1. **Test connection** checks the plugin, shows which devices are connected, starts the live device
+   line (mount alt/az, pier side, rotator, camera) and fills in NINA's image folder.
+2. **Frames to shoot:** the plan from the Plan tab, or the fill-in frames generated on the Build tab.
+   **Load frames** shows them; the picture shows each frame's state (grey = to do, yellow = in
+   progress, green = done, orange = skipped, red = error). Wheel zooms, drag moves.
+3. **Capture** (exposure, gain, binning) follows the Plan tab; offset is NINA's camera setting.
+   **Settle** waits after each move.
+4. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°) or below **Never
+   below altitude** (default 10°) are skipped, never slewed to. **Unpark at start** / **Park when
+   finished**.
+5. **▶ Start** asks for confirmation, then for every frame: slew (alt/az converted to J2000 RA/Dec
+   with the mount's own sidereal time) → rotator to its mechanical angle → settle → expose. NINA saves
+   the FITS with its usual headers, and Horizon Mapper finds the file in NINA's image folder.
+
+**Pause and errors**
+
+- The big red **⏸ PAUSE** button, or **Esc** anywhere in the app, immediately stops the slew, the
+  rotator and the exposure, and holds. **▶ Resume** repeats the interrupted frame from its start.
+  While paused, **Skip frame** skips it.
+- **Any error or timeout pauses the run automatically** (with a beep and the reason in the log).
+  Examples: NINA not answering, a failed slew, the mount ending up somewhere else, or a stuck
+  rotator. Nothing is skipped silently. Fix the cause and **Resume**, or **■ Stop run**.
+- **■ Stop run** ends the run and keeps the frames taken so far. **Start** again offers to continue
+  from where it stopped. Closing the window during a run asks first and stops everything.
+
+When the run ends, the list of captured files is written to
+`%LOCALAPPDATA%\HorizonMapper\captures\` and added to the Build tab's folder list. The Build tab
+accepts such a list like a folder.
+
+## 3. Build horizon
 
 - Add the folder(s) with the frames. Subfolders are searched too.
 - Leave **Calibrate rotation from overlaps** on. If you don't know the rotator offset at all, also tick

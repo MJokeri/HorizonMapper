@@ -22,7 +22,7 @@ except ImportError:  # GUI will complain later
     Image = None
 
 APP_NAME = "Horizon Mapper for NINA"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.1.0"
 
 # =============================================================================
 #  Small numeric helpers (no scipy needed)
@@ -699,6 +699,345 @@ def save_plan(p, plan, path):
 
 
 # =============================================================================
+#  CAPTURE – drive NINA through its "Advanced API" plugin
+# =============================================================================
+
+class NinaApiError(RuntimeError):
+    pass
+
+
+class NinaApi:
+    """Minimal client for the NINA Advanced API plugin (v2, http://host:port/v2/api)."""
+
+    def __init__(self, host="localhost", port=1888, timeout=30.0):
+        self.base = f"http://{host}:{int(port)}/v2/api"
+        self.timeout = timeout
+
+    def get(self, path, timeout=None, **params):
+        import urllib.request, urllib.parse
+        q = {k: (str(v).lower() if isinstance(v, bool) else v) for k, v in params.items() if v is not None}
+        url = self.base + path + ("?" + urllib.parse.urlencode(q) if q else "")
+        try:
+            with urllib.request.urlopen(url, timeout=timeout or self.timeout) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception as e:                      # connection refused, timeout, HTTP error, bad JSON
+            raise NinaApiError(f"NINA API {path}: {e}") from e
+        if not data.get("Success", False):
+            raise NinaApiError(f"NINA API {path}: {data.get('Error') or data.get('Response') or 'failed'}")
+        return data.get("Response")
+
+    # convenience wrappers
+    def version(self):        return self.get("/version")
+    def mount(self):          return self.get("/equipment/mount/info")
+    def rotator(self):        return self.get("/equipment/rotator/info")
+    def camera(self):         return self.get("/equipment/camera/info")
+    def profile(self):        return self.get("/profile/show", active=True)
+
+    def stop_all(self):
+        """Stop every movement and exposure at once; errors are collected, not raised."""
+        errs = []
+        for path in ("/equipment/mount/slew/stop", "/equipment/rotator/stop-move",
+                     "/equipment/camera/abort-exposure"):
+            try:
+                self.get(path, timeout=5)
+            except NinaApiError as e:
+                errs.append(str(e))
+        return errs
+
+
+def altaz_to_radec_j2000(alt, az, lat, lst_hours, t_utc=None):
+    """Convert a topocentric alt/az direction to J2000 RA/Dec in degrees (good to ~1 arcmin:
+    precession applied; nutation, aberration and refraction ignored - fine for 2-3° frames)."""
+    t_utc = time.time() if t_utc is None else t_utc
+    A, h, p = math.radians(az), math.radians(alt), math.radians(lat)
+    sd = math.sin(p) * math.sin(h) + math.cos(p) * math.cos(h) * math.cos(A)
+    dec = math.asin(max(-1.0, min(1.0, sd)))
+    ha = math.atan2(-math.sin(A) * math.cos(h),
+                    math.cos(p) * math.sin(h) - math.sin(p) * math.cos(h) * math.cos(A))
+    ra = (math.radians(lst_hours * 15.0) - ha) % (2 * math.pi)              # of date
+    # precess date -> J2000 (IAU 1976), rotating back with the inverse matrix
+    T = ((t_utc / 86400.0 + 2440587.5) - 2451545.0) / 36525.0
+    as2r = math.pi / 180 / 3600
+    zeta = (2306.2181 * T + 0.30188 * T * T + 0.017998 * T ** 3) * as2r
+    z = (2306.2181 * T + 1.09468 * T * T + 0.018203 * T ** 3) * as2r
+    th = (2004.3109 * T - 0.42665 * T * T - 0.041833 * T ** 3) * as2r
+    cz, sz, cZ, sZ, ct, st = math.cos(zeta), math.sin(zeta), math.cos(z), math.sin(z), math.cos(th), math.sin(th)
+    P = [[cz * ct * cZ - sz * sZ, -sz * ct * cZ - cz * sZ, -st * cZ],
+         [cz * ct * sZ + sz * cZ, -sz * ct * sZ + cz * cZ, -st * sZ],
+         [cz * st, -sz * st, ct]]                                            # J2000 -> date
+    v = [math.cos(dec) * math.cos(ra), math.cos(dec) * math.sin(ra), math.sin(dec)]
+    w = [sum(P[r][c] * v[r] for r in range(3)) for c in range(3)]           # P^T v: date -> J2000
+    return math.degrees(math.atan2(w[1], w[0])) % 360, math.degrees(math.asin(max(-1, min(1, w[2]))))
+
+
+def sun_separation(alt, az, lat, lon, t_utc=None):
+    """Angle between a pointing (alt/az) and the Sun, degrees."""
+    s_alt, s_az = sun_altaz(time.time() if t_utc is None else t_utc, lat, lon)
+    a1, a2 = math.radians(alt), math.radians(s_alt)
+    c = math.sin(a1) * math.sin(a2) + math.cos(a1) * math.cos(a2) * math.cos(math.radians(az - s_az))
+    return math.degrees(math.acos(max(-1.0, min(1.0, c))))
+
+
+class CaptureRunner:
+    """Shoots a list of frames through NINA, one at a time: slew → rotator → capture → find file.
+
+    Every wait polls NINA, so pause() takes effect at once: it stops the mount, the rotator and
+    the exposure, and the run holds until resume(); the interrupted frame is then repeated from
+    its start. Any error or timeout pauses the run (it is never skipped silently). stop() ends it.
+    Events go to `emit(kind, **data)`: 'log', 'state', 'frame' (index, status, path), 'done'.
+    """
+
+    def __init__(self, api, frames, emit, exposure=1.0, gain=None, binning=None, target="Horizon mapping",
+                 settle=1.0, sun_min=30.0, floor=0.0, unpark=True, park=False, image_folder="",
+                 slew_timeout=180.0, rot_timeout=120.0, rot_tol=0.5, start_index=0, poll=0.5):
+        self.api, self.emit = api, emit
+        self.frames = list(frames)
+        # rotator target for every frame (a plan only lists the moves; carry the angle forward)
+        self.rot = []; cur = None
+        for _, _, r in self.frames:
+            cur = r if r is not None else cur
+            self.rot.append(cur)
+        self.exposure, self.gain, self.binning, self.target = exposure, gain, binning, target
+        self.settle, self.sun_min, self.floor = settle, sun_min, floor
+        self.unpark, self.park, self.image_folder = unpark, park, image_folder
+        self.slew_timeout, self.rot_timeout, self.rot_tol, self.poll = slew_timeout, rot_timeout, rot_tol, poll
+        self.index = start_index
+        self.status = ["pending"] * len(self.frames)
+        self.paths = [None] * len(self.frames)
+        self._pause = threading.Event(); self._stop = threading.Event(); self._skip = threading.Event()
+        self.state = "idle"; self.thread = None; self.pause_reason = ""
+        self._gen = 0; self._step_gen = 0            # pause counter: any pause interrupts the running step
+        self._dir_hint = None
+
+    # ---------------------------------------------------------------- control (any thread)
+    def start(self):
+        self.thread = threading.Thread(target=self._run, daemon=True); self.thread.start()
+
+    def pause(self, reason="Paused by user"):
+        """Stop all movement and exposure now and hold."""
+        if self.state in ("done", "stopped"):
+            return
+        self.pause_reason = reason
+        self._gen += 1
+        self._pause.set()
+        errs = self.api.stop_all()
+        self._set_state("paused")
+        self.emit("log", msg=f"PAUSED: {reason}" + (f" (stop commands: {'; '.join(errs)})" if errs else
+                                                    " – mount, rotator and camera stopped."))
+
+    def resume(self):
+        if self._pause.is_set():
+            self._pause.clear(); self._set_state("running")
+            self.emit("log", msg=f"Resumed at frame {self.index + 1}.")
+
+    def skip(self):
+        """While paused: skip the current frame and continue with the next one when resumed."""
+        self._skip.set()
+
+    def stop(self):
+        self._stop.set(); self._pause.clear()
+        self.api.stop_all()
+        self.emit("log", msg="Stopping: mount, rotator and camera stopped.")
+
+    # ---------------------------------------------------------------- internals
+    def _set_state(self, st):
+        self.state = st; self.emit("state", state=st)
+
+    class _Interrupted(Exception):
+        pass
+
+    def _interrupted(self):
+        return self._stop.is_set() or self._pause.is_set() or self._gen != self._step_gen
+
+    def _check(self):
+        if self._interrupted():
+            raise self._Interrupted()
+
+    def _wait(self, seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            self._check(); time.sleep(min(self.poll, max(end - time.time(), 0.01)))
+
+    def _wait_until(self, cond, timeout, what):
+        end = time.time() + timeout
+        while True:
+            self._check()
+            if cond():
+                return
+            if time.time() > end:
+                raise NinaApiError(f"timeout after {timeout:.0f} s waiting for {what}")
+            time.sleep(self.poll)
+
+    def _hold(self):
+        """Block while paused. Returns False if the run was stopped."""
+        while self._pause.is_set() and not self._stop.is_set():
+            time.sleep(0.1)
+        return not self._stop.is_set()
+
+    def _locate(self, filename):
+        """Find a file NINA saved, by name, under its image folder (newest folders first)."""
+        if not filename:
+            return None
+        if self._dir_hint and os.path.isfile(os.path.join(self._dir_hint, filename)):
+            return os.path.join(self._dir_hint, filename)
+        root = self.image_folder
+        if not root or not os.path.isdir(root):
+            return None
+        for d, _, files in os.walk(root):
+            if filename in files:
+                self._dir_hint = d
+                return os.path.join(d, filename)
+        return None
+
+    def _prepare(self):
+        m = self.api.mount()
+        if not m.get("Connected"):
+            raise NinaApiError("the mount is not connected in NINA")
+        if m.get("AtPark"):
+            if not self.unpark:
+                raise NinaApiError("the mount is parked (enable 'Unpark at start' or unpark it in NINA)")
+            self.emit("log", msg="Unparking the mount…")
+            self.api.get("/equipment/mount/unpark", timeout=120)
+            self._wait_until(lambda: not self.api.mount().get("AtPark"), 120, "unpark")
+        if not m.get("TrackingEnabled", True):
+            self.api.get("/equipment/mount/tracking", mode=0)              # sidereal
+        if not self.api.camera().get("Connected"):
+            raise NinaApiError("the camera is not connected in NINA")
+        if any(r is not None for r in self.rot) and not self.api.rotator().get("Connected"):
+            raise NinaApiError("the plan uses the rotator, but no rotator is connected in NINA")
+        if self.binning:
+            self.api.get("/equipment/camera/set-binning", binning=f"{int(self.binning)}x{int(self.binning)}")
+        return m
+
+    def _frame(self, i, site):
+        alt, az, _ = self.frames[i]
+        lat, lon = site
+        if alt < self.floor - 1e-6:
+            return "skipped", f"below the lowest altitude ({alt:.1f}° < {self.floor:.1f}°)"
+        sep = sun_separation(alt, az, lat, lon)
+        if sep < self.sun_min:
+            return "skipped", f"too close to the Sun ({sep:.0f}° < {self.sun_min:.0f}°)"
+        # 1 – slew (target computed now, from the mount's own sidereal time)
+        m = self.api.mount()
+        ra, dec = altaz_to_radec_j2000(alt, az, lat, float(m["SiderealTime"]))
+        self.emit("frame", index=i, status="slewing")
+        self.api.get("/equipment/mount/slew", ra=round(ra, 5), dec=round(dec, 5), waitForResult=False)
+        time.sleep(self.poll)
+        self._wait_until(lambda: not self.api.mount().get("Slewing"), self.slew_timeout, "the slew")
+        self._check()                                   # a pause stops the slew: not an arrival
+        m = self.api.mount()
+        d_alt = abs(float(m.get("Altitude", alt)) - alt)
+        d_az = abs((float(m.get("Azimuth", az)) - az + 180) % 360 - 180) * math.cos(math.radians(alt))
+        if max(d_alt, d_az) > 2.0:
+            raise NinaApiError(f"the mount is at alt {m.get('Altitude'):.1f}°, az {m.get('Azimuth'):.1f}° "
+                               f"instead of {alt:.1f}°, {az:.1f}° – slew stopped or limits hit?")
+        # 2 – rotator
+        tgt = self.rot[i]
+        if tgt is not None:
+            r = self.api.rotator()
+            if abs((float(r.get("MechanicalPosition", 0)) - tgt + 180) % 360 - 180) > self.rot_tol:
+                self.emit("frame", index=i, status="rotating")
+                self.api.get("/equipment/rotator/move-mechanical", position=round(tgt, 2))
+                time.sleep(self.poll)
+
+                def rot_done():
+                    rr = self.api.rotator()
+                    return (not rr.get("IsMoving")) and \
+                        abs((float(rr.get("MechanicalPosition", 0)) - tgt + 180) % 360 - 180) <= max(self.rot_tol, 1.0)
+                self._wait_until(rot_done, self.rot_timeout, "the rotator")
+        self._wait(self.settle)
+        # 3 – capture (NINA saves the FITS with its usual headers: CENTALT, CENTAZ, ROTATOR, …)
+        self.emit("frame", index=i, status="exposing")
+        n0 = int(self.api.get("/image-history", count=True) or 0)
+        self.api.get("/equipment/camera/capture", duration=self.exposure, gain=self.gain, save=True,
+                     imageType="LIGHT", targetName=self.target, omitImage=True, skipAutoStretch=True)
+
+        def captured():
+            try:
+                return self.api.get("/equipment/camera/capture", getResult=True, omitImage=True) \
+                    != "Capture already in progress"
+            except NinaApiError:
+                return False
+        self._wait_until(captured, self.exposure + 120, "the exposure and download")
+        # 4 – wait for NINA to save it, then find the file
+        self._wait_until(lambda: int(self.api.get("/image-history", count=True) or 0) > n0, 60, "NINA to save the image")
+        h = self.api.get("/image-history", index=n0)
+        entry = h[0] if isinstance(h, list) and h else (h if isinstance(h, dict) else {})
+        name = entry.get("Filename")
+        path = self._locate(name)
+        if name and not path:
+            self.emit("log", msg=f"Frame {i + 1}: saved by NINA as {name}, but not found under the image folder.")
+        return "done", path or name
+
+    def _run(self):
+        self._set_state("running")
+        try:
+            m = self._prepare()
+        except self._Interrupted:
+            m = None
+        except NinaApiError as e:
+            self.emit("log", msg=f"Cannot start: {e}"); self._set_state("stopped"); self.emit("done", ok=False); return
+        site = (float(m["SiteLatitude"]), float(m["SiteLongitude"])) if m else (0.0, 0.0)
+        while self.index < len(self.frames) and not self._stop.is_set():
+            if self._pause.is_set():
+                if not self._hold():
+                    break
+                if m is None:                           # paused during preparation: prepare again
+                    try:
+                        m = self._prepare(); site = (float(m["SiteLatitude"]), float(m["SiteLongitude"]))
+                    except self._Interrupted:
+                        continue
+                    except NinaApiError as e:
+                        self.pause(f"error – {e}"); continue
+            if self._skip.is_set():
+                self._skip.clear()
+                self.status[self.index] = "skipped"; self.emit("frame", index=self.index, status="skipped")
+                self.emit("log", msg=f"Frame {self.index + 1} skipped by user."); self.index += 1; continue
+            i = self.index
+            self._step_gen = self._gen
+            try:
+                st, info = self._frame(i, site)
+            except self._Interrupted:
+                self.status[i] = "pending"; self.emit("frame", index=i, status="pending"); continue
+            except NinaApiError as e:
+                if self._interrupted():                     # caused by our own stop commands
+                    self.status[i] = "pending"; self.emit("frame", index=i, status="pending"); continue
+                self.status[i] = "error"; self.emit("frame", index=i, status="error")
+                self.pause(f"error at frame {i + 1} – {e}"); continue
+            except Exception as e:                      # unexpected: pause, never run on blindly
+                self.status[i] = "error"; self.emit("frame", index=i, status="error")
+                self.pause(f"unexpected error at frame {i + 1} – {type(e).__name__}: {e}"); continue
+            self.status[i] = st
+            if st == "done":
+                self.paths[i] = info
+            self.emit("frame", index=i, status=st, path=info if st == "done" else None)
+            if st == "skipped":
+                self.emit("log", msg=f"Frame {i + 1} skipped: {info}")
+            self.index += 1
+        stopped = self._stop.is_set()
+        if self.park and not stopped:
+            try:
+                self.emit("log", msg="Parking the mount…"); self.api.get("/equipment/mount/park", timeout=10)
+            except NinaApiError as e:
+                self.emit("log", msg=f"Park failed: {e}")
+        self._set_state("stopped" if stopped else "done")
+        self.emit("done", ok=not stopped)
+
+
+def write_capture_list(paths, folder=None):
+    """Write the captured FITS paths to a list file that the Build tab accepts like a folder."""
+    folder = folder or os.path.join(os.path.dirname(default_cache_dir()), "captures")
+    os.makedirs(folder, exist_ok=True)
+    fn = os.path.join(folder, time.strftime("capture_%Y-%m-%d_%H%M%S.txt"))
+    with open(fn, "w", encoding="utf-8") as f:
+        f.write("# Horizon Mapper capture list – one FITS file per line\n")
+        for p in paths:
+            if p and os.path.isabs(p):
+                f.write(p + "\n")
+    return fn
+
+
+# =============================================================================
 #  PROCESS – FITS reading
 # =============================================================================
 
@@ -756,7 +1095,13 @@ def find_fits(folders, recursive=True):
     out = []
     for fo in folders:
         if os.path.isfile(fo):
-            out.append(fo); continue
+            if fo.lower().endswith(".txt"):          # capture list: one FITS path per line
+                with open(fo, encoding="utf-8") as fh:
+                    out += [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")
+                            and os.path.isfile(ln.strip())]
+            else:
+                out.append(fo)
+            continue
         for root, dirs, files in os.walk(fo):
             for fn in files:
                 if fn.lower().endswith((".fits", ".fit", ".fts")):
@@ -1240,6 +1585,7 @@ def run_gui():
 
     # ------------------------------------------------------------------ PLAN
     plan_tab = ttk.Frame(nb); nb.add(plan_tab, text="1. Plan sequence")
+    cap_tab = ttk.Frame(nb); nb.add(cap_tab, text="2. Capture (NINA)")      # filled in below
     left, plan_fixed = topbar(plan_tab)
     right = ttk.Frame(plan_tab); right.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     P = PlanParams()
@@ -1520,7 +1866,7 @@ def run_gui():
     update_fov()
 
     # ------------------------------------------------------------------ PROCESS
-    proc = ttk.Frame(nb); nb.add(proc, text="2. Build horizon")
+    proc = ttk.Frame(nb); nb.add(proc, text="3. Build horizon")
     pl, build_fixed = topbar(proc)
     pr = ttk.Frame(proc); pr.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     box = group(pl, "FITS folders (searched recursively)")
@@ -2042,12 +2388,365 @@ def run_gui():
         root.after(150, poll)
     poll()
 
+
+    # ------------------------------------------------------------------ CAPTURE (NINA Advanced API)
+    cbar, cfixed = topbar(cap_tab)
+    C = {"runner": None, "frames": [], "source": "", "api": None, "polling": False, "q": queue.Queue(),
+         "view": (0.0, 360.0, 0.0, 90.0), "box": (50, 20, 900, 400), "cur": None}
+    cv_ = {}
+
+    def cvar(n, v, kind=tk.StringVar):
+        cv_[n] = kind(value=v); return cv_[n]
+
+    g = group(cbar, "NINA – Advanced API plugin")
+    labeled(g, 0, "Host", cvar("host", "localhost"), width=12)
+    labeled(g, 1, "Port", cvar("port", "1888"), width=12)
+    conn_lbl = ttk.Label(g, text="Not connected", foreground="#666", wraplength=260, justify="left")
+    conn_lbl.grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
+    g = group(cbar, "Frames to shoot")
+    cvar("src", "plan")
+    ttk.Radiobutton(g, text="Plan from the Plan tab", variable=cv_["src"], value="plan").grid(row=0, column=0, sticky="w", padx=4)
+    ttk.Radiobutton(g, text="Fill-in frames from the Build tab", variable=cv_["src"], value="fill").grid(row=1, column=0, sticky="w", padx=4)
+    frames_lbl = ttk.Label(g, text="No frames loaded", foreground="#666", wraplength=260)
+    frames_lbl.grid(row=3, column=0, sticky="w", padx=4)
+    g = group(cbar, "Capture")
+    labeled(g, 0, "Exposure (s)", cvar("exposure", V["exposure"].get()), width=7)
+    labeled(g, 1, "Gain (-1 = NINA default)", cvar("gain", V["gain"].get()), width=7)
+    labeled(g, 2, "Binning", cvar("binning", V["binning"].get()), width=7)
+    labeled(g, 3, "Settle after moves (s)", cvar("settle", "1.0"), width=7)
+    for k in ("exposure", "gain", "binning"):          # follow the Plan tab
+        V[k].trace_add("write", lambda *a, k=k: cv_[k].set(V[k].get()))
+    g = group(cbar, "Safety")
+    labeled(g, 0, "Keep away from the Sun (°)", cvar("sun", "30"), width=6)
+    labeled(g, 1, "Never below altitude (°)", cvar("floor", "10"), width=6)
+    cvar("unpark", True, tk.BooleanVar); cvar("park", V["park"].get(), tk.BooleanVar)
+    ttk.Checkbutton(g, text="Unpark at start", variable=cv_["unpark"]).grid(row=2, column=0, sticky="w", padx=4)
+    ttk.Checkbutton(g, text="Park when finished", variable=cv_["park"]).grid(row=3, column=0, sticky="w", padx=4)
+    g = group(cbar, "Files")
+    labeled(g, 0, "Target name", cvar("target", "Horizon mapping"), width=18)
+    ttk.Label(g, text="NINA image folder (found automatically)").grid(row=1, column=0, columnspan=3, sticky="w", padx=4)
+    ttk.Entry(g, textvariable=cvar("folder", ""), width=30).grid(row=2, column=0, columnspan=2, sticky="w", padx=4)
+    ttk.Button(g, text="…", width=3, command=lambda: cv_["folder"].set(
+        filedialog.askdirectory() or cv_["folder"].get())).grid(row=2, column=2, sticky="w")
+
+    # fixed on the right: run controls (Pause always visible) and the log
+    runb = ttk.LabelFrame(cfixed, text="Run"); runb.pack(side="left", fill="y", pady=2)
+    pause_btn = tk.Button(runb, text="⏸  PAUSE  (Esc)", bg="#c62828", fg="white", activebackground="#8e0000",
+                          activeforeground="white", font=("Segoe UI", 12, "bold"), relief="raised", bd=3,
+                          state="disabled", command=lambda: cap_pause())
+    pause_btn.pack(side="top", fill="x", padx=4, pady=(4, 6), ipady=6)
+    rb = ttk.Frame(runb); rb.pack(side="top", fill="x", padx=4)
+    start_btn = ttk.Button(rb, text="▶ Start", command=lambda: cap_start()); start_btn.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
+    resume_btn = ttk.Button(rb, text="▶ Resume", state="disabled", command=lambda: cap_resume()); resume_btn.grid(row=0, column=1, sticky="ew", padx=1, pady=1)
+    skip_btn = ttk.Button(rb, text="Skip frame", state="disabled", command=lambda: cap_skip()); skip_btn.grid(row=1, column=0, sticky="ew", padx=1, pady=1)
+    stop_btn = ttk.Button(rb, text="■ Stop run", state="disabled", command=lambda: cap_stop()); stop_btn.grid(row=1, column=1, sticky="ew", padx=1, pady=1)
+    ttk.Button(rb, text="Test connection", command=lambda: cap_connect()).grid(row=2, column=0, sticky="ew", padx=1, pady=1)
+    ttk.Button(rb, text="Load frames", command=lambda: cap_load()).grid(row=2, column=1, sticky="ew", padx=1, pady=1)
+    cap_pb = ttk.Progressbar(runb, length=220, maximum=1.0); cap_pb.pack(side="top", fill="x", padx=4, pady=4)
+    cap_status = ttk.Label(runb, text="Idle", wraplength=240, justify="left"); cap_status.pack(side="top", anchor="w", padx=4)
+    clog_box = ttk.LabelFrame(cfixed, text="Log"); clog_box.pack(side="left", fill="y", padx=(6, 0), pady=2)
+    clog = tk.Text(clog_box, height=9, width=56, wrap="word"); clog.pack(fill="both", expand=True, padx=2, pady=2)
+
+    cright = ttk.Frame(cap_tab); cright.pack(side="top", fill="both", expand=True, padx=6, pady=6)
+    dev_lbl = ttk.Label(cright, text="Devices: –", font=("Segoe UI", 10)); dev_lbl.pack(anchor="w")
+    ttk.Label(cright, text="Grey = to do · yellow = in progress · green = done · orange = skipped · red = error"
+              " · wheel: zoom · drag: move · double-click: whole sky", foreground="#666").pack(anchor="w")
+    ccan = tk.Canvas(cright, bg="white", height=300); ccan.pack(fill="both", expand=True)
+
+    def clog_add(m):
+        clog.insert("end", time.strftime("%H:%M:%S ") + m + "\n"); clog.see("end")
+
+    def api_now():
+        return NinaApi(cv_["host"].get().strip() or "localhost", int(cv_["port"].get() or 1888), timeout=15)
+
+    def cap_connect():
+        """Check the plugin, read device states and NINA's image folder (in the background)."""
+        api = api_now()
+
+        def job():
+            try:
+                ver = api.version()
+                prof = api.profile() or {}
+                folder = ((prof.get("ImageFileSettings") or {}).get("FilePath")) or ""
+                ftype = ((prof.get("ImageFileSettings") or {}).get("FileType")) or ""
+                parts = []
+                for name, fn in (("mount", api.mount), ("camera", api.camera), ("rotator", api.rotator)):
+                    try:
+                        parts.append(f"{name} {'connected' if fn().get('Connected') else 'NOT connected'}")
+                    except NinaApiError:
+                        parts.append(f"{name} ?")
+                C["q"].put(("connected", (ver, folder, ftype, parts)))
+            except NinaApiError as e:
+                C["q"].put(("conn_error", str(e)))
+        threading.Thread(target=job, daemon=True).start()
+        conn_lbl.config(text="Connecting…")
+
+    def poll_devices():
+        """Device status line, every 2 s while connected."""
+        def job():
+            while C["polling"]:
+                api = C["api"]
+                try:
+                    m = api.mount(); txt = (f"Mount: alt {m.get('Altitude', 0):.1f}°  az {m.get('Azimuth', 0):.1f}°  "
+                                            f"{str(m.get('SideOfPier', '')).replace('pier', 'pier ')}"
+                                            f"{'  PARKED' if m.get('AtPark') else ''}{'  slewing' if m.get('Slewing') else ''}")
+                except NinaApiError:
+                    txt = "Mount: ?"
+                try:
+                    r = api.rotator()
+                    txt += f"   ·   Rotator: {r.get('MechanicalPosition', 0):.1f}° mech{'  moving' if r.get('IsMoving') else ''}" \
+                        if r.get("Connected") else "   ·   Rotator: not connected"
+                except NinaApiError:
+                    pass
+                try:
+                    c = api.camera(); txt += f"   ·   Camera: {c.get('CameraState', '?')}" if c.get("Connected") else "   ·   Camera: not connected"
+                except NinaApiError:
+                    txt += "   ·   Camera: ?"
+                C["q"].put(("dev", txt)); time.sleep(2.0)
+        if not C["polling"]:
+            C["polling"] = True; threading.Thread(target=job, daemon=True).start()
+
+    def cap_load():
+        """Take the frames from the Plan tab (plan) or the Build tab (fill-in)."""
+        try:
+            if cv_["src"].get() == "fill":
+                if not fill.get("plan"):
+                    raise ValueError("Generate fill-in frames on the Build tab first.")
+                plan = fill["plan"]; src = "fill-in frames"
+            else:
+                p = collect(); plan = make_plan(p); src = "Plan tab plan"
+        except Exception as e:
+            messagebox.showerror(APP_NAME, str(e)); return False
+        C["frames"] = list(plan["frames"]); C["plan"] = plan; C["source"] = src
+        C["status"] = ["pending"] * len(C["frames"]); C["runner"] = None; C["cur"] = None
+        try:
+            ex = float(cv_["exposure"].get())
+        except ValueError:
+            ex = 1.0
+        mins = len(C["frames"]) * (ex + 6.0) / 60
+        frames_lbl.config(text=f"{len(C['frames'])} frames ({src}), roughly {mins:.0f} min")
+        draw_cap(); return True
+
+    def cap_buttons(st):
+        running, paused = st == "running", st == "paused"
+        pause_btn.config(state="normal" if running else "disabled")
+        resume_btn.config(state="normal" if paused else "disabled")
+        skip_btn.config(state="normal" if paused else "disabled")
+        stop_btn.config(state="normal" if (running or paused) else "disabled")
+        start_btn.config(state="disabled" if (running or paused) else "normal")
+
+    def cap_start():
+        if C["runner"] and C["runner"].state in ("running", "paused"):
+            return
+        if not C["frames"] and not cap_load():
+            return
+        try:
+            ex = float(cv_["exposure"].get()); gain = int(float(cv_["gain"].get()))
+            binning = int(float(cv_["binning"].get())); settle = float(cv_["settle"].get())
+            sun = float(cv_["sun"].get()); floor_ = float(cv_["floor"].get())
+        except ValueError:
+            messagebox.showerror(APP_NAME, "Check the capture and safety values."); return
+        start_at = 0
+        old = C["runner"]
+        if old and old.frames == C["frames"] and 0 < old.index < len(C["frames"]):
+            if messagebox.askyesno(APP_NAME, f"Continue the previous run from frame {old.index + 1}?\n"
+                                             "(No = start again from the first frame)"):
+                start_at = old.index
+        if not messagebox.askokcancel(APP_NAME,
+                f"Start shooting {len(C['frames']) - start_at} frames ({C['source']}) through NINA?\n\n"
+                "The mount, rotator and camera will move on their own.\n"
+                "Stay nearby – PAUSE (or Esc) stops every movement at once.", icon="warning"):
+            return
+        q_ = C["q"]
+        runner = CaptureRunner(api_now(), C["frames"], lambda kind, **d: q_.put(("run", (kind, d))),
+                               exposure=ex, gain=(gain if gain >= 0 else None), binning=binning,
+                               target=cv_["target"].get() or "Horizon mapping", settle=settle, sun_min=sun,
+                               floor=floor_, unpark=cv_["unpark"].get(), park=cv_["park"].get(),
+                               image_folder=cv_["folder"].get(), start_index=start_at)
+        if old and start_at:
+            runner.status[:start_at] = old.status[:start_at]; runner.paths[:start_at] = old.paths[:start_at]
+        C["runner"] = runner; C["status"] = list(runner.status)
+        clog_add(f"Start: {len(C['frames']) - start_at} frames, exposure {ex} s, sun ≥ {sun}°, altitude ≥ {floor_}°.")
+        if not C["polling"]:
+            C["api"] = api_now(); poll_devices()
+        runner.start(); cap_buttons("running")
+
+    def cap_pause(reason="Paused by user"):
+        r = C["runner"]
+        if r and r.state == "running":
+            threading.Thread(target=r.pause, args=(reason,), daemon=True).start()
+            cap_status.config(text="Pausing – stopping mount, rotator and camera…")
+
+    def cap_resume():
+        r = C["runner"]
+        if r and r.state == "paused":
+            r.resume(); cap_buttons("running")
+
+    def cap_skip():
+        r = C["runner"]
+        if r and r.state == "paused":
+            r.skip(); clog_add(f"Frame {r.index + 1} will be skipped – press Resume to continue.")
+
+    def cap_stop():
+        r = C["runner"]
+        if r and r.state in ("running", "paused"):
+            if messagebox.askyesno(APP_NAME, "Stop the run? Frames taken so far are kept.\n"
+                                             "(Use PAUSE instead if you want to continue later.)"):
+                threading.Thread(target=r.stop, daemon=True).start()
+
+    root.bind_all("<Escape>", lambda e: cap_pause("Esc pressed"), add="+")
+
+    def cap_finished(ok):
+        r = C["runner"]
+        paths = [p for p in r.paths if p and os.path.isabs(p) and os.path.isfile(p)]
+        done = sum(1 for s_ in r.status if s_ == "done")
+        msg = f"Run {'finished' if ok else 'stopped'}: {done} frames taken"
+        if paths:
+            lst = write_capture_list(paths)
+            if lst not in folders.get(0, "end"):
+                folders.insert("end", lst)
+            msg += f"; the list of files was added to the Build tab:\n{lst}"
+        elif done:
+            msg += ". The files were not found under the NINA image folder – add NINA's folder on the Build tab."
+        clog_add(msg.replace("\n", " ")); cap_buttons(r.state)
+        messagebox.showinfo(APP_NAME, msg)
+
+    def cap_poll():
+        try:
+            while True:
+                kind, val = C["q"].get_nowait()
+                if kind == "connected":
+                    ver, folder, ftype, parts = val
+                    conn_lbl.config(text=f"Advanced API {ver}: " + ", ".join(parts))
+                    if folder and not cv_["folder"].get():
+                        cv_["folder"].set(folder)
+                    if ftype and str(ftype).upper() not in ("FITS", "0"):
+                        clog_add(f"Note: NINA saves {ftype} files – set NINA to FITS for the Build tab.")
+                    clog_add("Connected to NINA: " + ", ".join(parts))
+                    C["api"] = api_now(); poll_devices()
+                elif kind == "conn_error":
+                    conn_lbl.config(text="Not connected – is NINA running with the Advanced API plugin enabled?")
+                    clog_add(val)
+                elif kind == "dev":
+                    dev_lbl.config(text=val)
+                elif kind == "run":
+                    k, d = val
+                    r = C["runner"]
+                    if k == "log":
+                        clog_add(d["msg"])
+                        if d["msg"].startswith("PAUSED"):
+                            cap_status.config(text=d["msg"]); cap_buttons("paused")
+                            try:
+                                root.bell()
+                            except Exception:
+                                pass
+                    elif k == "state":
+                        cap_buttons(d["state"])
+                        if d["state"] == "running":
+                            cap_status.config(text="Running")
+                    elif k == "frame":
+                        i = d["index"]; C["status"][i] = d["status"]; C["cur"] = i
+                        n = len(C["frames"]); done = sum(1 for s_ in C["status"] if s_ in ("done", "skipped"))
+                        cap_pb["value"] = done / max(n, 1)
+                        if d["status"] in ("slewing", "rotating", "exposing"):
+                            alt, az, _ = C["frames"][i]
+                            cap_status.config(text=f"Frame {i + 1}/{n}: {d['status']} – alt {alt:.1f}°, az {az:.1f}°")
+                        draw_cap()
+                    elif k == "done":
+                        cap_finished(d.get("ok", False))
+        except queue.Empty:
+            pass
+        root.after(150, cap_poll)
+    cap_poll()
+
+    STATUS_COL = {"pending": "#9e9e9e", "slewing": "#f9a825", "rotating": "#f9a825", "exposing": "#f9a825",
+                  "done": "#2e7d32", "skipped": "#ef6c00", "error": "#c62828"}
+
+    def draw_cap():
+        ccan.delete("all")
+        W = ccan.winfo_width() or 900; H = ccan.winfo_height() or 400
+        x0, y0, x1, y1 = 50, 20, W - 15, H - 30
+        az0, az1, h0, h1 = C["view"]; C["box"] = (x0, y0, x1, y1)
+        XA = lambda a: x0 + (a - az0) / (az1 - az0) * (x1 - x0)
+        Y = lambda h: y1 - (h - h0) / (h1 - h0) * (y1 - y0)
+        st_ = next((t for t in (1, 2, 5, 10, 15, 30) if (az1 - az0) / t <= 12), 30)
+        at = [v for v in np.arange(math.ceil(az0 / st_) * st_, az1 + 1e-9, st_)]
+        sh_ = next((t for t in (1, 2, 5, 10) if (h1 - h0) / t <= 12), 10)
+        ht = [v for v in np.arange(math.ceil(h0 / sh_) * sh_, h1 + 1e-9, sh_)]
+        for a in at:
+            ccan.create_line(XA(a), y0, XA(a), y1, fill="#e3e3e3")
+        for h in ht:
+            ccan.create_line(x0, Y(h), x1, Y(h), fill="#e3e3e3")
+        plan = C.get("plan")
+        if plan and C["frames"]:
+            kx = (x1 - x0) / (az1 - az0)
+            fw, fh = plan["fw"], plan["fh"]
+            pts = []
+            for i, (alt, az, _) in enumerate(C["frames"]):
+                cw = fw / max(math.cos(math.radians(alt)), 0.05) / 2
+                st = C["status"][i] if i < len(C["status"]) else "pending"
+                col = STATUS_COL.get(st, "#9e9e9e")
+                fillc = {"done": "#c8e6c9", "skipped": "#ffe0b2", "error": "#ffcdd2"}.get(st, "")
+                if st in ("slewing", "rotating", "exposing"):
+                    fillc = "#fff59d"
+                for sh in (0, 360, -360):
+                    xc = XA(az % 360 + sh)
+                    if xc + cw * kx < x0 - 50 or xc - cw * kx > x1 + 50:
+                        continue
+                    ccan.create_rectangle(xc - cw * kx, Y(alt + fh / 2), xc + cw * kx, Y(alt - fh / 2),
+                                          outline=col, fill=fillc, width=2 if fillc else 1)
+                pts.append((XA(az % 360), Y(alt)))
+            for i in range(len(pts) - 1):
+                if abs(pts[i + 1][0] - pts[i][0]) < (x1 - x0) / 2:
+                    ccan.create_line(*pts[i], *pts[i + 1], fill="#b0bec5")
+            if C["cur"] is not None and C["cur"] < len(pts):
+                x, y = pts[C["cur"]]
+                ccan.create_oval(x - 6, y - 6, x + 6, y + 6, outline="#000", width=2)
+        for r_ in ((0, 0, W, y0), (0, y1, W, H), (0, 0, x0, H), (x1, 0, W, H)):
+            ccan.create_rectangle(*r_, fill="white", outline="")
+        ccan.create_rectangle(x0, y0, x1, y1, outline="#bbb")
+        for a in at:
+            ccan.create_text(XA(a), y1 + 12, text=f"{a:g}°")
+        for h in ht:
+            ccan.create_text(x0 - 22, Y(h), text=f"{h:g}°")
+
+    def cap_set_view(a0, a1, b0, b1):
+        w = min(max(a1 - a0, 5.0), 360.0); h = min(max(b1 - b0, 3.0), 90.0)
+        a0 = min(max(a0, 0.0), 360.0 - w); b0 = min(max(b0, 0.0), 90.0 - h)
+        C["view"] = (a0, a0 + w, b0, b0 + h); draw_cap()
+
+    def cap_wheel(e):
+        x0, y0, x1, y1 = C["box"]; az0, az1, h0, h1 = C["view"]
+        a = az0 + (e.x - x0) / (x1 - x0) * (az1 - az0); h = h0 + (y1 - e.y) / (y1 - y0) * (h1 - h0)
+        f_ = 0.8 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1.25
+        cap_set_view(a - (a - az0) * f_, a + (az1 - a) * f_, h - (h - h0) * f_, h + (h1 - h) * f_)
+        return "break"
+
+    def cap_drag(e):
+        if "drag" not in C:
+            return
+        sx, sy, (az0, az1, h0, h1) = C["drag"]; x0, y0, x1, y1 = C["box"]
+        da = -(e.x - sx) / (x1 - x0) * (az1 - az0); dh = (e.y - sy) / (y1 - y0) * (h1 - h0)
+        cap_set_view(az0 + da, az1 + da, h0 + dh, h1 + dh)
+
+    ccan.bind("<Configure>", lambda e: draw_cap())
+    ccan.bind("<MouseWheel>", cap_wheel); ccan.bind("<Button-4>", cap_wheel); ccan.bind("<Button-5>", cap_wheel)
+    ccan.bind("<ButtonPress-1>", lambda e: C.__setitem__("drag", (e.x, e.y, C["view"])))
+    ccan.bind("<B1-Motion>", cap_drag)
+    ccan.bind("<Double-Button-1>", lambda e: cap_set_view(0, 360, 0, 90))
+
     # ------------------------------------------------------------------ HELP
     help_tab = ttk.Frame(nb); nb.add(help_tab, text="Help")
     t = tk.Text(help_tab, wrap="word"); t.pack(fill="both", expand=True)
     t.insert("1.0", HELP_TEXT); t.config(state="disabled")
 
     def on_close():
+        r = C.get("runner")
+        if r and r.state in ("running", "paused"):
+            if not messagebox.askyesno(APP_NAME, "A capture run is active.\n\nStop it (mount, rotator and "
+                                                 "camera are stopped) and exit?", icon="warning"):
+                nb.select(cap_tab); return
+            r.stop()
         fp = lines_fingerprint()
         if fp is not None and fp != E.get("saved_fp"):
             if not messagebox.askyesno(APP_NAME, "The horizon has not been saved since it was built or "
@@ -2070,7 +2769,7 @@ def run_gui():
 
 HELP_TEXT = """HORIZON MAPPER FOR NINA   (the version is shown in the window title)
 
-WORKFLOW
+WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
 1. Plan sequence
    • Enter camera/telescope (or 'Read from a FITS file…'). The field of view is computed.
    • Choose the area: a fixed altitude band, or a strip around your current horizon file
@@ -2102,7 +2801,21 @@ WORKFLOW
      open sky should read ~10,000–30,000 ADU. Use 'Sun check' and keep the lowest
      altitude well above the sun.
 
-2. Build horizon
+2. Capture (NINA)  – shoot the frames from here, through NINA's Advanced API plugin
+   • Setup once: install 'Advanced API' in NINA (Plugins), enable its server (port 1888), let
+     NINA save FITS, connect mount, camera and rotator in NINA. No NINA sequence at the same time.
+   • 'Test connection' shows the devices, starts the live device line and finds NINA's image
+     folder. 'Frames to shoot': the Plan tab plan or the Build tab fill-in frames; 'Load frames'.
+   • Safety: frames nearer the Sun than the limit (default 30°) or below the altitude limit
+     (default 10°) are skipped and never slewed to. Unpark at start / park when finished.
+   • 'Start' asks first. Per frame: slew → rotator → settle → expose; NINA saves the FITS.
+   • ⏸ PAUSE (red button) or Esc anywhere: stops slew, rotator and exposure at once and holds.
+     'Resume' repeats the interrupted frame; 'Skip frame' skips it; 'Stop run' ends the run.
+   • Any error or timeout pauses the run automatically – nothing is skipped silently.
+   • At the end the list of files is added to the Build tab ('Start' again can continue a
+     stopped run).
+
+3. Build horizon
    • Add the folder(s) with the frames. NINA's headers provide pointing (CENTALT/CENTAZ),
      rotator angle, pier side, pixel size, focal length and latitude.
    • 'Calibrate rotation from overlaps' measures the true camera angle from how well
