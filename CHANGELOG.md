@@ -13,7 +13,14 @@
   (a later Start can continue). Errors and timeouts pause the run automatically.
 - **Safety limits:** Sun avoidance (default 30°) and a minimum altitude (default 10°); frames outside
   them are skipped, never slewed to. Confirmation before starting and when closing during a run.
-- Live device line (mount position, pier side, rotator, camera state) and per-frame status picture.
+- Live device line (mount position, pier side, rotator, camera state).
+- **Capture picture like the Plan preview** (strip, current horizon, frames, shooting order) with each
+  frame's state; **finished frames are drawn in their slots**, projected like the mosaic (calibrated
+  rotator offset from the Build tab if available; **Turn previews 180°** option).
+- **Frames from a saved sequence file:** besides the Plan tab plan and the Build tab fill-in, any plan
+  or fill-in sequence saved for NINA can be loaded (exposure, gain and binning are read from it).
+- **Plan tab – Rows bottom to top in both halves:** with the east/west split, the west half can also
+  be shot bottom to top (default stays top to bottom, the shortest path). CLI: `plan --bottom-up`.
 
 ### Changed
 - Tabs renumbered: 1. Plan sequence, 2. Capture (NINA), 3. Build horizon.
