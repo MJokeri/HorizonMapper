@@ -63,6 +63,10 @@
   window is blocked for more than a second. The setting is remembered and on by default for now.
 
 ### Fixed
+- **Typing a start date showed "mktime argument out of range".** The preview redrew on every
+  keystroke and read a half-typed date ("01.07.202") as the year 202. Dates are now checked: years
+  1970–2100 and days that exist. The Sun part of the preview can no longer raise an error; it says
+  what to enter instead. The preview redraws once typing pauses.
 - **The app crashed at start** ("super(type, obj): obj must be an instance or subtype of type"). The
   hover and click-logging wrappers replaced classes inside the tkinter library itself, and ttk
   builds its Combobox and Spinbox on ttk.Entry internally. The wrappers now live in the app's own

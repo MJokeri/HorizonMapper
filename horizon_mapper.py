@@ -162,9 +162,15 @@ def parse_start(date_txt, time_txt, now=None):
         ss = 0
     else:
         hh, mm, ss = lt.tm_hour, lt.tm_min, lt.tm_sec
-    if not (1 <= mo <= 12 and 1 <= da <= 31 and 0 <= hh <= 23 and 0 <= mm <= 59):
-        raise ValueError("date or time out of range")
-    return time.mktime((y, mo, da, hh, mm, ss, 0, 0, -1))
+    if not (1970 <= y <= 2100 and 1 <= mo <= 12 and 1 <= da <= 31 and 0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError("date or time out of range")       # e.g. a year still being typed ("202")
+    try:
+        t_ = time.mktime((y, mo, da, hh, mm, ss, 0, 0, -1))
+    except (OverflowError, OSError) as e:
+        raise ValueError(f"date not usable: {e}")
+    if time.localtime(t_).tm_mday != da:                     # 31.11. and the like
+        raise ValueError("no such day")
+    return t_
 
 
 def frame_times(frames, order, t0, sec_per_frame, sec_per_rot=0.0):
@@ -2511,6 +2517,9 @@ def run_gui(selftest=False):
             sun_txt = sun_summary(rk, keep)
         except (ValueError, KeyError):
             sun_txt = "Sun: enter latitude, longitude, start date / time (e.g. 12.11.2026, 13:30) and distance to show it"
+        except Exception:                                   # never break the preview because of the Sun
+            dlog_exc("Sun in the plan preview")
+            sun_txt = "Sun: could not be drawn (see the debug log)"
         # Tk does not clip: cover what lies outside the plot area, then draw the axis labels on top
         for r in ((0, 0, W, y0), (0, y1, W, H), (0, 0, x0, H), (x1, 0, W, H)):
             canvas.create_rectangle(*r, fill="white", outline="")
@@ -2584,8 +2593,16 @@ def run_gui(selftest=False):
     ttk.Entry(sb2, textvariable=sun_start, width=6).pack(side="left")
     ttk.Label(sb2, text="Sun distance (°)").pack(side="left", padx=(8, 4))
     ttk.Entry(sb2, textvariable=sun_keep, width=4).pack(side="left")
+    def sun_fields_changed(*a):
+        state.pop("sunrisk", None)
+        if state.get("sun_job"):
+            try:
+                root.after_cancel(state["sun_job"])
+            except Exception:
+                pass
+        state["sun_job"] = root.after(400, draw_plan)        # wait until typing pauses
     for _v in (sun_start, sun_keep, sun_lon, sun_date):
-        _v.trace_add("write", lambda *a: (state.pop("sunrisk", None), draw_plan()))
+        _v.trace_add("write", sun_fields_changed)
 
     def plan_start_time():
         """Planned start in local time: 'Start date' (blank = today) at 'Start time' (blank = now)."""
