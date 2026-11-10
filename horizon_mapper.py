@@ -2756,13 +2756,18 @@ def run_gui():
     conn_lbl.grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
     g = group(cbar, "Frames to shoot")
     cvar("src", "plan")
-    ttk.Radiobutton(g, text="Plan from the Plan tab", variable=cv_["src"], value="plan").grid(row=0, column=0, sticky="w", padx=4)
-    ttk.Radiobutton(g, text="Fill-in frames from the Build tab", variable=cv_["src"], value="fill").grid(row=1, column=0, sticky="w", padx=4)
+    src_widgets = []
+    src_widgets.append(ttk.Radiobutton(g, text="Plan from the Plan tab", variable=cv_["src"], value="plan"))
+    src_widgets[-1].grid(row=0, column=0, sticky="w", padx=4)
+    src_widgets.append(ttk.Radiobutton(g, text="Fill-in frames from the Build tab", variable=cv_["src"], value="fill"))
+    src_widgets[-1].grid(row=1, column=0, sticky="w", padx=4)
     sf = ttk.Frame(g); sf.grid(row=2, column=0, sticky="w")
-    ttk.Radiobutton(sf, text="Saved sequence file", variable=cv_["src"], value="file").pack(side="left", padx=4)
-    ttk.Button(sf, text="Browse…", command=lambda: (lambda fn: fn and (cv_["file"].set(fn), cv_["src"].set("file"), cap_load()))(
+    src_widgets.append(ttk.Radiobutton(sf, text="Saved sequence file", variable=cv_["src"], value="file"))
+    src_widgets[-1].pack(side="left", padx=4)
+    src_widgets.append(ttk.Button(sf, text="Browse…", command=lambda: (lambda fn: fn and (cv_["file"].set(fn), cv_["src"].set("file"), cap_load()))(
         filedialog.askopenfilename(title="Plan or fill-in sequence saved for NINA",
-                                   filetypes=[("NINA sequence", "*.json"), ("All", "*.*")]))).pack(side="left")
+                                   filetypes=[("NINA sequence", "*.json"), ("All", "*.*")]))))
+    src_widgets[-1].pack(side="left")
     cvar("file", "")
     frames_lbl = ttk.Label(g, text="No frames loaded", foreground="#666", wraplength=280)
     frames_lbl.grid(row=3, column=0, sticky="w", padx=4)
@@ -2803,7 +2808,8 @@ def run_gui():
     skip_btn = ttk.Button(rb, text="Skip frame", state="disabled", command=lambda: cap_skip()); skip_btn.grid(row=1, column=0, sticky="ew", padx=1, pady=1)
     stop_btn = ttk.Button(rb, text="■ Stop run", state="disabled", command=lambda: cap_stop()); stop_btn.grid(row=1, column=1, sticky="ew", padx=1, pady=1)
     ttk.Button(rb, text="Test connection", command=lambda: cap_connect()).grid(row=2, column=0, sticky="ew", padx=1, pady=1)
-    ttk.Button(rb, text="Load frames", command=lambda: cap_load()).grid(row=2, column=1, sticky="ew", padx=1, pady=1)
+    load_btn = ttk.Button(rb, text="Load frames", command=lambda: cap_load())
+    load_btn.grid(row=2, column=1, sticky="ew", padx=1, pady=1)
     cap_pb = ttk.Progressbar(runb, length=220, maximum=1.0); cap_pb.pack(side="top", fill="x", padx=4, pady=4)
     cap_status = ttk.Label(runb, text="Idle", wraplength=240, justify="left"); cap_status.pack(side="top", anchor="w", padx=4)
     clog_box = ttk.LabelFrame(cfixed, text="Log"); clog_box.pack(side="left", fill="y", padx=(6, 0), pady=2)
@@ -2872,35 +2878,60 @@ def run_gui():
         if not C["polling"]:
             C["polling"] = True; threading.Thread(target=job, daemon=True).start()
 
-    def cap_load():
-        """Frames from the Plan tab, the Build tab fill-in, or a saved sequence file."""
+    def cap_load(after=None):
+        """Frames from the Plan tab, the Build tab fill-in, or a saved sequence file. The window
+        settings are read here; the slow part (planning, reading the file) runs in the background."""
+        r = C.get("runner")
+        if r and r.state in ("running", "paused"):
+            dlog(f"Load frames refused: run is {r.state}")
+            messagebox.showinfo(APP_NAME, f"A run is {r.state}. Stop it first (■ Stop run) before loading other "
+                                          "frames – Start can then continue it or start the new frames.")
+            return False
+        if C.get("loading"):
+            return False
         try:
             p = collect(require_area=False)
-            src = cv_["src"].get()
-            if src == "fill":
-                if not fill.get("plan"):
-                    raise ValueError("Generate fill-in frames on the Build tab first.")
-                plan = dict(fill["plan"]); label = "fill-in frames"
-            elif src == "file":
-                fn = cv_["file"].get()
-                if not fn:
-                    raise ValueError("Choose the sequence file (Browse…).")
-                frames, st = read_nina_sequence(fn)
-                if not frames:
-                    raise ValueError("No 'Slew to Alt/Az' + 'Take exposure' steps found in that file.")
-                w, h = p.fov
-                fw, fh = _effective_fov(w, h, p.rot_tolerance) if p.rotator else (w, h)
-                plan = dict(frames=frames, grid=rows_of(frames), fw=fw, fh=fh)
-                for k in ("exposure", "gain", "binning"):
-                    if st.get(k) is not None:
-                        cv_[k].set(st[k])
-                label = os.path.basename(fn)
-            else:
-                plan = make_plan(collect()); label = "Plan tab plan"
+            src = cv_["src"].get(); fn = cv_["file"].get()
+            p_full = collect() if src == "plan" else None
+            if src == "fill" and not fill.get("plan"):
+                raise ValueError("Generate fill-in frames on the Build tab first.")
+            if src == "file" and not fn:
+                raise ValueError("Choose the sequence file (Browse…).")
+            fill_plan = dict(fill["plan"]) if src == "fill" else None
         except Exception as e:
             messagebox.showerror(APP_NAME, str(e)); return False
-        if "grid" not in plan:
-            plan["grid"] = rows_of(plan["frames"])
+        C["loading"] = True; cap_buttons(C["runner"].state if C.get("runner") else "idle")
+        frames_lbl.config(text="Loading frames…")
+        dlog(f"loading frames from {src}")
+
+        def job():
+            try:
+                st = {}
+                if src == "fill":
+                    plan = fill_plan; label = "fill-in frames"
+                elif src == "file":
+                    frames, st = read_nina_sequence(fn)
+                    if not frames:
+                        raise ValueError("No 'Slew to Alt/Az' + 'Take exposure' steps found in that file.")
+                    w, h = p.fov
+                    fw, fh = _effective_fov(w, h, p.rot_tolerance) if p.rotator else (w, h)
+                    plan = dict(frames=frames, grid=rows_of(frames), fw=fw, fh=fh); label = os.path.basename(fn)
+                else:
+                    plan = make_plan(p_full); label = "Plan tab plan"
+                if "grid" not in plan:
+                    plan["grid"] = rows_of(plan["frames"])
+                C["q"].put(("loaded", (plan, label, p, st, after)))
+            except Exception as e:
+                dlog_exc("loading frames")
+                C["q"].put(("load_error", str(e)))
+        threading.Thread(target=job, daemon=True, name="load-frames").start()
+        return True
+
+    def cap_loaded(plan, label, p, st, after):
+        C["loading"] = False
+        for k in ("exposure", "gain", "binning"):
+            if st.get(k) is not None:
+                cv_[k].set(st[k])
         C["frames"] = list(plan["frames"]); C["plan"] = plan; C["source"] = label; C["params"] = p
         C["status"] = ["pending"] * len(C["frames"]); C["runner"] = None; C["cur"] = None
         C["thumbs"] = {}; C["paths"] = {}; C["photo_cache"] = {}
@@ -2910,7 +2941,10 @@ def run_gui():
             ex = 1.0
         mins = len(C["frames"]) * (ex + 6.0) / 60
         frames_lbl.config(text=f"{len(C['frames'])} frames ({label}), roughly {mins:.0f} min")
-        draw_cap(); return True
+        dlog(f"loaded {len(C['frames'])} frames from {label}")
+        cap_buttons("idle"); request_draw()
+        if after:
+            after()
 
     def thumb_K():
         """Rotator offset for the previews: the Build tab's calibrated value if there is one."""
@@ -2954,11 +2988,21 @@ def run_gui():
         skip_btn.config(state="normal" if paused else "disabled")
         stop_btn.config(state="normal" if (running or paused) else "disabled")
         start_btn.config(state="disabled" if (running or paused) else "normal")
+        busy = running or paused or C.get("loading")
+        load_btn.config(state="disabled" if busy else "normal")
+        for w_ in src_widgets:
+            try:
+                w_.config(state="disabled" if (running or paused) else "normal")
+            except Exception:
+                pass
 
     def cap_start():
         if C["runner"] and C["runner"].state in ("running", "paused"):
             return
-        if not C["frames"] and not cap_load():
+        if C.get("loading"):
+            return
+        if not C["frames"]:
+            cap_load(after=cap_start)                      # start once the frames are ready
             return
         try:
             ex = float(cv_["exposure"].get()); gain = int(float(cv_["gain"].get()))
@@ -3124,6 +3168,11 @@ def run_gui():
                         request_draw()
                 elif kind == "log":
                     clog_add(val)
+                elif kind == "loaded":
+                    cap_loaded(*val)
+                elif kind == "load_error":
+                    C["loading"] = False; cap_buttons("idle"); frames_lbl.config(text="No frames loaded")
+                    messagebox.showerror(APP_NAME, val)
                 elif kind == "late_file":
                     i, pth = val
                     r = C["runner"]

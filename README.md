@@ -89,7 +89,8 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
    line (mount alt/az, pier side, rotator, camera) and fills in NINA's image folder.
 2. **Frames to shoot:** the plan from the Plan tab, the fill-in frames generated on the Build tab,
    or a **saved sequence file** (a plan or fill-in sequence saved for NINA; **Browse…**). Exposure,
-   gain and binning are taken from the file. **Load frames** shows them.
+   gain and binning are taken from the file. **Load frames** prepares them in the background and shows
+   them. It is disabled while a run is running or paused: stop the run first.
    - The picture looks like the Plan preview: the strip to image, the current horizon, the lowest
      altitude, the frames and the shooting order (**Show shooting order**).
    - Each frame's outline shows its state: blue = to do, yellow (thick) = in progress, green = done,
