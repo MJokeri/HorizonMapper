@@ -23,6 +23,10 @@
   be shot bottom to top (default stays top to bottom, the shortest path). CLI: `plan --bottom-up`.
 
 ### Fixed
+- Files that NINA saves late no longer hold up or pause the run. The app scans NINA's image folder
+  every few seconds and matches new FITS files to their frames, by name or by the pointing in the
+  header. They are added to the picture and the file list as they arrive, also for 10 minutes
+  after the run. Waiting frames are shown in light green.
 - Capture would not start with mounts whose driver reports switching tracking on as failed (seen
   with the ZWO "ASI Mount": NINA answered "Tracking mode changed" with failure). Tracking is now
   tried, checked and only noted in the log if it stays off; every slew is still verified.

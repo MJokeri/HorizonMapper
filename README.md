@@ -107,6 +107,12 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
 - **■ Stop run** ends the run and keeps the frames taken so far. **Start** again offers to continue
   from where it stopped. Closing the window during a run asks first and stops everything.
 
+NINA saves files in the background, and they can take a while to appear in its image folder. The
+app doesn't wait for them: it scans the folder every few seconds and matches each new FITS file to
+its frame, by the name NINA reported or else by the pointing in the file header. The picture shows
+these frames in light green until their file arrives. Scanning continues for 10 minutes after the
+run, and late files are added to the picture and the file list.
+
 When the run ends, the list of captured files is written to
 `%LOCALAPPDATA%\HorizonMapper\captures\` and added to the Build tab's folder list. The Build tab
 accepts such a list like a folder.

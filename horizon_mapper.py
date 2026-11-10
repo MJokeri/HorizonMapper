@@ -803,7 +803,7 @@ class CaptureRunner:
 
     def __init__(self, api, frames, emit, exposure=1.0, gain=None, binning=None, target="Horizon mapping",
                  settle=1.0, sun_min=30.0, floor=0.0, unpark=True, park=False, image_folder="",
-                 slew_timeout=180.0, rot_timeout=120.0, rot_tol=0.5, start_index=0, poll=0.5):
+                 slew_timeout=180.0, rot_timeout=120.0, rot_tol=0.5, start_index=0, poll=0.5, save_wait=5.0):
         self.api, self.emit = api, emit
         self.frames = list(frames)
         # rotator target for every frame (a plan only lists the moves; carry the angle forward)
@@ -818,6 +818,9 @@ class CaptureRunner:
         self.index = start_index
         self.status = ["pending"] * len(self.frames)
         self.paths = [None] * len(self.frames)
+        self.names = [None] * len(self.frames)       # file name reported by NINA, if any
+        self.save_wait = save_wait
+        self.t_start = time.time()
         self._pause = threading.Event(); self._stop = threading.Event(); self._skip = threading.Event()
         self.state = "idle"; self.thread = None; self.pause_reason = ""
         self._gen = 0; self._step_gen = 0            # pause counter: any pause interrupts the running step
@@ -1018,15 +1021,19 @@ class CaptureRunner:
             except NinaApiError:
                 return False
         self._wait_until(captured, self.exposure + 120, "the exposure and download")
-        # 4 – wait for NINA to save it, then find the file
-        self._wait_until(lambda: int(self.api.get("/image-history", count=True) or 0) > n0, 60, "NINA to save the image")
-        h = self.api.get("/image-history", index=n0)
-        entry = h[0] if isinstance(h, list) and h else (h if isinstance(h, dict) else {})
-        name = entry.get("Filename")
-        path = self._locate(name)
-        if name and not path:
-            self.emit("log", msg=f"Frame {i + 1}: saved by NINA as {name}, but not found under the image folder.")
-        return "done", path or name
+        # 4 – NINA saves in the background and the file can take a while to appear: look briefly,
+        #     then move on; the folder scan (match_late_files) picks the file up when it arrives
+        name = None
+        end = time.time() + self.save_wait
+        while time.time() < end:
+            self._check()
+            if int(self.api.get("/image-history", count=True) or 0) > n0:
+                h = self.api.get("/image-history", index=n0)
+                entry = h[0] if isinstance(h, list) and h else (h if isinstance(h, dict) else {})
+                name = entry.get("Filename"); break
+            time.sleep(self.poll)
+        self.names[i] = name
+        return "done", self._locate(name)
 
     def _run(self):
         self._set_state("running")
@@ -1069,7 +1076,8 @@ class CaptureRunner:
             self.status[i] = st
             if st == "done":
                 self.paths[i] = info
-            self.emit("frame", index=i, status=st, path=info if st == "done" else None)
+            self.emit("frame", index=i, status=st, path=info if st == "done" else None,
+                      name=self.names[i] if st == "done" else None)
             if st == "skipped":
                 self.emit("log", msg=f"Frame {i + 1} skipped: {info}")
             self.index += 1
@@ -1166,6 +1174,49 @@ def thumbnail_rgba(img):
         g = (np.clip((v - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
         out[ok, 0] = out[ok, 1] = out[ok, 2] = g; out[ok, 3] = 255
     return Image.fromarray(out, "RGBA")
+
+
+def match_late_files(folder, frames, waiting, names=None, since=0.0, seen=None, tol=0.6):
+    """Find FITS files that arrived in NINA's image folder after the frame was taken.
+
+    `waiting`: indices of frames taken but still without a file. A file is matched by the name NINA
+    reported, or else by the pointing in its header (CENTALT/CENTAZ within `tol` degrees, nearest
+    frame). Only files modified after `since` are looked at; `seen` (dict path → header pointing or
+    None) caches headers between calls. Returns {frame index: path}."""
+    seen = {} if seen is None else seen
+    waiting = set(waiting)
+    if not waiting or not folder or not os.path.isdir(folder):
+        return {}
+    want = {os.path.basename(n): i for i, n in enumerate(names or []) if n and i in waiting}
+    found = {}
+    for d, _, files in os.walk(folder):
+        for fn in files:
+            if not fn.lower().endswith((".fits", ".fit", ".fts")):
+                continue
+            p = os.path.join(d, fn)
+            if fn in want and want[fn] in waiting:
+                found[want[fn]] = p; waiting.discard(want[fn]); continue
+            if p in seen:
+                continue
+            try:
+                if os.path.getmtime(p) < since:
+                    seen[p] = None; continue
+                with open(p, "rb") as fh:
+                    h, _ = read_fits_header(fh)
+                seen[p] = (float(h["CENTALT"]), float(h["CENTAZ"]))
+            except Exception:
+                continue          # still being written, or not one of ours: try again next time
+    taken = set(found.values())
+    for p, pos in seen.items():
+        if not pos or p in taken or not waiting:
+            continue
+        alt, az = pos
+        best = min(waiting, key=lambda i: max(abs(frames[i][0] - alt),
+                                              abs((frames[i][1] - az + 180) % 360 - 180) * math.cos(math.radians(alt))))
+        a2, z2 = frames[best][0], frames[best][1]
+        if max(abs(a2 - alt), abs((z2 - az + 180) % 360 - 180) * math.cos(math.radians(alt))) <= tol:
+            found[best] = p; waiting.discard(best); taken.add(p)
+    return found
 
 
 def write_capture_list(paths, folder=None):
@@ -2608,7 +2659,8 @@ def run_gui():
     cright = ttk.Frame(cap_tab); cright.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     dev_lbl = ttk.Label(cright, text="Devices: –", font=("Segoe UI", 10)); dev_lbl.pack(anchor="w")
     lg = ttk.Frame(cright); lg.pack(anchor="w", fill="x")
-    ttk.Label(lg, text="Blue = to do · yellow = in progress · green = done (picture in its slot) · orange = skipped"
+    ttk.Label(lg, text="Blue = to do · yellow = in progress · green = done (picture in its slot; light green = file not"
+              " arrived yet) · orange = skipped"
               " · red = error · wheel: zoom · drag: move · double-click: whole sky", foreground="#666").pack(side="left")
     cvar("order", True, tk.BooleanVar)
     ttk.Checkbutton(lg, text="Show shooting order", variable=cv_["order"], command=lambda: draw_cap()).pack(side="left", padx=8)
@@ -2784,7 +2836,8 @@ def run_gui():
         clog_add(f"Start: {len(C['frames']) - start_at} frames, exposure {ex} s, sun ≥ {sun}°, altitude ≥ {floor_}°.")
         if not C["polling"]:
             C["api"] = api_now(); poll_devices()
-        runner.start(); cap_buttons("running")
+        C["list_file"] = None
+        runner.start(); cap_buttons("running"); scan_folder()
 
     def cap_pause(reason="Paused by user"):
         r = C["runner"]
@@ -2811,18 +2864,74 @@ def run_gui():
 
     root.bind_all("<Escape>", lambda e: cap_pause("Esc pressed"), add="+")
 
-    def cap_finished(ok):
+    def waiting_frames():
+        r = C["runner"]
+        if not r:
+            return []
+        return [i for i, s_ in enumerate(r.status) if s_ == "done" and not (r.paths[i] and os.path.isfile(r.paths[i]))]
+
+    def update_capture_list():
+        """(Re)write the run's file list and make sure the Build tab has it."""
         r = C["runner"]
         paths = [p for p in r.paths if p and os.path.isabs(p) and os.path.isfile(p)]
+        if not paths:
+            return None
+        lst = C.get("list_file")
+        if lst:
+            with open(lst, "w", encoding="utf-8") as fh:
+                fh.write("# Horizon Mapper capture list – one FITS file per line\n")
+                fh.writelines(p + "\n" for p in paths)
+        else:
+            lst = C["list_file"] = write_capture_list(paths)
+        if lst not in folders.get(0, "end"):
+            folders.insert("end", lst)
+        return lst
+
+    def scan_folder():
+        """Every few seconds: look in NINA's image folder for files of frames still without one
+        (NINA saves in the background; files can arrive late). Keeps going for 10 min after a run."""
+        if C.get("scanning"):
+            return
+        C["scanning"] = True; C["seen"] = {}
+
+        def job():
+            idle_until = None
+            while C.get("scanning"):
+                r = C["runner"]
+                if r is None:
+                    break
+                wait = waiting_frames()
+                active = r.state in ("running", "paused")
+                if not active and not wait:
+                    break
+                if not active:
+                    idle_until = idle_until or time.time() + 600
+                    if time.time() > idle_until:
+                        C["q"].put(("log", f"{len(wait)} frames still have no file after 10 min – stopped looking."))
+                        break
+                if wait:
+                    try:
+                        hits = match_late_files(cv_["folder"].get(), r.frames, wait, r.names,
+                                                since=r.t_start - 120, seen=C["seen"])
+                    except Exception as e:
+                        hits = {}; C["q"].put(("log", f"Folder scan failed: {e}"))
+                    for i, pth in hits.items():
+                        C["q"].put(("late_file", (i, pth)))
+                time.sleep(4.0)
+            C["scanning"] = False
+        threading.Thread(target=job, daemon=True).start()
+
+    def cap_finished(ok):
+        r = C["runner"]
         done = sum(1 for s_ in r.status if s_ == "done")
         msg = f"Run {'finished' if ok else 'stopped'}: {done} frames taken"
-        if paths:
-            lst = write_capture_list(paths)
-            if lst not in folders.get(0, "end"):
-                folders.insert("end", lst)
+        lst = update_capture_list()
+        if lst:
             msg += f"; the list of files was added to the Build tab:\n{lst}"
-        elif done:
-            msg += ". The files were not found under the NINA image folder – add NINA's folder on the Build tab."
+        wait = waiting_frames()
+        if wait:
+            msg += (f"\n\n{len(wait)} files have not appeared in NINA's image folder yet. The app keeps looking "
+                    "for 10 minutes and adds them to the picture and the list as they arrive.")
         clog_add(msg.replace("\n", " ")); cap_buttons(r.state)
         messagebox.showinfo(APP_NAME, msg)
 
@@ -2850,6 +2959,17 @@ def run_gui():
                         C.setdefault("thumbs", {})[i] = (th, im); draw_cap()
                 elif kind == "log":
                     clog_add(val)
+                elif kind == "late_file":
+                    i, pth = val
+                    r = C["runner"]
+                    if r and i < len(r.paths) and not (r.paths[i] and os.path.isfile(r.paths[i])):
+                        r.paths[i] = pth; C.setdefault("paths", {})[i] = pth
+                        cap_thumb(i, pth)
+                        if r.state not in ("running", "paused"):
+                            update_capture_list()
+                        n_wait = len(waiting_frames())
+                        clog_add(f"Frame {i + 1}: file arrived – {os.path.basename(pth)}"
+                                 + (f" ({n_wait} still waiting)" if n_wait else ""))
                 elif kind == "run":
                     k, d = val
                     r = C["runner"]
@@ -2869,6 +2989,8 @@ def run_gui():
                         i = d["index"]; C["status"][i] = d["status"]; C["cur"] = i
                         if d["status"] == "done" and d.get("path"):
                             C.setdefault("paths", {})[i] = d["path"]; cap_thumb(i, d["path"])
+                        elif d["status"] == "done":
+                            scan_folder()                  # file not there yet: look for it later
                         n = len(C["frames"]); done = sum(1 for s_ in C["status"] if s_ in ("done", "skipped"))
                         cap_pb["value"] = done / max(n, 1)
                         if d["status"] in ("slewing", "rotating", "exposing"):
@@ -2938,6 +3060,8 @@ def run_gui():
                     wid = 3 if st in ("slewing", "rotating", "exposing") else (2 if st in ("error", "skipped") else 1)
                     if st == "done" and th is not None:
                         col = "#43a047"
+                    elif st == "done" and not C.get("paths", {}).get(i):
+                        col = "#9ccc65"                      # taken, file not in the folder yet
                     ccan.create_rectangle(xc - cw * kx, Y(alt + fh / 2), xc + cw * kx, Y(alt - fh / 2),
                                           outline=col, width=wid)
             if p is not None:                                      # current horizon file(s)
@@ -3072,6 +3196,9 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
    • ⏸ PAUSE (red button) or Esc anywhere: stops slew, rotator and exposure at once and holds.
      'Resume' repeats the interrupted frame; 'Skip frame' skips it; 'Stop run' ends the run.
    • Any error or timeout pauses the run automatically – nothing is skipped silently.
+   • Files that NINA saves late are picked up by a scan of its image folder every few seconds
+     (matched by name or by the pointing in the header; light green = file not arrived yet), also
+     for 10 minutes after the run.
    • At the end the list of files is added to the Build tab ('Start' again can continue a
      stopped run).
 
