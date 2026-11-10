@@ -26,6 +26,10 @@
 - Capture would not start with mounts whose driver reports switching tracking on as failed (seen
   with the ZWO "ASI Mount": NINA answered "Tracking mode changed" with failure). Tracking is now
   tried, checked and only noted in the log if it stays off; every slew is still verified.
+- Slews are no longer judged too early: the app now waits for NINA's own slew to finish (the
+  request waits, while PAUSE still works at once), then until the mount stands still, before
+  checking where it is. Before, a mount slow to report "slewing" (ZWO ASI Mount) was taken as
+  arrived at the old position, and the automatic pause then stopped the slew it had just begun.
 - Slew arrival is checked against the mount's RA/Dec (recomputed for the current sidereal time),
   so it works whether or not the mount tracks.
 - Error messages from NINA that carry no error text now say that NINA reported a failure.
