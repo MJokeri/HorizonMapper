@@ -89,9 +89,10 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
    line (mount alt/az, pier side, rotator, camera) and fills in NINA's image folder.
 2. **Frames to shoot:** the plan from the Plan tab, the fill-in frames generated on the Build tab,
    or a **saved sequence file** (a plan or fill-in sequence saved for NINA; **Browse…**). Exposure,
-   gain and binning are taken from the file. **Load frames** prepares them in the background and shows
-   them. While a run is in progress, pause it first. Loading while paused asks before it ends the
-   paused run; the frames taken so far are kept and added to the Build tab.
+   gain and binning are taken from the file. Choosing a source shows its frames straight away
+   (prepared in the background). If frames have already been taken, it asks first, because their
+   progress is replaced. A fresh **Start** always takes the frames from the source as it is at that
+   moment, so later changes on the Plan tab are used.
    - The picture looks like the Plan preview: the strip to image, the current horizon, the lowest
      altitude, the frames and the shooting order (**Show shooting order**).
    - Each frame's outline shows its state: blue = to do, yellow (thick) = in progress, green = done,
@@ -103,10 +104,13 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
    - Wheel zooms, drag moves, double-click shows the whole sky.
 3. **Capture** (exposure, gain, binning) follows the Plan tab; offset is NINA's camera setting.
    **Settle** waits after each move.
-4. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°) or below **Never
+4. **Range:** **From frame** and **To frame** (blank = the last frame) limit the run to those frames,
+   numbered in shooting order (the numbers in the picture). Frames already taken are left out
+   unless **Re-shoot frames already taken** is ticked. The line below says how many will be shot.
+5. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°) or below **Never
    below altitude** (default 10°) are skipped, never slewed to. **Unpark at start** / **Park when
    finished**.
-5. **▶ Start** asks for confirmation and switches tracking on. If the mount driver refuses, a note
+6. **▶ Start** asks for confirmation and switches tracking on. If the mount driver refuses, a note
    goes to the log and the run continues; every slew is checked against the mount's RA/Dec. Then,
    for every frame: slew (alt/az converted to J2000 RA/Dec
    with the mount's own sidereal time) → rotator to its mechanical angle → settle → expose. NINA saves
@@ -120,13 +124,27 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
 - **Any error or timeout pauses the run automatically** (with a beep and the reason in the log).
   Examples: NINA not answering, a failed slew, the mount ending up somewhere else, or a stuck
   rotator. Nothing is skipped silently. Fix the cause and **Resume**, or **■ Stop run**.
-- **■ Stop run** ends the run and keeps the frames taken so far. **Start** again offers to continue
-  from where it stopped. Closing the window during a run asks first and stops everything.
+- **■ Stop run** ends the run and keeps the frames taken so far. **Start** again shoots only the
+  frames still missing in the range. Closing the window during a run asks first and stops
+  everything.
+
+**Saving and resuming a capture**
+
+- **Save current capture…** writes a `.hmcap.json` file with all the frames, each frame's state
+  (taken, skipped, to do), the file path and NINA file name of every frame taken, and the capture,
+  safety, range and file settings. It works at any time, also during a run.
+- **Load saved capture…** restores all of that: frames, progress, settings and the current horizon
+  lines.
+  - Frames already taken get their pictures back from the original file paths.
+  - A frame whose file no longer exists is set back to "to do", and the log lists those frames.
+  - **Start** then shoots only what is still missing in the chosen range.
+- The progress is also **saved automatically** after every frame to
+  `%LOCALAPPDATA%\HorizonMapper\captures\last_capture.hmcap.json`. After a crash or a closed window,
+  load that file to continue.
 
 A preview is only made once its FITS file is complete: its size covers the header and all the
 image data. NINA writes files in the background, so a file can be there but still empty or short.
 Incomplete files, and previews that fail, are tried again every 3 seconds for up to 3 minutes.
-**Load frames** works again after a run is stopped or has finished.
 
 The **NINA image folder** can be changed at any time, also during a run. File look-ups and the
 folder scan always use the current value. The Capture log runs down the right side of the tab,

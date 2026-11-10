@@ -22,6 +22,16 @@
 - **Plan tab – Rows bottom to top in both halves:** with the east/west split, the west half can also
   be shot bottom to top (default stays top to bottom, the shortest path). CLI: `plan --bottom-up`.
 
+- **Save current capture… / Load saved capture…** (Capture tab, replacing Load frames):
+  - A `.hmcap.json` file stores the frames, each frame's state, the file path and NINA file name of
+    every frame taken, and the capture, safety, range and file settings.
+  - Loading restores everything and shows the pictures from the original paths. A frame whose file
+    is gone is set back to "to do".
+  - The progress is also saved automatically after every frame (`captures\last_capture.hmcap.json`).
+- **Range: From frame / To frame** (Capture tab): a run shoots only those frames (in shooting order),
+  leaving out frames already taken unless **Re-shoot frames already taken** is ticked. A stopped or
+  loaded capture is resumed simply by pressing Start.
+- Choosing a frame source shows its frames at once; a fresh Start uses the source as it is then.
 - Capture tab: the log runs down the right side at full height, with a scrollbar.
 - **Debug menu → Debug log (all actions):** every click, NINA request (timing and answer), capture
   step, wait, pause and state change, folder scan and redraw, plus errors from window callbacks and
@@ -46,9 +56,8 @@
   short), the preview failed and was not tried again. Now a file is used only when its size covers
   the header and all the image data. Incomplete files, and failed previews, are retried every 3 s
   for up to 3 minutes.
-- **Load frames could stop reacting** (reported after Stop run). It can no longer get stuck: an
-  internal "loading" flag is always cleared, a stale one is reset after 60 s, and every decision
-  Load frames makes goes to the debug log.
+- Loading frames can no longer get stuck: the internal "loading" flag is always cleared, a stale one
+  is reset after 60 s, and every decision is written to the debug log.
 - **Changing the NINA image folder during a run had no effect** (the folder was read once at Start),
   so no files were found and no pictures appeared. The folder is now read whenever files are looked
   up, and the debug log shows the folder, whether it exists, and NINA's file names.
