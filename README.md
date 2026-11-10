@@ -5,6 +5,9 @@ The version is shown in the window title (currently 1.0.1).
 Plans a NINA Advanced Sequencer run that photographs the sky around your horizon, then turns the
 FITS frames into a measured NINA horizon file (`.hrz`).
 
+On both tabs the settings panel on the left scrolls (mouse wheel or scrollbar) when the window is
+too small to show it all.
+
 ## Install (Windows)
 
 **Easiest:** download `HorizonMapper-windows.zip` from the repository's
@@ -43,6 +46,8 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   - **Show shooting order** (on by default) draws the order over the preview: a path from green
     (first frame) through yellow to magenta (last), with arrows, the first frame number of each row,
     Start/End markers and the meridian flip.
+  - **Mouse wheel** zooms the preview around the pointer, **drag** moves it, **double-click** shows
+    the whole sky again.
 - **Conditions:** even overcast daylight gives the sharpest silhouettes. Take one test frame first;
   open sky should read about 10,000–30,000 ADU.
 
@@ -97,7 +102,8 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   - **right-click** to restore the detected value,
   - **Ctrl+Z** to undo.
 
-  Zoom (up to 20 px/°) and scroll to work precisely. Your edits are what gets saved. The two lines are
+  **Mouse wheel** zooms the image around the pointer (2–24 px/°; the **zoom** box offers fixed
+  levels); **Shift+wheel**, **middle-drag** or the scrollbars move it. Your edits are what gets saved. The two lines are
   independent: you can draw the branches line below the solid line, for example where the "solid" part
   is really a thin tree top you can see through.
 - **Frame cache:** reduced frames are cached in `%LOCALAPPDATA%\HorizonMapper\cache` (about 200 kB per
