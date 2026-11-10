@@ -1114,7 +1114,9 @@ class CaptureRunner:
                 name = entry.get("Filename"); break
             time.sleep(self.poll)
         self.names[i] = name
-        return "done", self._locate(name)
+        path = self._locate(name)
+        dlog(f"frame {i + 1}: NINA file name {name!r}, found in the image folder: {path!r}")
+        return "done", path
 
     def _run(self):
         self._set_state("running")
@@ -2740,7 +2742,13 @@ def run_gui():
 
 
     # ------------------------------------------------------------------ CAPTURE (NINA Advanced API)
-    cbar, cfixed = topbar(cap_tab)
+    clog_box = ttk.LabelFrame(cap_tab, text="Log"); clog_box.pack(side="right", fill="y", padx=(0, 6), pady=6)
+    clog_sb = ttk.Scrollbar(clog_box, orient="vertical")
+    clog = tk.Text(clog_box, width=52, wrap="word", yscrollcommand=clog_sb.set)
+    clog_sb.config(command=clog.yview)
+    clog_sb.pack(side="right", fill="y"); clog.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
+    cmain = ttk.Frame(cap_tab); cmain.pack(side="left", fill="both", expand=True)
+    cbar, cfixed = topbar(cmain)
     C = {"runner": None, "frames": [], "source": "", "api": None, "polling": False, "q": queue.Queue(),
          "view": (0.0, 360.0, 0.0, 90.0), "box": (50, 20, 900, 400), "cur": None,
          "thumbs": {}, "paths": {}, "plan": None, "params": None, "photos": []}
@@ -2789,6 +2797,14 @@ def run_gui():
     ttk.Label(g, text="NINA image folder (found automatically)").grid(row=1, column=0, columnspan=3, sticky="w", padx=4)
     ttk.Entry(g, textvariable=cvar("folder", ""), width=30).grid(row=2, column=0, columnspan=2, sticky="w", padx=4)
     cvar("thumbs", True, tk.BooleanVar); cvar("flip", False, tk.BooleanVar)
+
+    def folder_changed(*a):
+        C["folder_snap"] = cv_["folder"].get(); C["seen"] = {}
+        r_ = C.get("runner")
+        if r_ is not None:                      # the run's own look-up uses the new folder from now on
+            r_.image_folder = C["folder_snap"]; r_._dir_hint = None
+        dlog(f"image folder set to {C['folder_snap']!r} (exists: {os.path.isdir(C['folder_snap'])})")
+    cv_["folder"].trace_add("write", folder_changed)
     ttk.Checkbutton(g, text="Show finished frames in the picture", variable=cv_["thumbs"],
                     command=lambda: draw_cap()).grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
     ttk.Checkbutton(g, text="Turn previews 180°", variable=cv_["flip"],
@@ -2812,10 +2828,8 @@ def run_gui():
     load_btn.grid(row=2, column=1, sticky="ew", padx=1, pady=1)
     cap_pb = ttk.Progressbar(runb, length=220, maximum=1.0); cap_pb.pack(side="top", fill="x", padx=4, pady=4)
     cap_status = ttk.Label(runb, text="Idle", wraplength=240, justify="left"); cap_status.pack(side="top", anchor="w", padx=4)
-    clog_box = ttk.LabelFrame(cfixed, text="Log"); clog_box.pack(side="left", fill="y", padx=(6, 0), pady=2)
-    clog = tk.Text(clog_box, height=9, width=56, wrap="word"); clog.pack(fill="both", expand=True, padx=2, pady=2)
 
-    cright = ttk.Frame(cap_tab); cright.pack(side="top", fill="both", expand=True, padx=6, pady=6)
+    cright = ttk.Frame(cmain); cright.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     dev_lbl = ttk.Label(cright, text="Devices: –", font=("Segoe UI", 10)); dev_lbl.pack(anchor="w")
     lg = ttk.Frame(cright); lg.pack(anchor="w", fill="x")
     ttk.Label(lg, text="Blue = to do · yellow = in progress · green = done (picture in its slot; light green = file not"
@@ -2841,6 +2855,7 @@ def run_gui():
                 prof = api.profile() or {}
                 folder = ((prof.get("ImageFileSettings") or {}).get("FilePath")) or ""
                 ftype = ((prof.get("ImageFileSettings") or {}).get("FileType")) or ""
+                dlog(f"NINA image settings: {prof.get('ImageFileSettings')}")
                 parts = []
                 for name, fn in (("mount", api.mount), ("camera", api.camera), ("rotator", api.rotator)):
                     try:
@@ -2882,11 +2897,17 @@ def run_gui():
         """Frames from the Plan tab, the Build tab fill-in, or a saved sequence file. The window
         settings are read here; the slow part (planning, reading the file) runs in the background."""
         r = C.get("runner")
-        if r and r.state in ("running", "paused"):
-            dlog(f"Load frames refused: run is {r.state}")
-            messagebox.showinfo(APP_NAME, f"A run is {r.state}. Stop it first (■ Stop run) before loading other "
-                                          "frames – Start can then continue it or start the new frames.")
+        if r and r.state == "running":
+            dlog("Load frames refused: run is running")
+            messagebox.showinfo(APP_NAME, "A run is in progress. Pause it first to load other frames.")
             return False
+        if r and r.state == "paused":
+            if not messagebox.askyesno(APP_NAME, "Loading other frames ends the paused run.\n"
+                                                 "Frames taken so far are kept (and added to the Build tab).\n\n"
+                                                 "Load the new frames?"):
+                return False
+            dlog("Load frames while paused: ending the paused run first")
+            threading.Thread(target=r.stop, daemon=True, name="stop-for-load").start()
         if C.get("loading"):
             return False
         try:
@@ -2988,7 +3009,7 @@ def run_gui():
         skip_btn.config(state="normal" if paused else "disabled")
         stop_btn.config(state="normal" if (running or paused) else "disabled")
         start_btn.config(state="disabled" if (running or paused) else "normal")
-        busy = running or paused or C.get("loading")
+        busy = running or C.get("loading")
         load_btn.config(state="disabled" if busy else "normal")
         for w_ in src_widgets:
             try:
@@ -3022,7 +3043,7 @@ def run_gui():
                 "Stay nearby – PAUSE (or Esc) stops every movement at once.", icon="warning"):
             return
         q_ = C["q"]
-        runner = CaptureRunner(api_now(), C["frames"], lambda kind, **d: q_.put(("run", (kind, d))),
+        runner = CaptureRunner(api_now(), C["frames"], lambda kind, **d: q_.put(("run", (kind, d, runner))),
                                exposure=ex, gain=(gain if gain >= 0 else None), binning=binning,
                                target=cv_["target"].get() or "Horizon mapping", settle=settle, sun_min=sun,
                                floor=floor_, unpark=cv_["unpark"].get(), park=cv_["park"].get(),
@@ -3033,7 +3054,6 @@ def run_gui():
         clog_add(f"Start: {len(C['frames']) - start_at} frames, exposure {ex} s, sun ≥ {sun}°, altitude ≥ {floor_}°.")
         if not C["polling"]:
             C["api"] = api_now(); poll_devices()
-        C["list_file"] = None
         runner.start(); cap_buttons("running"); scan_folder()
 
     def cap_pause(reason="Paused by user"):
@@ -3061,25 +3081,25 @@ def run_gui():
 
     root.bind_all("<Escape>", lambda e: (dlog("UI key: Esc"), cap_pause("Esc pressed")), add="+")
 
-    def waiting_frames():
-        r = C["runner"]
+    def waiting_frames(r=None):
+        r = r or C["runner"]
         if not r:
             return []
         return [i for i, s_ in enumerate(r.status) if s_ == "done" and not (r.paths[i] and os.path.isfile(r.paths[i]))]
 
-    def update_capture_list():
+    def update_capture_list(r=None):
         """(Re)write the run's file list and make sure the Build tab has it."""
-        r = C["runner"]
+        r = r or C["runner"]
         paths = [p for p in r.paths if p and os.path.isabs(p) and os.path.isfile(p)]
         if not paths:
             return None
-        lst = C.get("list_file")
+        lst = getattr(r, "list_file", None)
         if lst:
             with open(lst, "w", encoding="utf-8") as fh:
                 fh.write("# Horizon Mapper capture list – one FITS file per line\n")
                 fh.writelines(p + "\n" for p in paths)
         else:
-            lst = C["list_file"] = write_capture_list(paths)
+            lst = r.list_file = write_capture_list(paths)
         if lst not in folders.get(0, "end"):
             folders.insert("end", lst)
         return lst
@@ -3090,7 +3110,7 @@ def run_gui():
         if C.get("scanning"):
             return
         C["scanning"] = True; C["seen"] = {}
-        C["folder_snap"] = cv_["folder"].get()          # read here: background threads never touch Tk
+        C["folder_snap"] = cv_["folder"].get()          # kept up to date by a trace on the field
 
         def job():
             idle_until = None
@@ -3113,25 +3133,33 @@ def run_gui():
                                                 since=r.t_start - 120, seen=C["seen"])
                     except Exception as e:
                         hits = {}; C["q"].put(("log", f"Folder scan failed: {e}"))
-                    dlog(f"folder scan: {len(wait)} frames waiting, {len(hits)} files found")
+                    fo = C["folder_snap"]
+                    dlog(f"folder scan in {fo!r} (exists: {os.path.isdir(fo) if fo else False}): "
+                         f"{len(wait)} frames waiting {[i + 1 for i in wait][:10]}, names {[r.names[i] for i in wait][:3]}, "
+                         f"{len(C['seen'])} files looked at, {len(hits)} found")
                     for i, pth in hits.items():
                         C["q"].put(("late_file", (i, pth)))
                 time.sleep(4.0)
             C["scanning"] = False
         threading.Thread(target=job, daemon=True).start()
 
-    def cap_finished(ok):
-        r = C["runner"]
+    def cap_finished(ok, r=None):
+        r = r or C["runner"]
         done = sum(1 for s_ in r.status if s_ == "done")
         msg = f"Run {'finished' if ok else 'stopped'}: {done} frames taken"
-        lst = update_capture_list()
+        lst = update_capture_list(r)
         if lst:
             msg += f"; the list of files was added to the Build tab:\n{lst}"
-        wait = waiting_frames()
-        if wait:
+        wait = waiting_frames(r)
+        current = r is C["runner"]
+        if wait and current:
             msg += (f"\n\n{len(wait)} files have not appeared in NINA's image folder yet. The app keeps looking "
                     "for 10 minutes and adds them to the picture and the list as they arrive.")
-        clog_add(msg.replace("\n", " ")); cap_buttons(r.state)
+        elif wait:
+            msg += f"\n\n{len(wait)} files of that run had not appeared in NINA's image folder yet."
+        clog_add(msg.replace("\n", " "))
+        if current:
+            cap_buttons(r.state)
         messagebox.showinfo(APP_NAME, msg)
 
     def request_draw():
@@ -3185,8 +3213,13 @@ def run_gui():
                         clog_add(f"Frame {i + 1}: file arrived – {os.path.basename(pth)}"
                                  + (f" ({n_wait} still waiting)" if n_wait else ""))
                 elif kind == "run":
-                    k, d = val
-                    r = C["runner"]
+                    k, d, r = val
+                    if r is not C["runner"]:                  # a run that was replaced (Load frames while paused)
+                        if k == "log":
+                            clog_add(d["msg"])
+                        elif k == "done":
+                            cap_finished(d.get("ok", False), r)
+                        continue
                     if k == "log":
                         clog_add(d["msg"])
                         if d["msg"].startswith("PAUSED"):
@@ -3205,11 +3238,11 @@ def run_gui():
                             C.setdefault("paths", {})[i] = d["path"]; cap_thumb(i, d["path"])
                         elif d["status"] == "done":
                             scan_folder()                  # file not there yet: look for it later
-                        n = len(C["frames"]); done = sum(1 for s_ in C["status"] if s_ in ("done", "skipped"))
-                        cap_pb["value"] = done / max(n, 1)
+                        nf = len(C["frames"]); done = sum(1 for s_ in C["status"] if s_ in ("done", "skipped"))
+                        cap_pb["value"] = done / max(nf, 1)
                         if d["status"] in ("slewing", "rotating", "exposing"):
                             alt, az, _ = C["frames"][i]
-                            cap_status.config(text=f"Frame {i + 1}/{n}: {d['status']} – alt {alt:.1f}°, az {az:.1f}°")
+                            cap_status.config(text=f"Frame {i + 1}/{nf}: {d['status']} – alt {alt:.1f}°, az {az:.1f}°")
                         request_draw()
                     elif k == "done":
                         cap_finished(d.get("ok", False))
@@ -3424,6 +3457,9 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
    • ⏸ PAUSE (red button) or Esc anywhere: stops slew, rotator and exposure at once and holds.
      'Resume' repeats the interrupted frame; 'Skip frame' skips it; 'Stop run' ends the run.
    • Any error or timeout pauses the run automatically – nothing is skipped silently.
+   • The NINA image folder can be changed during a run – file look-ups always use the current
+     value. 'Load frames' while paused asks, then ends the paused run (frames taken are kept).
+   • The log runs down the right side of the tab (scrollable).
    • Files that NINA saves late are picked up by a scan of its image folder every few seconds
      (matched by name or by the pointing in the header; light green = file not arrived yet), also
      for 10 minutes after the run.

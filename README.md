@@ -90,7 +90,8 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
 2. **Frames to shoot:** the plan from the Plan tab, the fill-in frames generated on the Build tab,
    or a **saved sequence file** (a plan or fill-in sequence saved for NINA; **Browse…**). Exposure,
    gain and binning are taken from the file. **Load frames** prepares them in the background and shows
-   them. It is disabled while a run is running or paused: stop the run first.
+   them. While a run is in progress, pause it first. Loading while paused asks before it ends the
+   paused run; the frames taken so far are kept and added to the Build tab.
    - The picture looks like the Plan preview: the strip to image, the current horizon, the lowest
      altitude, the frames and the shooting order (**Show shooting order**).
    - Each frame's outline shows its state: blue = to do, yellow (thick) = in progress, green = done,
@@ -121,6 +122,10 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
   rotator. Nothing is skipped silently. Fix the cause and **Resume**, or **■ Stop run**.
 - **■ Stop run** ends the run and keeps the frames taken so far. **Start** again offers to continue
   from where it stopped. Closing the window during a run asks first and stops everything.
+
+The **NINA image folder** can be changed at any time, also during a run. File look-ups and the
+folder scan always use the current value. The Capture log runs down the right side of the tab,
+over the full height, with a scrollbar.
 
 NINA saves files in the background, and they can take a while to appear in its image folder. The
 app doesn't wait for them: it scans the folder every few seconds and matches each new FITS file to

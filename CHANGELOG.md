@@ -22,6 +22,7 @@
 - **Plan tab – Rows bottom to top in both halves:** with the east/west split, the west half can also
   be shot bottom to top (default stays top to bottom, the shortest path). CLI: `plan --bottom-up`.
 
+- Capture tab: the log runs down the right side at full height, with a scrollbar.
 - **Debug menu → Debug log (all actions):** every click, NINA request (timing and answer), capture
   step, wait, pause and state change, folder scan and redraw, plus errors from window callbacks and
   background threads, goes to `%LOCALAPPDATA%\HorizonMapper\logs\`. A watchdog logs whenever the
@@ -36,9 +37,14 @@
     a second, and resized previews are cached.
   - Background threads no longer read window settings, which on Windows can stall both sides.
 - **Load frames during a paused run locked the app.** It recomputed the plan on the window's thread
-  and dropped the paused run, so Resume, Stop and PAUSE had nothing to act on. Now Load frames and
-  the frame sources are disabled while a run is running or paused (stop it first). Frames are
-  prepared in the background, so the window stays responsive.
+  and dropped the paused run, so Resume, Stop and PAUSE had nothing to act on.
+  - Frames are now prepared in the background.
+  - Loading while paused first asks, then ends the paused run properly (its frames are kept and
+    listed for the Build tab).
+  - While a run is in progress, Load frames is disabled.
+- **Changing the NINA image folder during a run had no effect** (the folder was read once at Start),
+  so no files were found and no pictures appeared. The folder is now read whenever files are looked
+  up, and the debug log shows the folder, whether it exists, and NINA's file names.
 - Files that NINA saves late no longer hold up or pause the run. The app scans NINA's image folder
   every few seconds and matches new FITS files to their frames, by name or by the pointing in the
   header. They are added to the picture and the file list as they arrive, also for 10 minutes
