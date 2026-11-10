@@ -35,6 +35,10 @@
   - Now events are handled for at most ~80 ms at a time, the picture is redrawn at most four times
     a second, and resized previews are cached.
   - Background threads no longer read window settings, which on Windows can stall both sides.
+- **Load frames during a paused run locked the app.** It recomputed the plan on the window's thread
+  and dropped the paused run, so Resume, Stop and PAUSE had nothing to act on. Now Load frames and
+  the frame sources are disabled while a run is running or paused (stop it first). Frames are
+  prepared in the background, so the window stays responsive.
 - Files that NINA saves late no longer hold up or pause the run. The app scans NINA's image folder
   every few seconds and matches new FITS files to their frames, by name or by the pointing in the
   header. They are added to the picture and the file list as they arrive, also for 10 minutes
