@@ -874,7 +874,8 @@ class CaptureRunner:
 
     def __init__(self, api, frames, emit, exposure=1.0, gain=None, binning=None, target="Horizon mapping",
                  settle=1.0, sun_min=30.0, floor=0.0, unpark=True, park=False, image_folder="",
-                 slew_timeout=180.0, rot_timeout=120.0, rot_tol=0.5, start_index=0, poll=0.5, save_wait=5.0):
+                 slew_timeout=180.0, rot_timeout=120.0, rot_tol=0.5, start_index=0, poll=0.5, save_wait=5.0,
+                 order=None, status=None, paths=None, names=None):
         self.api, self.emit = api, emit
         self.frames = list(frames)
         # rotator target for every frame (a plan only lists the moves; carry the angle forward)
@@ -886,10 +887,14 @@ class CaptureRunner:
         self.settle, self.sun_min, self.floor = settle, sun_min, floor
         self.unpark, self.park, self.image_folder = unpark, park, image_folder
         self.slew_timeout, self.rot_timeout, self.rot_tol, self.poll = slew_timeout, rot_timeout, rot_tol, poll
-        self.index = start_index
-        self.status = ["pending"] * len(self.frames)
-        self.paths = [None] * len(self.frames)
-        self.names = [None] * len(self.frames)       # file name reported by NINA, if any
+        # frames to shoot, in this order (default: all from start_index); the rest keep their state
+        self.order = list(order) if order is not None else list(range(start_index, len(self.frames)))
+        self.pos = 0
+        self.index = self.order[0] if self.order else len(self.frames)
+        n = len(self.frames)
+        self.status = list(status) if status else ["pending"] * n
+        self.paths = list(paths) if paths else [None] * n
+        self.names = list(names) if names else [None] * n   # file name reported by NINA, if any
         self.save_wait = save_wait
         self.t_start = time.time()
         self._pause = threading.Event(); self._stop = threading.Event(); self._skip = threading.Event()
@@ -1127,7 +1132,8 @@ class CaptureRunner:
         except NinaApiError as e:
             self.emit("log", msg=f"Cannot start: {e}"); self._set_state("stopped"); self.emit("done", ok=False); return
         site = (float(m["SiteLatitude"]), float(m["SiteLongitude"])) if m else (0.0, 0.0)
-        while self.index < len(self.frames) and not self._stop.is_set():
+        while self.pos < len(self.order) and not self._stop.is_set():
+            self.index = self.order[self.pos]
             if self._pause.is_set():
                 if not self._hold():
                     break
@@ -1141,7 +1147,7 @@ class CaptureRunner:
             if self._skip.is_set():
                 self._skip.clear()
                 self.status[self.index] = "skipped"; self.emit("frame", index=self.index, status="skipped")
-                self.emit("log", msg=f"Frame {self.index + 1} skipped by user."); self.index += 1; continue
+                self.emit("log", msg=f"Frame {self.index + 1} skipped by user."); self.pos += 1; continue
             i = self.index
             self._step_gen = self._gen
             try:
@@ -1165,7 +1171,7 @@ class CaptureRunner:
                       name=self.names[i] if st == "done" else None)
             if st == "skipped":
                 self.emit("log", msg=f"Frame {i + 1} skipped: {info}")
-            self.index += 1
+            self.pos += 1
         stopped = self._stop.is_set()
         if self.park and not stopped:
             try:
@@ -1318,6 +1324,55 @@ def match_late_files(folder, frames, waiting, names=None, since=0.0, seen=None, 
         if max(abs(a2 - alt), abs((z2 - az + 180) % 360 - 180) * math.cos(math.radians(alt))) <= tol:
             found[best] = p; waiting.discard(best); taken.add(p)
     return found
+
+
+CAPTURE_FILE_VERSION = 1
+
+
+def save_capture_file(path, frames, status, paths, names, fw, fh, source="", settings=None,
+                      horizon_files=None):
+    """Save a capture's progress (frames, each frame's state, file paths and names, settings) as JSON,
+    so it can be resumed later with 'Load saved capture'. Written to a temporary file first."""
+    data = dict(app=APP_NAME, version=APP_VERSION, file_version=CAPTURE_FILE_VERSION,
+                saved=time.strftime("%Y-%m-%d %H:%M:%S"), source=source, fw=fw, fh=fh,
+                horizon_files=list(horizon_files or []), settings=dict(settings or {}),
+                frames=[dict(n=i + 1, alt=round(a, 5), az=round(z, 5), rot=r, status=st, path=p, name=nm)
+                        for i, ((a, z, r), st, p, nm) in enumerate(zip(frames, status, paths, names))])
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh_:
+        json.dump(data, fh_, indent=1)
+    os.replace(tmp, path)
+    return path
+
+
+def load_capture_file(path):
+    """Read a saved capture. Frames whose saved file no longer exists are set back to 'pending'.
+    Returns dict(frames, status, paths, names, fw, fh, source, settings, horizon_files, missing)."""
+    with open(path, encoding="utf-8") as fh_:
+        d = json.load(fh_)
+    if d.get("file_version", 0) > CAPTURE_FILE_VERSION:
+        raise ValueError("this capture file was saved by a newer version of the app")
+    frames, status, paths, names, missing = [], [], [], [], []
+    for i, f_ in enumerate(d["frames"]):
+        frames.append((float(f_["alt"]), float(f_["az"]), f_.get("rot")))
+        st, p = f_.get("status", "pending"), f_.get("path")
+        if st in ("slewing", "rotating", "exposing"):          # saved mid-frame: shoot it again
+            st = "pending"
+        if st == "done" and not (p and os.path.isfile(p)):
+            missing.append(i); st = "pending"; p = None
+        status.append(st); paths.append(p); names.append(f_.get("name"))
+    return dict(frames=frames, status=status, paths=paths, names=names, fw=float(d["fw"]), fh=float(d["fh"]),
+                source=d.get("source", ""), settings=d.get("settings", {}),
+                horizon_files=d.get("horizon_files", []), missing=missing, saved=d.get("saved", ""))
+
+
+def frames_to_shoot(status, first=1, last=None, reshoot=False):
+    """Indices of the frames a run should shoot: within frames first..last (1-based, inclusive),
+    skipping those already taken unless `reshoot`."""
+    n = len(status)
+    last = n if last is None else min(int(last), n)
+    first = max(int(first), 1)
+    return [i for i in range(first - 1, last) if reshoot or status[i] != "done"]
 
 
 def write_capture_list(paths, folder=None):
@@ -2788,7 +2843,7 @@ def run_gui():
     sf = ttk.Frame(g); sf.grid(row=2, column=0, sticky="w")
     src_widgets.append(ttk.Radiobutton(sf, text="Saved sequence file", variable=cv_["src"], value="file"))
     src_widgets[-1].pack(side="left", padx=4)
-    src_widgets.append(ttk.Button(sf, text="Browse…", command=lambda: (lambda fn: fn and (cv_["file"].set(fn), cv_["src"].set("file"), cap_load()))(
+    src_widgets.append(ttk.Button(sf, text="Browse…", command=lambda: (lambda fn: fn and (cv_["file"].set(fn), cv_["src"].set("file"), source_changed()))(
         filedialog.askopenfilename(title="Plan or fill-in sequence saved for NINA",
                                    filetypes=[("NINA sequence", "*.json"), ("All", "*.*")]))))
     src_widgets[-1].pack(side="left")
@@ -2808,6 +2863,13 @@ def run_gui():
     cvar("unpark", True, tk.BooleanVar); cvar("park", V["park"].get(), tk.BooleanVar)
     ttk.Checkbutton(g, text="Unpark at start", variable=cv_["unpark"]).grid(row=2, column=0, sticky="w", padx=4)
     ttk.Checkbutton(g, text="Park when finished", variable=cv_["park"]).grid(row=3, column=0, sticky="w", padx=4)
+    g = group(cbar, "Range")
+    labeled(g, 0, "From frame", cvar("first", "1"), width=6)
+    labeled(g, 1, "To frame (blank = last)", cvar("last", ""), width=6)
+    cvar("reshoot", False, tk.BooleanVar)
+    ttk.Checkbutton(g, text="Re-shoot frames already taken", variable=cv_["reshoot"]).grid(
+        row=2, column=0, columnspan=3, sticky="w", padx=4)
+    range_lbl = ttk.Label(g, text="", foreground="#666", wraplength=230); range_lbl.grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
     g = group(cbar, "Files")
     labeled(g, 0, "Target name", cvar("target", "Horizon mapping"), width=18)
     ttk.Label(g, text="NINA image folder (found automatically)").grid(row=1, column=0, columnspan=3, sticky="w", padx=4)
@@ -2839,9 +2901,11 @@ def run_gui():
     resume_btn = ttk.Button(rb, text="▶ Resume", state="disabled", command=lambda: cap_resume()); resume_btn.grid(row=0, column=1, sticky="ew", padx=1, pady=1)
     skip_btn = ttk.Button(rb, text="Skip frame", state="disabled", command=lambda: cap_skip()); skip_btn.grid(row=1, column=0, sticky="ew", padx=1, pady=1)
     stop_btn = ttk.Button(rb, text="■ Stop run", state="disabled", command=lambda: cap_stop()); stop_btn.grid(row=1, column=1, sticky="ew", padx=1, pady=1)
-    ttk.Button(rb, text="Test connection", command=lambda: cap_connect()).grid(row=2, column=0, sticky="ew", padx=1, pady=1)
-    load_btn = ttk.Button(rb, text="Load frames", command=lambda: cap_load())
-    load_btn.grid(row=2, column=1, sticky="ew", padx=1, pady=1)
+    ttk.Button(rb, text="Test connection", command=lambda: cap_connect()).grid(row=2, column=0, columnspan=2, sticky="ew", padx=1, pady=1)
+    save_cap_btn = ttk.Button(rb, text="Save current capture…", command=lambda: cap_save())
+    save_cap_btn.grid(row=3, column=0, sticky="ew", padx=1, pady=1)
+    load_cap_btn = ttk.Button(rb, text="Load saved capture…", command=lambda: cap_open())
+    load_cap_btn.grid(row=3, column=1, sticky="ew", padx=1, pady=1)
     cap_pb = ttk.Progressbar(runb, length=220, maximum=1.0); cap_pb.pack(side="top", fill="x", padx=4, pady=4)
     cap_status = ttk.Label(runb, text="Idle", wraplength=240, justify="left"); cap_status.pack(side="top", anchor="w", padx=4)
 
@@ -2909,7 +2973,7 @@ def run_gui():
         if not C["polling"]:
             C["polling"] = True; threading.Thread(target=job, daemon=True).start()
 
-    def cap_load(after=None):
+    def cap_load(after=None, quiet=False):
         """Frames from the Plan tab, the Build tab fill-in, or a saved sequence file. The window
         settings are read here; the slow part (planning, reading the file) runs in the background."""
         r = C.get("runner")
@@ -2941,7 +3005,10 @@ def run_gui():
             fill_plan = dict(fill["plan"]) if src == "fill" else None
         except Exception as e:
             dlog(f"Load frames refused: {e}")
-            messagebox.showerror(APP_NAME, str(e)); return False
+            frames_lbl.config(text=f"No frames: {e}")
+            if not quiet:
+                messagebox.showerror(APP_NAME, str(e))
+            return False
         C["loading_since"] = time.time()
         C["loading"] = True; cap_buttons(C["runner"].state if C.get("runner") else "idle")
         frames_lbl.config(text="Loading frames…")
@@ -2966,7 +3033,7 @@ def run_gui():
                 C["q"].put(("loaded", (plan, label, p, st, after)))
             except Exception as e:
                 dlog_exc("loading frames")
-                C["q"].put(("load_error", str(e)))
+                C["q"].put(("load_error", (str(e), quiet)))
         threading.Thread(target=job, daemon=True, name="load-frames").start()
         return True
 
@@ -2985,6 +3052,9 @@ def run_gui():
                 cv_[k].set(st[k])
         C["frames"] = list(plan["frames"]); C["plan"] = plan; C["source"] = label; C["params"] = p
         C["status"] = ["pending"] * len(C["frames"]); C["runner"] = None; C["cur"] = None
+        n_ = len(C["frames"])
+        C["prog"] = dict(paths=[None] * n_, names=[None] * n_); C["from_capture"] = None
+        update_range_label()
         C["thumbs"] = {}; C["paths"] = {}; C["photo_cache"] = {}; C["thumb_retry"] = {}; C["thumb_attempts"] = {}
         try:
             ex = float(cv_["exposure"].get())
@@ -2996,6 +3066,148 @@ def run_gui():
         cap_buttons("idle"); request_draw()
         if after:
             after()
+
+    def progress_lists():
+        """(status, paths, names) of the frames: from the run if there is one, else from the loaded
+        capture or the freshly loaded frames."""
+        r = C.get("runner")
+        if r is not None and r.frames == C["frames"]:
+            return list(r.status), list(r.paths), list(r.names)
+        pr = C.get("prog") or {}
+        n_ = len(C["frames"])
+        return (list(C.get("status") or ["pending"] * n_), list(pr.get("paths") or [None] * n_),
+                list(pr.get("names") or [None] * n_))
+
+    def range_values():
+        n_ = len(C["frames"])
+        try:
+            first = int(float(cv_["first"].get() or 1))
+            last = int(float(cv_["last"].get())) if cv_["last"].get().strip() else n_
+        except ValueError:
+            raise ValueError("From frame / To frame must be frame numbers.")
+        if not (1 <= first <= max(n_, 1)) or last < first:
+            raise ValueError(f"The frame range must lie within 1–{n_}, with From ≤ To.")
+        return first, min(last, n_)
+
+    def update_range_label(*a):
+        if not C["frames"]:
+            range_lbl.config(text=""); return
+        st_ = progress_lists()[0]
+        try:
+            first, last = range_values()
+            todo = frames_to_shoot(st_, first, last, cv_["reshoot"].get())
+            range_lbl.config(text=f"{len(todo)} of frames {first}–{last} to shoot "
+                                  f"({sum(1 for x in st_ if x == 'done')} of {len(st_)} taken)")
+        except ValueError as e:
+            range_lbl.config(text=str(e))
+    for _k in ("first", "last", "reshoot"):
+        cv_[_k].trace_add("write", update_range_label)
+
+    def capture_settings():
+        keys = ("host", "port", "exposure", "gain", "binning", "settle", "sun", "floor", "unpark", "park",
+                "target", "folder", "first", "last", "reshoot", "src", "file")
+        return {k: cv_[k].get() for k in keys}
+
+    def write_capture(path):
+        st_, pa_, nm_ = progress_lists()
+        p_ = C.get("params")
+        hz_files = list(getattr(p_, "horizon_files", None) or []) if p_ is not None else []
+        return save_capture_file(path, C["frames"], st_, pa_, nm_, C["plan"]["fw"], C["plan"]["fh"],
+                                 source=C.get("source", ""), settings=capture_settings(), horizon_files=hz_files)
+
+    def autosave():
+        """After every frame: keep the progress in last_capture.hmcap.json (for resuming after a crash)."""
+        if not C["frames"] or not C.get("plan"):
+            return
+        try:
+            d = os.path.join(app_data_dir(), "captures"); os.makedirs(d, exist_ok=True)
+            write_capture(os.path.join(d, "last_capture.hmcap.json"))
+        except Exception as e:
+            dlog(f"autosave failed: {e}")
+
+    def cap_save():
+        if not C["frames"] or not C.get("plan"):
+            messagebox.showinfo(APP_NAME, "There is no capture to save yet."); return
+        d = os.path.join(app_data_dir(), "captures"); os.makedirs(d, exist_ok=True)
+        fn = filedialog.asksaveasfilename(
+            title="Save current capture", initialdir=d, defaultextension=".hmcap.json",
+            initialfile=time.strftime(f"{cv_['target'].get() or 'capture'} %Y-%m-%d %H%M.hmcap.json"),
+            filetypes=[("Horizon Mapper capture", "*.hmcap.json"), ("JSON", "*.json")])
+        if not fn:
+            return
+        try:
+            write_capture(fn)
+        except Exception as e:
+            dlog_exc("saving capture"); messagebox.showerror(APP_NAME, f"Could not save: {e}"); return
+        st_ = progress_lists()[0]
+        clog_add(f"Capture saved ({sum(1 for x in st_ if x == 'done')} of {len(st_)} frames taken): {fn}")
+        dlog(f"capture saved to {fn}")
+
+    def cap_open():
+        r = C.get("runner")
+        if r and r.state == "running":
+            messagebox.showinfo(APP_NAME, "A run is in progress. Pause it first."); return
+        if r and r.state == "paused":
+            if not messagebox.askyesno(APP_NAME, "Loading a saved capture ends the paused run.\n"
+                                                 "Its frames are kept – save it first if you need it.\n\nContinue?"):
+                return
+            threading.Thread(target=r.stop, daemon=True, name="stop-for-open").start()
+        d = os.path.join(app_data_dir(), "captures"); os.makedirs(d, exist_ok=True)
+        fn = filedialog.askopenfilename(title="Load saved capture", initialdir=d,
+                                        filetypes=[("Horizon Mapper capture", "*.hmcap.json"), ("JSON", "*.json")])
+        if not fn:
+            return
+        try:
+            cap = load_capture_file(fn)
+        except Exception as e:
+            dlog_exc("loading capture"); messagebox.showerror(APP_NAME, f"Could not load: {e}"); return
+        dlog(f"capture loaded from {fn}: {len(cap['frames'])} frames, "
+             f"{sum(1 for x in cap['status'] if x == 'done')} taken, {len(cap['missing'])} files missing")
+        C["opening"] = True                      # don't let restored settings trigger a source reload
+        try:
+            for k, v in (cap["settings"] or {}).items():
+                if k in cv_ and k not in ("src", "file"):
+                    try:
+                        cv_[k].set(v)
+                    except Exception:
+                        pass
+        finally:
+            C["opening"] = False
+        import types
+        C["frames"] = cap["frames"]
+        C["plan"] = dict(frames=cap["frames"], grid=rows_of(cap["frames"]), fw=cap["fw"], fh=cap["fh"])
+        C["params"] = types.SimpleNamespace(mode="horizon", horizon_files=cap["horizon_files"])
+        C["source"] = f"saved capture {os.path.basename(fn)}"; C["from_capture"] = fn
+        C["status"] = list(cap["status"]); C["prog"] = dict(paths=cap["paths"], names=cap["names"])
+        C["runner"] = None; C["cur"] = None
+        C["thumbs"] = {}; C["paths"] = {}; C["photo_cache"] = {}; C["thumb_retry"] = {}; C["thumb_attempts"] = {}
+        for i, (st_, pth) in enumerate(zip(cap["status"], cap["paths"])):
+            if st_ == "done" and pth:
+                C["paths"][i] = pth; cap_thumb(i, pth)
+        taken = sum(1 for x in cap["status"] if x == "done")
+        frames_lbl.config(text=f"{len(cap['frames'])} frames from the saved capture ({taken} taken)")
+        clog_add(f"Loaded saved capture {os.path.basename(fn)} (saved {cap['saved']}): {taken} of "
+                 f"{len(cap['frames'])} frames taken" + (f"; {len(cap['missing'])} files missing – those frames "
+                 f"will be shot again: {', '.join(str(i + 1) for i in cap['missing'][:20])}"
+                 f"{' …' if len(cap['missing']) > 20 else ''}" if cap["missing"] else ""))
+        update_range_label(); cap_buttons("idle"); request_draw()
+
+    def source_changed(*a):
+        """Choosing a frame source shows its frames at once (asks first if that replaces progress)."""
+        if C.get("opening") or C.get("loading"):
+            return
+        r = C.get("runner")
+        if r and r.state in ("running", "paused"):
+            return
+        st_ = progress_lists()[0] if C["frames"] else []
+        taken = sum(1 for x in st_ if x == "done")
+        if taken and not messagebox.askyesno(
+                APP_NAME, f"Show the frames from the new source?\n\nThe current frames and their progress "
+                          f"({taken} taken) are replaced. They are also kept in the automatic save "
+                          f"'last_capture.hmcap.json' – or use 'Save current capture…' first."):
+            dlog("source change cancelled by user"); return
+        cap_load(quiet=True)
+    cv_["src"].trace_add("write", lambda *a: root.after_idle(source_changed))
 
     def thumb_K():
         """Rotator offset for the previews: the Build tab's calibrated value if there is one."""
@@ -3044,7 +3256,7 @@ def run_gui():
         stop_btn.config(state="normal" if (running or paused) else "disabled")
         start_btn.config(state="disabled" if (running or paused) else "normal")
         busy = running or C.get("loading")
-        load_btn.config(state="disabled" if busy else "normal")
+        load_cap_btn.config(state="disabled" if busy else "normal")
         for w_ in src_widgets:
             try:
                 w_.config(state="disabled" if (running or paused) else "normal")
@@ -3056,39 +3268,50 @@ def run_gui():
             return
         if C.get("loading"):
             return
-        if not C["frames"]:
-            cap_load(after=cap_start)                      # start once the frames are ready
+        st0 = progress_lists()[0] if C["frames"] else []
+        fresh = not any(x == "done" for x in st0) and not C.get("from_capture")
+        if not C["frames"] or (fresh and not C.get("started_fresh_load")):
+            # nothing taken yet: take the frames from the source as it is now (e.g. Plan tab changes)
+            C["started_fresh_load"] = True
+            if not cap_load(after=cap_start):
+                C["started_fresh_load"] = False
             return
+        C["started_fresh_load"] = False
         try:
             ex = float(cv_["exposure"].get()); gain = int(float(cv_["gain"].get()))
             binning = int(float(cv_["binning"].get())); settle = float(cv_["settle"].get())
             sun = float(cv_["sun"].get()); floor_ = float(cv_["floor"].get())
-        except ValueError:
-            messagebox.showerror(APP_NAME, "Check the capture and safety values."); return
-        start_at = 0
-        old = C["runner"]
-        if old and old.frames == C["frames"] and 0 < old.index < len(C["frames"]):
-            if messagebox.askyesno(APP_NAME, f"Continue the previous run from frame {old.index + 1}?\n"
-                                             "(No = start again from the first frame)"):
-                start_at = old.index
+            first, last = range_values()
+        except ValueError as e:
+            messagebox.showerror(APP_NAME, f"Check the capture, safety and range values. {e}"); return
+        status, paths, names = progress_lists()
+        order = frames_to_shoot(status, first, last, cv_["reshoot"].get())
+        if not order:
+            messagebox.showinfo(APP_NAME, f"Frames {first}–{last} are all taken already.\n"
+                                          "Tick 'Re-shoot frames already taken' to shoot them again."); return
+        taken_in = sum(1 for i in range(first - 1, last) if status[i] == "done")
         if not messagebox.askokcancel(APP_NAME,
-                f"Start shooting {len(C['frames']) - start_at} frames ({C['source']}) through NINA?\n\n"
-                "The mount, rotator and camera will move on their own.\n"
+                f"Shoot {len(order)} frames through NINA?\n"
+                f"Range: frames {first}–{last} of {len(C['frames'])} ({C['source']})"
+                + (f"; {taken_in} already taken are {'shot again' if cv_['reshoot'].get() else 'skipped'}" if taken_in else "")
+                + ".\n\nThe mount, rotator and camera will move on their own.\n"
                 "Stay nearby – PAUSE (or Esc) stops every movement at once.", icon="warning"):
             return
+        for i in order:                                   # frames to shoot start from scratch
+            status[i] = "pending"
         q_ = C["q"]
         runner = CaptureRunner(api_now(), C["frames"], lambda kind, **d: q_.put(("run", (kind, d, runner))),
                                exposure=ex, gain=(gain if gain >= 0 else None), binning=binning,
                                target=cv_["target"].get() or "Horizon mapping", settle=settle, sun_min=sun,
                                floor=floor_, unpark=cv_["unpark"].get(), park=cv_["park"].get(),
-                               image_folder=cv_["folder"].get(), start_index=start_at)
-        if old and start_at:
-            runner.status[:start_at] = old.status[:start_at]; runner.paths[:start_at] = old.paths[:start_at]
+                               image_folder=cv_["folder"].get(), order=order, status=status, paths=paths,
+                               names=names)
         C["runner"] = runner; C["status"] = list(runner.status)
-        clog_add(f"Start: {len(C['frames']) - start_at} frames, exposure {ex} s, sun ≥ {sun}°, altitude ≥ {floor_}°.")
+        clog_add(f"Start: {len(order)} frames ({first}–{last}), exposure {ex} s, sun ≥ {sun}°, altitude ≥ {floor_}°.")
+        dlog(f"start: order {order[:10]}{' …' if len(order) > 10 else ''}")
         if not C["polling"]:
             C["api"] = api_now(); poll_devices()
-        runner.start(); cap_buttons("running"); scan_folder()
+        runner.start(); cap_buttons("running"); scan_folder(); request_draw()
 
     def cap_pause(reason="Paused by user"):
         r = C["runner"]
@@ -3179,6 +3402,8 @@ def run_gui():
 
     def cap_finished(ok, r=None):
         r = r or C["runner"]
+        if r is C["runner"]:
+            autosave(); update_range_label()
         done = sum(1 for s_ in r.status if s_ == "done")
         msg = f"Run {'finished' if ok else 'stopped'}: {done} frames taken"
         lst = update_capture_list(r)
@@ -3242,13 +3467,15 @@ def run_gui():
                 elif kind == "loaded":
                     cap_loaded(*val)
                 elif kind == "load_error":
-                    C["loading"] = False; cap_buttons("idle"); frames_lbl.config(text="No frames loaded")
-                    messagebox.showerror(APP_NAME, val)
+                    msg_, quiet_ = val
+                    C["loading"] = False; cap_buttons("idle"); frames_lbl.config(text=f"No frames: {msg_}")
+                    if not quiet_:
+                        messagebox.showerror(APP_NAME, msg_)
                 elif kind == "late_file":
                     i, pth = val
                     r = C["runner"]
                     if r and i < len(r.paths) and not (r.paths[i] and os.path.isfile(r.paths[i])):
-                        r.paths[i] = pth; C.setdefault("paths", {})[i] = pth
+                        r.paths[i] = pth; C.setdefault("paths", {})[i] = pth; C["autosave_due"] = True
                         cap_thumb(i, pth)
                         if r.state not in ("running", "paused"):
                             update_capture_list()
@@ -3277,6 +3504,8 @@ def run_gui():
                             cap_status.config(text="Running")
                     elif k == "frame":
                         i = d["index"]; C["status"][i] = d["status"]; C["cur"] = i
+                        if d["status"] in ("done", "skipped", "error"):
+                            C["autosave_due"] = True
                         if d["status"] == "done" and d.get("path"):
                             C.setdefault("paths", {})[i] = d["path"]; cap_thumb(i, d["path"])
                         elif d["status"] == "done":
@@ -3293,6 +3522,8 @@ def run_gui():
             pass
         except Exception:
             dlog_exc("cap_poll")
+        if C.get("autosave_due") and time.time() - C.get("last_autosave", 0) > 2.0:
+            C["autosave_due"] = False; C["last_autosave"] = time.time(); autosave(); update_range_label()
         for i, (pth, due) in list(C.get("thumb_retry", {}).items()):
             if time.time() >= due:
                 del C["thumb_retry"][i]; cap_thumb(i, pth)
@@ -3493,7 +3724,14 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
      NINA save FITS, connect mount, camera and rotator in NINA. No NINA sequence at the same time.
    • 'Test connection' shows the devices, starts the live device line and finds NINA's image
      folder. 'Frames to shoot': the Plan tab plan, the Build tab fill-in frames, or a saved
-     sequence file (Browse…; exposure, gain and binning come from it); 'Load frames'.
+     sequence file (Browse…; exposure, gain and binning come from it). Choosing a source shows its
+     frames; a fresh Start takes them from the source as it is then.
+   • Range: 'From frame' / 'To frame' (numbers in shooting order) limit the run; frames already
+     taken are left out unless 'Re-shoot frames already taken' is ticked.
+   • 'Save current capture…' stores frames, progress, file paths and settings (.hmcap.json);
+     'Load saved capture…' restores them, shows the pictures from the original paths and sets
+     frames whose file is gone back to 'to do'. Start then shoots only what is missing.
+     Progress is also saved automatically after every frame (captures\\last_capture.hmcap.json).
    • The picture is drawn like the Plan preview (strip, horizon, frames, shooting order); blue =
      to do, yellow = in progress, green = done, orange = skipped, red = error. Finished frames
      are shown in their slots (projected like the mosaic; 'Turn previews 180°' if upside down).
@@ -3504,7 +3742,7 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
      'Resume' repeats the interrupted frame; 'Skip frame' skips it; 'Stop run' ends the run.
    • Any error or timeout pauses the run automatically – nothing is skipped silently.
    • The NINA image folder can be changed during a run – file look-ups always use the current
-     value. 'Load frames' while paused asks, then ends the paused run (frames taken are kept).
+     value.
    • The log runs down the right side of the tab (scrollable).
    • A preview is made only when the FITS file is complete (NINA may still be writing it);
      otherwise it is tried again every 3 s for up to 3 minutes.
