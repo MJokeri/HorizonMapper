@@ -46,6 +46,13 @@
   window is blocked for more than a second. The setting is remembered and on by default for now.
 
 ### Fixed
+- **The app crashed at start** ("super(type, obj): obj must be an instance or subtype of type"). The
+  hover and click-logging wrappers replaced classes inside the tkinter library itself, and ttk
+  builds its Combobox and Spinbox on ttk.Entry internally. The wrappers now live in the app's own
+  copy of the tkinter names, and the library stays untouched.
+- **The Windows build now opens the real window** (`--selftest-gui`), both as a Python script and as
+  the exe. It switches through the tabs, shows a hover and closes, so a start-up crash fails the
+  build instead of reaching users.
 - **The window could freeze during a capture run, making PAUSE and Stop unresponsive.**
   - Every event from the run redrew the whole picture, and the handler only gave control back to
     the window once all queued events were done. With hundreds of frames and previews, redrawing

@@ -38,6 +38,10 @@ Please attach the log when reporting a problem.
   `horizon_mapper.py` (key = the text shown in the window). The debug log lists controls without
   one ("controls without hover text").
 - Update the README, the in-app Help and `CHANGELOG.md` with every change.
+- `python horizon_mapper.py --selftest-gui` opens the real window, switches through the tabs, shows a
+  hover and closes. The Windows build runs it for the script and for the exe.
+- Never patch the `tkinter` / `ttk` modules themselves: the wrappers in `run_gui` work on private
+  copies of their names, because ttk builds some widgets on others internally.
 
 ### Release checklist
 
