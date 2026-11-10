@@ -57,10 +57,13 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   - **with branches:** also avoids thin bare branches
 
   Edits and the side margin are included. Save twice if you want both files.
-- Azimuths reported as **clear to bottom** or **blocked to top** reached the edge of the imaged area.
-  **Plan fill-in frames…** turns them into a short NINA sequence. Shoot it, add its folder, and build
-  again. Thanks to the cache, only the new frames are read.
-  - **Fill-in: extra frames at steep edges** (below the button): every steep rise or drop of the new
+- **Fill-in frames** cover the places where the solid or branches line (including your edits) reaches
+  the edge of the imaged area (**clear to bottom** or **blocked to top**), plus the steep edges below.
+  Dark frame edges high in the sky that the lines already rejected are ignored.
+  - **Generate fill-in frames** plans them, draws them on the image and writes a summary to the log.
+  - **Save fill-in sequence…** saves exactly the plan that is shown as a short NINA sequence.
+  Shoot it, add its folder, and build again. Thanks to the cache, only the new frames are read.
+  - **Fill-in: extra frames at steep edges** (above the buttons): every steep rise or drop of the new
     horizon line (steeper than **steep = more than**, default 3°/°, and at least 2° high) gets a
     **Steep edge** area. It spans the jump (±1°) and this many frame widths to each side of it. Only
     frames over gaps in the mosaic are shot, so edges that are already imaged cost nothing.
@@ -70,8 +73,9 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
     `build … --fillin FILE.json --fillin-edge-frames N --fillin-edge-slope S`.
 - **Show fill-in frames** (toolbar above the image) draws the fill-in areas (dashed magenta), their
   frames (orange) and the shooting order: a path from green (first) to magenta (last), with the first
-  frame of each row numbered (every frame at zoom 20). It updates live as you edit the lines or change
-  the fill-in settings, and switches on by itself when you click **Plan fill-in frames…**.
+  frame of each row numbered (every frame at zoom 20). After you edit the lines or change the
+  fill-in settings, the plan is generated again and redrawn, so the image always shows what
+  **Save fill-in sequence…** will write.
 - **Re-detect** applies new thresholds instantly, without re-reading the frames.
 - **Side margin at steep edges** (in the toolbar above the image): where the horizon rises or drops steeply (the side of a tree, the
   end of a roof), the higher value is extended this many degrees sideways. That stops NINA

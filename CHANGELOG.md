@@ -8,7 +8,9 @@
   widened sideways by the chosen number of frame widths (default 1, 0 = off) and spans the full
   height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With the sample site horizon,
   0 / 1 / 2 extra frames give 647 / 733 / 819 frames.
-- **Build tab – Fill-in: extra frames at steep edges:** the same idea for **Plan fill-in frames…**.
+- **Build tab – Generate fill-in frames / Save fill-in sequence…:** generating and saving are
+  separate buttons. Generate draws the plan and logs a summary; Save writes exactly the plan shown.
+- **Build tab – Fill-in: extra frames at steep edges:** the same idea for the fill-in frames.
   Every steep rise or drop of the new horizon line (at least 2° high) gets a **Steep edge** area
   spanning the jump and the chosen number of frame widths to each side; only frames over gaps in
   the mosaic are shot. The fields below the button take their values from the Plan tab and follow
@@ -19,6 +21,11 @@
   (green = first → magenta = last) with row numbers, Start/End and the meridian flip.
 
 ### Fixed
+- Fill-in areas are checked against the solid and branches lines (with edits). Before, the detector's
+  raw "blocked to top" flags also fired on dark frame edges high in the sky that the lines had
+  rejected, which planned many useless frames at the top of the imaged area.
+- The fill-in overlay now always follows the settings and line edits: the plan is generated again
+  and redrawn after every change, and errors are written to the log instead of failing silently.
 - Fill-in frames shared by overlapping areas are now shot only once.
 
 ### Changed

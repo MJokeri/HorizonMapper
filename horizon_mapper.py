@@ -368,10 +368,25 @@ def assign_rotator(p, grid, orient="landscape"):
     return frames, rot_moves
 
 
-def fillin_boxes(det, extra_below=8.0, extra_above=6.0, floor=0.0, ceiling=85.0, pad_az=1.0):
-    """Turn 'clear to bottom' / 'blocked to top' azimuths into (az0, az1, alt0, alt1, label) boxes."""
+def fillin_boxes(det, extra_below=8.0, extra_above=6.0, floor=0.0, ceiling=85.0, pad_az=1.0,
+                 lines=None, tol=1.0):
+    """Turn 'clear to bottom' / 'blocked to top' azimuths into (az0, az1, alt0, alt1, label) boxes.
+
+    `lines` = (az, solid, branches): the final (possibly edited) horizon lines. When given, an
+    azimuth only counts if the lines really reach the edge of the imaged area there: the higher
+    line within `tol` degrees of the top for 'blocked to top', the lower line within `tol` of the
+    bottom for 'clear to bottom'. The detector's raw flags also fire on dark frame edges high in
+    the sky that the solid/branches lines have already rejected.
+    """
+    def keep(o):
+        if lines is None:
+            return True
+        laz, ls, lb = (np.asarray(x, float) for x in lines)
+        top_ = max(np.interp(o["az"], laz, ls, period=360), np.interp(o["az"], laz, lb, period=360))
+        bot_ = min(np.interp(o["az"], laz, ls, period=360), np.interp(o["az"], laz, lb, period=360))
+        return top_ >= o["hi"] - tol if o["flag"] == "blocked_to_top" else bot_ <= o["lo"] + tol
     items = sorted((o["az"], o["flag"], o["lo"], o["hi"]) for o in det["details"]
-                   if o["flag"] in ("clear_to_bottom", "blocked_to_top"))
+                   if o["flag"] in ("clear_to_bottom", "blocked_to_top") and keep(o))
     groups = []
     for az, flag, lo, hi in items:
         if groups and groups[-1]["flag"] == flag and az - groups[-1]["az1"] <= 1.01:
@@ -1376,7 +1391,8 @@ def run_gui():
     ttk.Label(tb2, text="° altitude per ° azimuth   (0 = off; 1–2° recommended)", foreground="#666").pack(side="left")
     show_fill = tk.BooleanVar(value=False)
     ttk.Checkbutton(tb2, text="Show fill-in frames", variable=show_fill,
-                    command=lambda: draw_fill()).pack(side="left", padx=(12, 2))
+                    command=lambda: generate_fill(quiet=True) if show_fill.get() and fill["plan"] is None
+                    else draw_fill()).pack(side="left", padx=(12, 2))
     ttk.Label(pr, text="Left-drag on the image to redraw the selected line · right-click: restore detected value · Ctrl+Z: undo",
               foreground="#666").pack(anchor="w")
     cf = ttk.Frame(pr); cf.pack(fill="both", expand=True)
@@ -1459,11 +1475,11 @@ def run_gui():
             return
         d = base_det()
         E["solid"] = np.array(d["solid"], float); E["branches"] = np.array(d["branches"], float)
-        E["undo"].clear(); redraw_all()
+        E["undo"].clear(); redraw_all(); refresh_fill()
 
     def undo():
         if E["undo"]:
-            E["solid"], E["branches"] = E["undo"].pop(); redraw_lines(); update_stats()
+            E["solid"], E["branches"] = E["undo"].pop(); redraw_lines(); update_stats(); refresh_fill()
 
     def side_settings():
         try:
@@ -1592,14 +1608,14 @@ def run_gui():
         d = base_det(); az = result["det"]["az"]
         m = np.abs((az - a + 180) % 360 - 180) <= bw / 2
         E[tgt][m] = np.asarray(d[tgt])[m]
-        redraw_lines(); update_stats()
+        redraw_lines(); update_stats(); refresh_fill()
 
     current_hz.trace_add("write", lambda *a: redraw_all())
     for k in ("side", "steep"):
-        pv[k].trace_add("write", lambda *a: (redraw_lines(), update_stats()) if E.get("solid") is not None else None)
+        pv[k].trace_add("write", lambda *a: (redraw_lines(), update_stats(), refresh_fill()) if E.get("solid") is not None else None)
     cv.bind("<ButtonPress-1>", lambda e: paint(e, True))
     cv.bind("<B1-Motion>", lambda e: paint(e, False))
-    cv.bind("<ButtonRelease-1>", lambda e: update_stats())
+    cv.bind("<ButtonRelease-1>", lambda e: (update_stats(), refresh_fill()))
     cv.bind("<Button-3>", restore)
     cv.bind("<MouseWheel>", lambda e: cv.xview_scroll(int(-e.delta / 40), "units"))
     root.bind("<Control-z>", lambda e: undo())
@@ -1628,10 +1644,16 @@ def run_gui():
 
     def report_uncertain():
         unc = result["det"]["uncertain"]
-        if unc:
-            boxes = fillin_boxes(result["det"])
-            log(f"{len(unc)} azimuth samples reached the edge of the imaged area "
-                f"({len(boxes)} areas) – use 'Plan fill-in frames…' to shoot them.")
+        fill.update(plan=None, boxes=[], p=None); fill_info.config(text="")
+        if show_fill.get():
+            generate_fill(quiet=True)       # new horizon: show its fill-in right away
+        else:
+            draw_fill()
+        d = result["det"]
+        boxes = fillin_boxes(d, lines=(d["az"], d["solid"], d["branches"])) if unc else []
+        if boxes:
+            log(f"{len(boxes)} areas where the horizon line reaches the edge of the imaged area "
+                f"– use 'Generate fill-in frames' to plan them.")
         else:
             log("No uncertain areas – every azimuth has sky and obstruction inside the imaged area.")
 
@@ -1652,35 +1674,64 @@ def run_gui():
 
     def compute_fill():
         """(params, boxes, plan) for the fill-in frames; raises ValueError with a readable message."""
-        if "det" not in result:
+        if "det" not in result or E.get("solid") is None:
             raise ValueError("Build the horizon first.")
         try:
             p = collect(require_area=False)
         except Exception as e:
             raise ValueError(f"Check the settings on the Plan tab: {e}")
-        boxes = fillin_boxes(result["det"], floor=p.floor, ceiling=p.ceiling)
         try:
             ef = max(float(fill_edge.get()), 0.0); es = max(float(fill_slope.get()), 0.1)
         except ValueError:
             raise ValueError("Check the fill-in steep-edge values.")
         az_, s_, b_ = final_lines()
+        boxes = fillin_boxes(result["det"], floor=p.floor, ceiling=p.ceiling, lines=(az_, s_, b_))
         boxes = boxes + steep_edge_boxes(az_, (s_, b_), max(p.fov), ef, es, floor=p.floor, ceiling=p.ceiling)
         if not boxes:
-            return p, boxes, None
+            return p, [], None
         plan = plan_fillin(p, boxes, mos=result.get("mos"))
-        used = {lab for lab in plan["labels"]}
+        used = set(plan["labels"])
         boxes = [b for b in boxes if b[4] in used]        # drop steep-edge areas that are fully imaged
         return p, boxes, (plan if boxes else None)
 
-    def draw_fill():
-        cv.delete("fill")
-        if not show_fill.get() or "mos" not in result or E.get("solid") is None:
-            return
+    fill = {"p": None, "boxes": [], "plan": None}       # the last generated fill-in plan
+
+    def generate_fill(quiet=False):
+        """Plan the fill-in frames with the current lines and settings, store and show them."""
         try:
             p, boxes, plan = compute_fill()
-        except ValueError:
-            return
-        if not boxes:
+        except ValueError as e:
+            if not quiet:
+                messagebox.showerror(APP_NAME, str(e))
+            log(f"Fill-in not generated: {e}"); return False
+        except Exception as e:                          # never fail silently
+            log(f"Fill-in failed: {type(e).__name__}: {e}")
+            if not quiet:
+                messagebox.showerror(APP_NAME, f"Fill-in failed: {e}")
+            return False
+        fill.update(p=p, boxes=boxes, plan=plan)
+        if plan:
+            n_edge = sum(1 for b in boxes if b[4].startswith("Steep edge"))
+            txt = (f"Fill-in: {len(boxes)} areas ({n_edge} steep edges), {len(plan['frames'])} frames, "
+                   f"~{plan['seconds'] / 60:.0f} min")
+        else:
+            txt = "Fill-in: nothing to shoot – every edge is imaged."
+        fill_info.config(text=txt)
+        if not quiet:
+            log(txt + ("\n  " + "\n  ".join(b[4] for b in boxes) if boxes else ""))
+            show_fill.set(True)
+        draw_fill()
+        return True
+
+    def refresh_fill():
+        """Re-generate after a change of lines or settings, if a fill-in plan is being shown."""
+        if fill["plan"] is not None or (show_fill.get() and fill["p"] is not None):
+            generate_fill(quiet=True)
+
+    def draw_fill():
+        cv.delete("fill")
+        plan, boxes = fill["plan"], fill["boxes"]
+        if not show_fill.get() or "mos" not in result or E.get("solid") is None or not plan:
             return
         X = lambda a: to_xy(a, 0)[0]; Y = lambda h: to_xy(0, h)[1]
         for a0, a1, h0, h1, label in boxes:
@@ -1701,28 +1752,25 @@ def run_gui():
         draw_order(cv, plan, lambda a: X(a % 360), Y, tag="fill",
                    numbers="all" if zoom() >= 20 else "rows", flip=False, width=1)
 
-    def plan_fill():
-        try:
-            p, boxes, plan = compute_fill()
-        except ValueError as e:
-            messagebox.showerror(APP_NAME, str(e)); return
-        if not boxes:
-            messagebox.showinfo(APP_NAME, "Nothing to fill in – every azimuth is resolved."); return
-        show_fill.set(True); draw_fill()
-        msg = (f"{len(boxes)} areas, {len(plan['frames'])} frames, ~{plan['seconds'] / 60:.0f} min\n\n" +
-               "\n".join(b[4] for b in boxes[:15]) + ("\n…" if len(boxes) > 15 else "") +
-               "\n\nCamera, rotator and exposure settings come from the Plan tab.")
-        if not messagebox.askokcancel(APP_NAME, msg):
+    def save_fill():
+        if fill["plan"] is None and not generate_fill():
             return
+        if fill["plan"] is None:
+            messagebox.showinfo(APP_NAME, "Nothing to fill in – every edge is imaged."); return
+        p, plan = fill["p"], fill["plan"]
         f = filedialog.asksaveasfilename(defaultextension=".json", initialfile="Horizon fill-in.json",
                                          filetypes=[("NINA sequence", "*.json")])
         if f:
             out = save_plan(p, plan, f)
-            messagebox.showinfo(APP_NAME, f"Saved:\n{out}")
+            messagebox.showinfo(APP_NAME, f"Saved {len(plan['frames'])} frames:\n{out}\n\n"
+                                          "Camera, rotator and exposure settings come from the Plan tab.")
 
     ttk.Button(bb, text="Build mosaic & horizon", command=start).grid(row=0, column=0, padx=2, pady=2, sticky="ew")
     ttk.Button(bb, text="Re-detect (new thresholds)", command=redetect).grid(row=0, column=1, padx=2, pady=2, sticky="ew")
-    ttk.Button(bb, text="Plan fill-in frames…", command=plan_fill).grid(row=1, column=0, padx=2, pady=2, sticky="ew")
+    fb = ttk.Frame(bb); fb.grid(row=3, column=0, columnspan=2, padx=2, pady=2, sticky="ew")
+    ttk.Button(fb, text="Generate fill-in frames", command=generate_fill).pack(side="left")
+    ttk.Button(fb, text="Save fill-in sequence…", command=save_fill).pack(side="left", padx=4)
+    fill_info = ttk.Label(fb, text="", foreground="#555"); fill_info.pack(side="left", padx=4)
     fe = ttk.Frame(bb); fe.grid(row=2, column=0, columnspan=2, padx=2, pady=2, sticky="w")
     # Start from the Plan tab's values and follow them whenever they change there.
     fill_edge = tk.StringVar(value=V["edge_frames"].get()); fill_slope = tk.StringVar(value=V["edge_slope"].get())
@@ -1734,8 +1782,8 @@ def run_gui():
     ttk.Spinbox(fe, textvariable=fill_slope, from_=0.5, to=20, increment=0.5, width=4).pack(side="left", padx=2)
     ttk.Label(fe, text="°/°  (0 = off; copied from the Plan tab)", foreground="#666").pack(side="left")
     for _v in (fill_edge, fill_slope):
-        _v.trace_add("write", lambda *a: draw_fill())
-    sv = ttk.Frame(bb); sv.grid(row=1, column=1, padx=2, pady=2, sticky="ew")
+        _v.trace_add("write", lambda *a: refresh_fill())
+    sv = ttk.Frame(bb); sv.grid(row=1, column=0, columnspan=2, padx=2, pady=2, sticky="w")
     save_which = tk.StringVar(value="solid")
     ttk.Combobox(sv, textvariable=save_which, values=["solid", "with branches"], width=12,
                  state="readonly").pack(side="left")
@@ -1801,11 +1849,13 @@ WORKFLOW
    • The horizon is the highest altitude where the view is blocked:
        solid      – pixels darker than 0.60 × the local sky (trees, roofs, walls)
        branches   – darker than 0.85 × sky (also thin bare branches)
-   • Azimuths listed as 'clear to bottom' or 'blocked to top' reached the edge of the
-     imaged area – shoot a few extra frames there for a precise value.
-   • 'Plan fill-in frames…' turns those areas into a short NINA sequence (camera, rotator and
+   • Fill-in areas are where the solid or branches line (with your edits) reaches the edge of
+     the imaged area – 'clear to bottom' or 'blocked to top' – so the true horizon may lie
+     outside it. Dark frame edges high in the sky that the lines rejected are ignored.
+   • 'Generate fill-in frames' plans the frames and shows them on the image, with a summary in
+     the log. 'Save fill-in sequence…' saves exactly the plan that is shown (camera, rotator and
      exposure settings come from the Plan tab). Shoot it, add its folder and build again.
-     'Fill-in: extra frames at steep edges' (below the button): around every steep rise or
+   • 'Fill-in: extra frames at steep edges' (above the buttons): around every steep rise or
      drop of the new horizon line, an area ('Steep edge …') spanning the jump and this many
      frame widths to each side is checked; only frames over gaps in the mosaic are shot.
      0 = off. The values are copied from the Plan tab and follow changes made there; you can
@@ -1813,7 +1863,7 @@ WORKFLOW
    • 'Show fill-in frames' (toolbar above the image) draws the fill-in areas (dashed magenta),
      their frames (orange) and the shooting order (green = first → magenta = last, numbers =
      first frame of each row; every frame is numbered at zoom 20). It follows your edits and
-     the fill-in settings live, and turns on by itself when you use 'Plan fill-in frames…'.
+     the fill-in settings: after a change the plan is generated again and redrawn.
    • 'Re-detect' applies new thresholds instantly without re-reading the frames.
    • 'Side margin at steep edges' (toolbar above the image): where the horizon rises or drops steeply (the side of a
      tree, the end of a roof), the higher value is extended that many degrees sideways, so a
@@ -1943,7 +1993,8 @@ def main():
         render_mosaic(mos, lines).save(a.outbase + "_mosaic.png")
         print(f"usable sky: solid {sky_area_sqdeg(det['az'], det['solid']):.0f} sq.deg, "
               f"branches {sky_area_sqdeg(det['az'], det['branches']):.0f} sq.deg")
-        boxes = fillin_boxes(det, floor=a.fillin_floor) if det["uncertain"] else []
+        boxes = fillin_boxes(det, floor=a.fillin_floor,
+                             lines=(det["az"], det["solid"], det["branches"])) if det["uncertain"] else []
         if boxes:
             print(f"{len(det['uncertain'])} uncertain azimuth samples in {len(boxes)} areas:",
                   "; ".join(b[4] for b in boxes))
