@@ -45,8 +45,12 @@ Please attach the log when reporting a problem.
 
 ### Release checklist
 
-1. Set `DEV_MODE = False` in `horizon_mapper.py`. This switches the development defaults off: the
-   debug log and the log windows. Users can still turn both on in the Debug menu.
+1. Set `DEV_MODE = False` in `horizon_mapper.py`. This switches the development defaults off:
+   - the debug log;
+   - the log windows;
+   - the test-rig capture host 192.168.0.10, which goes back to `localhost`.
+
+   Users can still change all three.
 2. Set `APP_VERSION` and finish the `CHANGELOG.md` entry.
 3. Tag the release (`vX.Y.Z`); the GitHub Actions build attaches the exe to the release.
 
@@ -107,8 +111,8 @@ the Plan tab and running it in NINA still works as before.)
 settings (default port 1888), and set NINA to save **FITS** files. Connect the mount, camera and
 rotator in NINA as usual. Don't run a NINA sequence at the same time.
 
-1. **Host** / **Port**: where NINA runs (default for testing: 192.168.0.10, port 1888).
-   **Test connection** checks the plugin, shows which devices are connected, starts the live device
+1. **Host** / **Port**: where NINA runs (port 1888 by default). The host is `localhost`, or
+   192.168.0.10 while `DEV_MODE` is on. **Test connection** (in the same group) checks the plugin, shows which devices are connected, starts the live device
    line (mount alt/az, pier side, rotator, camera) and fills in NINA's image folder.
 2. **Frames to shoot:** the plan from the Plan tab, the fill-in frames generated on the Build tab,
    or a **saved sequence file** (a plan or fill-in sequence saved for NINA; **Browse…**). Exposure,
@@ -153,7 +157,10 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
   frames still missing in the range. Closing the window during a run asks first and stops
   everything.
 
-**Saving and resuming a capture**
+The **Run** group's progress bar shows the percentage of the current run in its centre (frames done
+or skipped out of the frames this run shoots). Without a run, it shows frames taken out of all.
+
+**Saving and resuming a capture** (group **Save / Load Capture**, right of **Run**)
 
 - **Save current capture…** writes a `.hmcap.json` file with all the frames, each frame's state
   (taken, skipped, to do), the file path and NINA file name of every frame taken, and the capture,
@@ -218,6 +225,11 @@ accepts such a list like a folder.
     a spot without pictures, or comes within this many degrees of one, a **Gap** area is added there,
     whether or not the horizon is steep. Only frames over the gap are shot. Default 1°, 0 = off.
     CLI: `--fillin-gap-near D`.
+- **Import from Capture…** (FITS folders group) brings a capture to this tab: the capture on the
+  Capture tab, or a saved `.hmcap.json`. It does three things, then offers to build right away:
+  - adds the list of the capture's files to the folder list;
+  - takes the rotator offset from the Plan tab;
+  - takes the current horizon from the capture.
 - **Show fill-in frames** (toolbar above the image) draws the fill-in areas (dashed magenta), their
   frames (orange) and the shooting order: a path from green (first) to magenta (last), with the first
   frame of each row numbered (every frame at zoom 20). After you edit the lines or change the

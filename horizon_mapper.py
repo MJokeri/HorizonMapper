@@ -2409,6 +2409,7 @@ def run_gui(selftest=False):
     ttk.Button(fb, text="Add folder…", command=lambda: (lambda d: d and folders.insert("end", d))(
         filedialog.askdirectory())).pack(side="left", padx=3)
     ttk.Button(fb, text="Remove", command=lambda: [folders.delete(i) for i in reversed(folders.curselection())]).pack(side="left")
+    ttk.Button(fb, text="Import from Capture…", command=lambda: import_capture()).pack(side="left", padx=3)
     box = group(pl, "Settings")
     pv = {}
     def pvar(n, v): pv[n] = tk.StringVar(value=v); return pv[n]
@@ -2774,6 +2775,52 @@ def run_gui(selftest=False):
         messagebox.showinfo(APP_NAME, f"Saved the {which} horizon:\n{f}\n\n"
                                       "In NINA: Options → General → Astrometry → Horizon.")
 
+    def import_capture():
+        """Bring a capture to this tab: its file list (as a folder entry), the rotator offset and the
+        current horizon; then offer to build. Source: the Capture tab's capture, or a saved one."""
+        st_, pa_, src_ = [], [], None
+        if C.get("frames"):
+            st_, pa_, _ = progress_lists()
+        n_taken = sum(1 for x, p_ in zip(st_, pa_) if x == "done" and p_ and os.path.isfile(p_))
+        cap = None
+        if n_taken:
+            ans = messagebox.askyesnocancel(APP_NAME, f"Import the capture on the Capture tab ({n_taken} frames taken)?\n\n"
+                                                      "No = choose a saved capture file instead.")
+            if ans is None:
+                return
+            if ans:
+                src_ = C.get("source") or "Capture tab"
+                hz_ = list(getattr(C.get("params"), "horizon_files", None) or [])
+        if src_ is None:
+            d_ = os.path.join(app_data_dir(), "captures"); os.makedirs(d_, exist_ok=True)
+            fn = filedialog.askopenfilename(title="Import a saved capture", initialdir=d_,
+                                            filetypes=[("Horizon Mapper capture", "*.hmcap.json"), ("JSON", "*.json")])
+            if not fn:
+                return
+            try:
+                cap = load_capture_file(fn)
+            except Exception as e:
+                dlog_exc("import capture"); messagebox.showerror(APP_NAME, f"Could not read the capture: {e}"); return
+            st_, pa_, src_, hz_ = cap["status"], cap["paths"], os.path.basename(fn), cap["horizon_files"]
+        files = [p_ for x, p_ in zip(st_, pa_) if x == "done" and p_ and os.path.isfile(p_)]
+        if not files:
+            messagebox.showinfo(APP_NAME, "That capture has no frames with files yet."); return
+        lst = write_capture_list(files)
+        if lst not in folders.get(0, "end"):
+            folders.insert("end", lst)
+        notes = [f"{len(files)} frames from {src_} (file list {os.path.basename(lst)})"]
+        try:
+            pv["K"].set(V["rot_offset"].get()); notes.append(f"rotator offset {V['rot_offset'].get()}° from the Plan tab")
+        except Exception:
+            pass
+        if hz_ and os.path.isfile(hz_[0]):
+            current_hz.set(hz_[0]); notes.append(f"current horizon {os.path.basename(hz_[0])}")
+        pv["lat"].set("")                                  # read from the FITS headers
+        log("Imported from capture: " + "; ".join(notes) + ".")
+        dlog("import capture: " + "; ".join(notes))
+        if messagebox.askyesno(APP_NAME, "Imported:\n• " + "\n• ".join(notes) + "\n\nBuild the mosaic and horizon now?"):
+            start()
+
     def compute_fill():
         """(params, boxes, plan) for the fill-in frames; raises ValueError with a readable message."""
         if "det" not in result or E.get("solid") is None:
@@ -2945,8 +2992,10 @@ def run_gui(selftest=False):
         cv_[n] = kind(value=v); return cv_[n]
 
     g = group(cbar, "NINA – Advanced API plugin")
-    labeled(g, 0, "Host", cvar("host", "192.168.0.10"), width=12)
+    labeled(g, 0, "Host", cvar("host", "192.168.0.10" if DEV_MODE else "localhost"), width=12)   # DEV_MODE: test rig
     labeled(g, 1, "Port", cvar("port", "1888"), width=12)
+    ttk.Button(g, text="Test connection", command=lambda: cap_connect()).grid(row=2, column=0, columnspan=2,
+                                                                          sticky="w", padx=4, pady=2)
     conn_lbl = ttk.Label(g, text="Not connected", foreground="#666", wraplength=260, justify="left")
     conn_lbl.grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
     g = group(cbar, "Frames to shoot")
@@ -3017,13 +3066,43 @@ def run_gui(selftest=False):
     resume_btn = ttk.Button(rb, text="▶ Resume", state="disabled", command=lambda: cap_resume()); resume_btn.grid(row=0, column=1, sticky="ew", padx=1, pady=1)
     skip_btn = ttk.Button(rb, text="Skip frame", state="disabled", command=lambda: cap_skip()); skip_btn.grid(row=1, column=0, sticky="ew", padx=1, pady=1)
     stop_btn = ttk.Button(rb, text="■ End run", state="disabled", command=lambda: cap_stop()); stop_btn.grid(row=1, column=1, sticky="ew", padx=1, pady=1)
-    ttk.Button(rb, text="Test connection", command=lambda: cap_connect()).grid(row=2, column=0, columnspan=2, sticky="ew", padx=1, pady=1)
-    save_cap_btn = ttk.Button(rb, text="Save current capture…", command=lambda: cap_save())
-    save_cap_btn.grid(row=3, column=0, sticky="ew", padx=1, pady=1)
-    load_cap_btn = ttk.Button(rb, text="Load saved capture…", command=lambda: cap_open())
-    load_cap_btn.grid(row=3, column=1, sticky="ew", padx=1, pady=1)
-    cap_pb = ttk.Progressbar(runb, length=220, maximum=1.0); cap_pb.pack(side="top", fill="x", padx=4, pady=4)
+
+    class PctBar:
+        """Progress bar with the percentage written in its centre."""
+        def __init__(self, parent):
+            self.c = tk.Canvas(parent, height=20, highlightthickness=1, highlightbackground="#a0a0a0",
+                               bg="#f4f4f4", width=220)
+            self.v, self.note = 0.0, ""
+            self.c.bind("<Configure>", lambda e: self.draw())
+
+        def set(self, v, note=""):
+            self.v, self.note = min(max(float(v), 0.0), 1.0), note; self.draw()
+
+        def __setitem__(self, k, v):
+            if k == "value":
+                self.set(v, self.note)
+
+        def draw(self):
+            try:
+                w = self.c.winfo_width() or 220; h = self.c.winfo_height() or 20
+                self.c.delete("all")
+                if self.v > 0:
+                    self.c.create_rectangle(0, 0, w * self.v, h, fill="#4caf50", outline="")
+                self.c.create_text(w / 2, h / 2, text=f"{self.v * 100:.0f} %" + (f"  ({self.note})" if self.note else ""),
+                                   font=("Segoe UI", 9, "bold"), fill="#111")
+            except Exception:
+                pass
+
+    cap_pb = PctBar(runb); cap_pb.c.pack(side="top", fill="x", padx=4, pady=4)
+    Hover(cap_pb.c, "Progress of the current run: frames done or skipped out of the frames this run shoots. "
+                    "Without a run: frames taken out of all frames.")
     cap_status = ttk.Label(runb, text="Idle", wraplength=240, justify="left"); cap_status.pack(side="top", anchor="w", padx=4)
+
+    slb = ttk.LabelFrame(cfixed, text="Save / Load Capture"); slb.pack(side="left", fill="y", padx=(6, 0), pady=2)
+    save_cap_btn = ttk.Button(slb, text="Save current capture…", command=lambda: cap_save())
+    save_cap_btn.pack(side="top", fill="x", padx=4, pady=(4, 2))
+    load_cap_btn = ttk.Button(slb, text="Load saved capture…", command=lambda: cap_open())
+    load_cap_btn.pack(side="top", fill="x", padx=4, pady=2)
 
     cright = ttk.Frame(cmain); cright.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     dev_lbl = ttk.Label(cright, text="Devices: –", font=("Segoe UI", 10)); dev_lbl.pack(anchor="w")
@@ -3178,7 +3257,7 @@ def run_gui(selftest=False):
             ex = 1.0
         mins = len(C["frames"]) * (ex + 6.0) / 60
         frames_lbl.config(text=f"{len(C['frames'])} frames ({label}), roughly {mins:.0f} min")
-        dlog(f"loaded {len(C['frames'])} frames from {label}")
+        dlog(f"loaded {len(C['frames'])} frames from {label}"); update_progress()
         cap_buttons("idle"); request_draw()
         if after:
             after()
@@ -3204,6 +3283,18 @@ def run_gui(selftest=False):
         if not (1 <= first <= max(n_, 1)) or last < first:
             raise ValueError(f"The frame range must lie within 1–{n_}, with From ≤ To.")
         return first, min(last, n_)
+
+    def update_progress():
+        """Percentage bar: progress of the current run, or frames taken overall when there is none."""
+        r = C.get("runner"); st_ = C.get("status") or []
+        if r is not None and r.order and r.frames == C["frames"]:
+            n_ = len(r.order); d_ = sum(1 for i in r.order if st_[i] in ("done", "skipped"))
+            cap_pb.set(d_ / n_, f"{d_} / {n_} this run")
+        elif C["frames"]:
+            n_ = len(C["frames"]); d_ = sum(1 for x in st_ if x == "done")
+            cap_pb.set(d_ / n_, f"{d_} / {n_} taken")
+        else:
+            cap_pb.set(0.0, "")
 
     def update_range_label(*a):
         if not C["frames"]:
@@ -3306,7 +3397,7 @@ def run_gui(selftest=False):
                  f"{len(cap['frames'])} frames taken" + (f"; {len(cap['missing'])} files missing – those frames "
                  f"will be shot again: {', '.join(str(i + 1) for i in cap['missing'][:20])}"
                  f"{' …' if len(cap['missing']) > 20 else ''}" if cap["missing"] else ""))
-        update_range_label(); cap_buttons("idle"); request_draw()
+        update_range_label(); update_progress(); cap_buttons("idle"); request_draw()
 
     def source_changed(*a):
         """Choosing a frame source shows its frames at once (asks first if that replaces progress)."""
@@ -3422,7 +3513,7 @@ def run_gui(selftest=False):
                                floor=floor_, unpark=cv_["unpark"].get(), park=cv_["park"].get(),
                                image_folder=cv_["folder"].get(), order=order, status=status, paths=paths,
                                names=names)
-        C["runner"] = runner; C["status"] = list(runner.status)
+        C["runner"] = runner; C["status"] = list(runner.status); update_progress()
         clog_add(f"Start: {len(order)} frames ({first}–{last}), exposure {ex} s, sun ≥ {sun}°, altitude ≥ {floor_}°.")
         dlog(f"start: order {order[:10]}{' …' if len(order) > 10 else ''}")
         if not C["polling"]:
@@ -3626,8 +3717,7 @@ def run_gui(selftest=False):
                             C.setdefault("paths", {})[i] = d["path"]; cap_thumb(i, d["path"])
                         elif d["status"] == "done":
                             scan_folder()                  # file not there yet: look for it later
-                        nf = len(C["frames"]); done = sum(1 for s_ in C["status"] if s_ in ("done", "skipped"))
-                        cap_pb["value"] = done / max(nf, 1)
+                        nf = len(C["frames"]); update_progress()
                         if d["status"] in ("slewing", "rotating", "exposing"):
                             alt, az, _ = C["frames"][i]
                             cap_status.config(text=f"Frame {i + 1}/{nf}: {d['status']} – alt {alt:.1f}°, az {az:.1f}°")
@@ -3885,7 +3975,7 @@ TIPS = {
     "Sun check": "Show where the Sun is at the given time and whether any frame is too close to it.",
     "Longitude (°E)": "Your site's longitude in degrees east – used for the Sun check.",
     # ---- Capture tab
-    "Host": "Address of the computer running NINA (e.g. 192.168.0.10, or localhost on this computer).",
+    "Host": "Address of the computer running NINA (localhost = this computer, or its IP address, e.g. 192.168.0.10).",
     "Port": "Port of NINA's Advanced API plugin (default 1888).",
     "Test connection": "Check that NINA's Advanced API answers, show the devices and find NINA's image folder.",
     "Plan from the Plan tab": "Shoot the plan made with the Plan tab's settings.",
@@ -3913,6 +4003,7 @@ TIPS = {
     "Save current capture…": "Save the frames, the progress and the file paths, so the capture can be resumed later.",
     "Load saved capture…": "Load a saved capture: its progress, settings and the pictures of the frames already taken.",
     # ---- Build tab
+    "Import from Capture…": "Bring a capture's frames (from the Capture tab or a saved capture), the rotator offset and the current horizon here, then build.",
     "Add folder…": "Add a folder with FITS frames (searched recursively). A capture list (.txt) works too.",
     "Remove": "Remove the selected folder from the list.",
     "Rotator offset guess (°)": "Starting value for the rotator offset; the calibration refines it.",
@@ -3986,7 +4077,7 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
 2. Capture (NINA)  – shoot the frames from here, through NINA's Advanced API plugin
    • Setup once: install 'Advanced API' in NINA (Plugins), enable its server (port 1888), let
      NINA save FITS, connect mount, camera and rotator in NINA. No NINA sequence at the same time.
-   • 'Test connection' shows the devices, starts the live device line and finds NINA's image
+   • 'Test connection' (in the NINA group) shows the devices, starts the live device line and finds NINA's image
      folder. 'Frames to shoot': the Plan tab plan, the Build tab fill-in frames, or a saved
      sequence file (Browse…; exposure, gain and binning come from it). Choosing a source shows its
      frames; a fresh Start takes them from the source as it is then.
@@ -4007,7 +4098,8 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
    • Any error or timeout pauses the run automatically – nothing is skipped silently.
    • The NINA image folder can be changed during a run – file look-ups always use the current
      value.
-   • The log runs down the right side of the tab (scrollable).
+   • The log runs down the right side of the tab (scrollable). The progress bar shows the
+     percentage of the run. 'Save / Load Capture' sits right of 'Run'.
    • A preview is made only when the FITS file is complete (NINA may still be writing it);
      otherwise it is tried again every 3 s for up to 3 minutes.
    • Files that NINA saves late are picked up by a scan of its image folder every few seconds
@@ -4026,6 +4118,8 @@ DEBUG MENU
      narrower by dragging its divider).
 
 3. Build horizon
+   • 'Import from Capture…' adds a capture's files (Capture tab or saved .hmcap.json), the
+     rotator offset and the current horizon here, then offers to build.
    • Add the folder(s) with the frames. NINA's headers provide pointing (CENTALT/CENTAZ),
      rotator angle, pier side, pixel size, focal length and latitude.
    • 'Calibrate rotation from overlaps' measures the true camera angle from how well
