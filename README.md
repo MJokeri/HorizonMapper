@@ -5,8 +5,9 @@ The version is shown in the window title (currently 1.0.1).
 Plans a NINA Advanced Sequencer run that photographs the sky around your horizon, then turns the
 FITS frames into a measured NINA horizon file (`.hrz`).
 
-On both tabs the settings panel on the left scrolls (mouse wheel or scrollbar) when the window is
-too small to show it all.
+On both tabs the settings sit in a bar across the top and the picture fills the width below it.
+The bar scrolls sideways (mouse wheel or scrollbar) when the window is too narrow; the action
+buttons on its right (and the log on the Build tab) always stay visible.
 
 ## Install (Windows)
 

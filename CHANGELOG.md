@@ -33,8 +33,10 @@
 - **Mouse zoom:** the wheel zooms the Plan preview (drag moves it, double-click shows the whole sky)
   and the Build tab image (around the pointer, 2–24 px/°; Shift+wheel or middle-drag moves it)
   instead of scrolling sideways.
-- **Scrollable settings panels:** the left-hand panels on both tabs get a scrollbar (and wheel
-  scrolling) when the window is too small for them.
+- **Settings bar at the top:** on both tabs the settings are grouped in a horizontal bar across the
+  top and the picture fills the full width below it (it is always wider than high). The bar scrolls
+  sideways when the window is too narrow; the action buttons (and the Build tab's log) on its right
+  stay visible. Long groups were split into short columns; the default window is 1600×900.
 
 ### Fixed
 - Plan preview: a frame lying across 0°/360° was drawn as a box across the whole preview.

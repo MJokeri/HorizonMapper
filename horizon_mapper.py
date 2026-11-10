@@ -1180,43 +1180,53 @@ def run_gui():
 
     root = tk.Tk()
     root.title(f"{APP_NAME}  v{APP_VERSION}")
-    root.geometry("1280x860")
+    root.geometry("1600x900")
     nb = ttk.Notebook(root); nb.pack(fill="both", expand=True)
-    scroll_panels = []          # (outer frame, canvas) of the scrollable left panels
+    scroll_panels = []          # (holder frame, canvas, scrollbar) of the settings bars
 
-    def scrollable(parent):
-        """A left-hand panel that gets a vertical scrollbar when its content is taller than the window."""
-        outer = ttk.Frame(parent); outer.pack(side="left", fill="y", padx=6, pady=6)
-        c = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
-        sb = ttk.Scrollbar(outer, orient="vertical", command=c.yview)
+    def topbar(parent):
+        """Settings bar across the top of a tab. Returns (bar, fixed): `bar` holds the setting groups
+        side by side and scrolls sideways when they don't fit; `fixed` is a strip on the right
+        (actions, log) that always stays visible."""
+        outer = ttk.Frame(parent); outer.pack(side="top", fill="x", padx=6, pady=(6, 2))
+        fixed = ttk.Frame(outer); fixed.pack(side="right", fill="y", padx=(6, 0))
+        holder = ttk.Frame(outer); holder.pack(side="left", fill="both", expand=True)
+        c = tk.Canvas(holder, highlightthickness=0, borderwidth=0)
+        sb = ttk.Scrollbar(holder, orient="horizontal", command=c.xview)
         inner = ttk.Frame(c)
         c.create_window(0, 0, anchor="nw", window=inner)
-        c.configure(yscrollcommand=sb.set)
-        c.pack(side="left", fill="y", expand=True)
+        c.configure(xscrollcommand=sb.set)
+        c.pack(side="top", fill="x", expand=True)
 
         def update(_=None):
             c.configure(scrollregion=(0, 0, inner.winfo_reqwidth(), inner.winfo_reqheight()),
-                        width=inner.winfo_reqwidth())
-            if inner.winfo_reqheight() > c.winfo_height() > 1:
+                        height=max(inner.winfo_reqheight(), fixed.winfo_reqheight()))
+            if inner.winfo_reqwidth() > c.winfo_width() > 1:
                 if not sb.winfo_ismapped():
-                    sb.pack(side="right", fill="y")
+                    sb.pack(side="bottom", fill="x")
             else:
                 if sb.winfo_ismapped():
                     sb.pack_forget()
-                c.yview_moveto(0)
-        inner.bind("<Configure>", update); c.bind("<Configure>", update)
-        scroll_panels.append((outer, c, sb))
-        return inner
+                c.xview_moveto(0)
+        inner.bind("<Configure>", update); c.bind("<Configure>", update); fixed.bind("<Configure>", update)
+        scroll_panels.append((holder, c, sb))
+        ttk.Separator(parent, orient="horizontal").pack(side="top", fill="x", padx=6)
+        return inner, fixed
+
+    def group(parent, text):
+        """One group of settings in a top bar."""
+        g = ttk.LabelFrame(parent, text=text); g.pack(side="left", fill="y", padx=3, pady=2, anchor="n")
+        return g
 
     def panel_wheel(e):
-        """Mouse wheel over a left panel scrolls it (lists and text boxes keep their own scrolling)."""
+        """Mouse wheel over a settings bar scrolls it sideways (lists and text boxes keep their own)."""
         w = root.winfo_containing(e.x_root, e.y_root)
         if w is None or w.winfo_class() in ("Listbox", "Text", "TCombobox", "TSpinbox"):
             return
         for outer, c, sb in scroll_panels:
             if str(w).startswith(str(outer)) and sb.winfo_ismapped():
                 step = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
-                c.yview_scroll(step * 3, "units"); return
+                c.xview_scroll(step * 3, "units"); return
     root.bind_all("<MouseWheel>", panel_wheel, add="+")
     root.bind_all("<Button-4>", panel_wheel, add="+"); root.bind_all("<Button-5>", panel_wheel, add="+")
 
@@ -1229,8 +1239,8 @@ def run_gui():
 
     # ------------------------------------------------------------------ PLAN
     plan_tab = ttk.Frame(nb); nb.add(plan_tab, text="1. Plan sequence")
-    left = scrollable(plan_tab)
-    right = ttk.Frame(plan_tab); right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
+    left, plan_fixed = topbar(plan_tab)
+    right = ttk.Frame(plan_tab); right.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     P = PlanParams()
     V = {}
     current_hz = tk.StringVar(value="")   # shared: Plan tab horizon file -> Build tab comparison
@@ -1238,7 +1248,7 @@ def run_gui():
     def var(name, value, kind=tk.StringVar):
         V[name] = kind(value=value); return V[name]
 
-    box = ttk.LabelFrame(left, text="Camera & telescope"); box.pack(fill="x", pady=3)
+    box = group(left, "Camera & telescope")
     labeled(box, 0, "Sensor width (px)", var("sensor_w_px", P.sensor_w_px))
     labeled(box, 1, "Sensor height (px)", var("sensor_h_px", P.sensor_h_px))
     labeled(box, 2, "Pixel size (µm)", var("pixel_um", P.pixel_um))
@@ -1263,16 +1273,15 @@ def run_gui():
         update_fov()
     ttk.Button(box, text="Read from a FITS file…", command=from_fits).grid(row=5, column=0, columnspan=2, sticky="w", padx=4, pady=3)
 
-    box = ttk.LabelFrame(left, text="Site & area to image"); box.pack(fill="x", pady=3)
+    box = group(left, "Site & area to image")
     labeled(box, 0, "Latitude (°)", var("lat", P.lat))
     V["mode"] = tk.StringVar(value="horizon")
     ttk.Radiobutton(box, text="Fixed altitude band", variable=V["mode"], value="band").grid(row=1, column=0, sticky="w")
     ttk.Radiobutton(box, text="Around current horizon", variable=V["mode"], value="horizon").grid(row=1, column=1, sticky="w")
     labeled(box, 2, "Band: alt min (°)", var("alt_min", P.alt_min))
     labeled(box, 3, "Band: alt max (°)", var("alt_max", P.alt_max))
-    hzf = ttk.Frame(box); hzf.grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 0))
-    ttk.Label(hzf, text="Current horizon (.hrz)").pack(anchor="w")
-    hz_list = tk.Listbox(hzf, height=2, width=40); hz_list.pack(anchor="w")
+    hzf = group(left, "Current horizon (.hrz)")
+    hz_list = tk.Listbox(hzf, height=2, width=40); hz_list.pack(anchor="w", padx=4)
 
     def sync_current():
         files = list(hz_list.get(0, "end"))
@@ -1290,22 +1299,23 @@ def run_gui():
         hz_list.delete(0, "end")
         if files and current_hz.get() == files[0]:
             current_hz.set("")
-    hzb = ttk.Frame(hzf); hzb.pack(anchor="w", pady=2)
+    hzb = ttk.Frame(hzf); hzb.pack(anchor="w", pady=2, padx=4)
     ttk.Button(hzb, text="Add current horizon…", command=add_hz).pack(side="left")
     ttk.Button(hzb, text="Clear", command=clear_hz).pack(side="left", padx=4)
     ttk.Label(hzf, text="The first file is your current horizon; it is also used on the Build tab.\n"
                         "Optional second file (e.g. an all-sky estimate): the strip spans both.",
-              foreground="#666", justify="left").pack(anchor="w")
-    labeled(box, 7, "Margin below (°)", var("margin_below", P.margin_below))
-    labeled(box, 8, "Margin above (°)", var("margin_above", P.margin_above))
-    labeled(box, 9, "Lowest altitude (°)", var("floor", P.floor))
-    labeled(box, 13, "Extra frames at steep edges", var("edge_frames", P.edge_frames), tip="0 = off")
-    labeled(box, 14, "Steep = more than (°/°)", var("edge_slope", P.edge_slope), tip="alt per az")
-    labeled(box, 10, "Azimuth start (°)", var("az_start", P.az_start))
-    labeled(box, 11, "Azimuth end (°)", var("az_end", P.az_end))
-    labeled(box, 12, "Overlap (0-1)", var("overlap", P.overlap))
+              foreground="#666", justify="left").pack(anchor="w", padx=4)
+    box = group(left, "Strip to image")
+    labeled(box, 0, "Margin below (°)", var("margin_below", P.margin_below), width=6)
+    labeled(box, 1, "Margin above (°)", var("margin_above", P.margin_above), width=6)
+    labeled(box, 2, "Lowest altitude (°)", var("floor", P.floor), width=6)
+    labeled(box, 3, "Overlap (0-1)", var("overlap", P.overlap), width=6)
+    labeled(box, 0, "Extra frames at steep edges", var("edge_frames", P.edge_frames), width=6, col=3, tip="0 = off")
+    labeled(box, 1, "Steep = more than (°/°)", var("edge_slope", P.edge_slope), width=6, col=3, tip="alt per az")
+    labeled(box, 2, "Azimuth start (°)", var("az_start", P.az_start), width=6, col=3)
+    labeled(box, 3, "Azimuth end (°)", var("az_end", P.az_end), width=6, col=3)
 
-    box = ttk.LabelFrame(left, text="Rotator"); box.pack(fill="x", pady=3)
+    box = group(left, "Rotator")
     V["rotator"] = tk.BooleanVar(value=True)
     ttk.Checkbutton(box, text="Keep frames level with rotator", variable=V["rotator"]).grid(row=0, column=0, columnspan=2, sticky="w")
     labeled(box, 1, "Offset (sky - mech, °)", var("rot_offset", P.rot_offset))
@@ -1315,25 +1325,26 @@ def run_gui():
     ttk.Label(box, text="Orientation").grid(row=4, column=0, sticky="w", padx=4)
     ttk.Combobox(box, textvariable=V["orientation"], values=["auto", "landscape", "portrait"], width=10, state="readonly").grid(row=4, column=1, sticky="w")
 
-    box = ttk.LabelFrame(left, text="Exposure & sequence"); box.pack(fill="x", pady=3)
+    box = group(left, "Exposure")
     labeled(box, 0, "Exposure (s)", var("exposure", P.exposure))
     labeled(box, 1, "Gain (-1 = default)", var("gain", P.gain))
     labeled(box, 2, "Offset (-1 = default)", var("offset", P.offset))
     labeled(box, 3, "Binning", var("binning", P.binning))
+    labeled(box, 4, "Seconds per frame", var("sec_per_frame", P.sec_per_frame))
+    labeled(box, 5, "Seconds per rotator move", var("sec_per_rot", P.sec_per_rot))
+    box = group(left, "Sequence")
     V["meridian_split"] = tk.BooleanVar(value=True); V["unpark"] = tk.BooleanVar(value=True)
     V["park"] = tk.BooleanVar(value=True); V["template"] = tk.BooleanVar(value=False); V["collapsed"] = tk.BooleanVar(value=True)
-    ttk.Checkbutton(box, text="East half first, then west (one meridian flip)", variable=V["meridian_split"]).grid(row=4, column=0, columnspan=3, sticky="w")
-    ttk.Checkbutton(box, text="Unpark at start", variable=V["unpark"]).grid(row=5, column=0, sticky="w")
-    ttk.Checkbutton(box, text="Park at end", variable=V["park"]).grid(row=5, column=1, sticky="w")
-    ttk.Checkbutton(box, text="Save as template (else full sequence)", variable=V["template"]).grid(row=6, column=0, columnspan=3, sticky="w")
-    ttk.Checkbutton(box, text="Rows collapsed (use Load sequence)", variable=V["collapsed"]).grid(row=7, column=0, columnspan=3, sticky="w")
-    labeled(box, 8, "Seconds per frame", var("sec_per_frame", P.sec_per_frame))
-    labeled(box, 9, "Seconds per rotator move", var("sec_per_rot", P.sec_per_rot))
+    ttk.Checkbutton(box, text="East half first, then west (one meridian flip)", variable=V["meridian_split"]).grid(row=0, column=0, columnspan=3, sticky="w")
+    ttk.Checkbutton(box, text="Unpark at start", variable=V["unpark"]).grid(row=1, column=0, sticky="w")
+    ttk.Checkbutton(box, text="Park at end", variable=V["park"]).grid(row=1, column=1, sticky="w")
+    ttk.Checkbutton(box, text="Save as template (else full sequence)", variable=V["template"]).grid(row=2, column=0, columnspan=3, sticky="w")
+    ttk.Checkbutton(box, text="Rows collapsed (use Load sequence)", variable=V["collapsed"]).grid(row=3, column=0, columnspan=3, sticky="w")
 
-    btns = ttk.Frame(left); btns.pack(fill="x", pady=6)
+    btns = ttk.LabelFrame(plan_fixed, text="Plan"); btns.pack(side="top", fill="both", expand=True, pady=2)
     plan_info = ttk.Label(right, text="", font=("Segoe UI", 10, "bold")); plan_info.pack(anchor="w")
     ttk.Label(right, text="Wheel: zoom · drag: move · double-click: whole sky", foreground="#666").pack(anchor="w")
-    canvas = tk.Canvas(right, bg="white", height=560); canvas.pack(fill="both", expand=True)
+    canvas = tk.Canvas(right, bg="white", height=300); canvas.pack(fill="both", expand=True)
     state = {"plan": None, "params": None, "view": (0.0, 360.0, 0.0, 90.0), "box": (50, 20, 900, 540)}
 
     def collect(require_area=True):
@@ -1459,13 +1470,13 @@ def run_gui():
         messagebox.showinfo(APP_NAME, "Sun position (from now):\n" + "\n".join(lines) +
                             "\n\nKeep the lowest imaged altitude well above the sun when shooting by day.")
 
-    ttk.Button(btns, text="Preview plan", command=preview).pack(side="left", padx=3)
-    ttk.Button(btns, text="Save NINA sequence…", command=save).pack(side="left", padx=3)
+    ttk.Button(btns, text="Preview plan", command=preview).pack(side="top", fill="x", padx=4, pady=2)
+    ttk.Button(btns, text="Save NINA sequence…", command=save).pack(side="top", fill="x", padx=4, pady=2)
     show_order = tk.BooleanVar(value=True)
     ttk.Checkbutton(btns, text="Show shooting order", variable=show_order,
-                    command=lambda: draw_plan()).pack(side="left", padx=6)
+                    command=lambda: draw_plan()).pack(side="top", anchor="w", padx=4, pady=2)
     sun_lon = tk.StringVar(value="23.62")
-    sb = ttk.Frame(left); sb.pack(fill="x")
+    sb = ttk.Frame(btns); sb.pack(side="top", fill="x", pady=2)
     ttk.Label(sb, text="Longitude (°E)").pack(side="left", padx=4)
     ttk.Entry(sb, textvariable=sun_lon, width=8).pack(side="left")
     ttk.Button(sb, text="Sun check", command=sun_check).pack(side="left", padx=4)
@@ -1509,15 +1520,15 @@ def run_gui():
 
     # ------------------------------------------------------------------ PROCESS
     proc = ttk.Frame(nb); nb.add(proc, text="2. Build horizon")
-    pl = scrollable(proc)
-    pr = ttk.Frame(proc); pr.pack(side="left", fill="both", expand=True, padx=6, pady=6)
-    box = ttk.LabelFrame(pl, text="FITS folders (searched recursively)"); box.pack(fill="x", pady=3)
-    folders = tk.Listbox(box, height=5, width=48); folders.pack(fill="x", padx=4, pady=2)
+    pl, build_fixed = topbar(proc)
+    pr = ttk.Frame(proc); pr.pack(side="top", fill="both", expand=True, padx=6, pady=6)
+    box = group(pl, "FITS folders (searched recursively)")
+    folders = tk.Listbox(box, height=5, width=44); folders.pack(fill="x", padx=4, pady=2)
     fb = ttk.Frame(box); fb.pack(fill="x")
     ttk.Button(fb, text="Add folder…", command=lambda: (lambda d: d and folders.insert("end", d))(
         filedialog.askdirectory())).pack(side="left", padx=3)
     ttk.Button(fb, text="Remove", command=lambda: [folders.delete(i) for i in reversed(folders.curselection())]).pack(side="left")
-    box = ttk.LabelFrame(pl, text="Settings"); box.pack(fill="x", pady=3)
+    box = group(pl, "Settings")
     pv = {}
     def pvar(n, v): pv[n] = tk.StringVar(value=v); return pv[n]
     labeled(box, 0, "Rotator offset guess (°)", pvar("K", "-58.04"), tip="sky - mech")
@@ -1527,23 +1538,27 @@ def run_gui():
     ttk.Checkbutton(box, text="Full 360° search (offset unknown)", variable=pv["full"]).grid(row=2, column=0, columnspan=3, sticky="w")
     labeled(box, 3, "Latitude (°, blank = FITS)", pvar("lat", ""))
     labeled(box, 4, "Mosaic resolution (°)", pvar("res", "0.03"))
-    labeled(box, 5, "Solid: darker than", pvar("solid", "0.60"), tip="× sky")
-    labeled(box, 6, "Branches: darker than", pvar("thin", "0.85"), tip="× sky")
-    labeled(box, 7, "Bias level (blank = auto)", pvar("bias", ""))
+    labeled(box, 0, "Solid: darker than", pvar("solid", "0.60"), width=6, col=3, tip="× sky")
+    labeled(box, 1, "Branches: darker than", pvar("thin", "0.85"), width=6, col=3, tip="× sky")
+    labeled(box, 2, "Bias level (blank = auto)", pvar("bias", ""), width=6, col=3)
     pvar("side", "0"); pvar("steep", "3")   # shown in the toolbar above the image
     pv["cache"] = tk.BooleanVar(value=True)
-    ttk.Checkbutton(box, text="Cache reduced frames (fast re-runs)", variable=pv["cache"]).grid(row=10, column=0, columnspan=2, sticky="w")
+    ttk.Checkbutton(box, text="Cache reduced frames", variable=pv["cache"]).grid(row=3, column=3, columnspan=2, sticky="w", padx=4)
     ttk.Button(box, text="Clear cache", command=lambda: messagebox.showinfo(
-        APP_NAME, f"Removed {clear_cache(default_cache_dir())} cached frames.")).grid(row=10, column=2, sticky="w")
-    box = ttk.LabelFrame(pl, text="Current horizon (compare / fill gaps)"); box.pack(fill="x", pady=3)
+        APP_NAME, f"Removed {clear_cache(default_cache_dir())} cached frames.")).grid(row=4, column=3, sticky="w", padx=4)
+    box = group(pl, "Current horizon (compare / fill gaps)")
     old_var = current_hz   # filled automatically from the Plan tab
-    ttk.Entry(box, textvariable=old_var, width=40).pack(side="left", padx=4)
+    ttk.Entry(box, textvariable=old_var, width=34).pack(side="top", anchor="w", padx=4, pady=2)
     ttk.Button(box, text="Browse…", command=lambda: old_var.set(filedialog.askopenfilename(
-        filetypes=[("Horizon", "*.hrz *.txt"), ("All", "*.*")]) or old_var.get())).pack(side="left")
-    bb = ttk.Frame(pl); bb.pack(fill="x", pady=4)
-    pb = ttk.Progressbar(pl, length=340, maximum=1.0); pb.pack(fill="x", pady=4)
-    status = ttk.Label(pl, text="Idle"); status.pack(anchor="w")
-    logbox = tk.Text(pl, height=10, width=58, wrap="word"); logbox.pack(fill="both", expand=True, pady=3)
+        filetypes=[("Horizon", "*.hrz *.txt"), ("All", "*.*")]) or old_var.get())).pack(side="top", anchor="w", padx=4)
+    fill_box = group(pl, "Fill-in frames")
+    hz_box = group(pl, "Horizon file")
+    run_box = ttk.LabelFrame(build_fixed, text="Build"); run_box.pack(side="left", fill="y", pady=2)
+    bb = ttk.Frame(run_box); bb.pack(side="top", fill="x", padx=4, pady=2)
+    pb = ttk.Progressbar(run_box, length=200, maximum=1.0); pb.pack(side="top", fill="x", padx=4, pady=4)
+    status = ttk.Label(run_box, text="Idle", wraplength=220); status.pack(side="top", anchor="w", padx=4)
+    log_box = ttk.LabelFrame(build_fixed, text="Log"); log_box.pack(side="left", fill="y", padx=(6, 0), pady=2)
+    logbox = tk.Text(log_box, height=8, width=56, wrap="word"); logbox.pack(fill="both", expand=True, padx=2, pady=2)
 
     # ---- editor (right side)
     tb = ttk.Frame(pr); tb.pack(fill="x")
@@ -1968,34 +1983,36 @@ def run_gui():
             messagebox.showinfo(APP_NAME, f"Saved {len(plan['frames'])} frames:\n{out}\n\n"
                                           "Camera, rotator and exposure settings come from the Plan tab.")
 
-    ttk.Button(bb, text="Build mosaic & horizon", command=start).grid(row=0, column=0, padx=2, pady=2, sticky="ew")
-    ttk.Button(bb, text="Re-detect (new thresholds)", command=redetect).grid(row=0, column=1, padx=2, pady=2, sticky="ew")
-    fb = ttk.Frame(bb); fb.grid(row=3, column=0, columnspan=2, padx=2, pady=2, sticky="ew")
+    ttk.Button(bb, text="Build mosaic & horizon", command=start).pack(side="top", fill="x", pady=2)
+    ttk.Button(bb, text="Re-detect (new thresholds)", command=redetect).pack(side="top", fill="x", pady=2)
+    fb = ttk.Frame(fill_box); fb.grid(row=3, column=0, padx=4, pady=2, sticky="w")
     ttk.Button(fb, text="Generate fill-in frames", command=generate_fill).pack(side="left")
     ttk.Button(fb, text="Save fill-in sequence…", command=save_fill).pack(side="left", padx=4)
-    fill_info = ttk.Label(fb, text="", foreground="#555"); fill_info.pack(side="left", padx=4)
-    fe = ttk.Frame(bb); fe.grid(row=1, column=0, columnspan=2, padx=2, pady=2, sticky="w")
+    fill_info = ttk.Label(fill_box, text="", foreground="#555", wraplength=380)
+    fill_info.grid(row=4, column=0, padx=4, sticky="w")
+    fe = ttk.Frame(fill_box); fe.grid(row=0, column=0, padx=4, pady=2, sticky="w")
     # Start from the Plan tab's values and follow them whenever they change there.
     fill_edge = tk.StringVar(value=V["edge_frames"].get()); fill_slope = tk.StringVar(value=V["edge_slope"].get())
     V["edge_frames"].trace_add("write", lambda *a: fill_edge.set(V["edge_frames"].get()))
     V["edge_slope"].trace_add("write", lambda *a: fill_slope.set(V["edge_slope"].get()))
-    ttk.Label(fe, text="Fill-in: extra frames at steep edges").pack(side="left")
+    ttk.Label(fe, text="Extra frames at steep edges").pack(side="left")
     ttk.Spinbox(fe, textvariable=fill_edge, from_=0, to=5, increment=0.5, width=4).pack(side="left", padx=(2, 8))
     ttk.Label(fe, text="steep = more than").pack(side="left")
     ttk.Spinbox(fe, textvariable=fill_slope, from_=0.5, to=20, increment=0.5, width=4).pack(side="left", padx=2)
-    ttk.Label(fe, text="°/°  (0 = off; copied from the Plan tab)", foreground="#666").pack(side="left")
-    fg = ttk.Frame(bb); fg.grid(row=2, column=0, columnspan=2, padx=2, pady=2, sticky="w")
+    ttk.Label(fe, text="°/°", foreground="#666").pack(side="left")
+    ttk.Label(fill_box, text="0 = off; steep-edge values are copied from the Plan tab", foreground="#666").grid(
+        row=1, column=0, padx=4, sticky="w")
+    fg = ttk.Frame(fill_box); fg.grid(row=2, column=0, padx=4, pady=2, sticky="w")
     fill_near = tk.StringVar(value="1.0")
-    ttk.Label(fg, text="Fill-in: horizon line near gaps within (°)").pack(side="left")
+    ttk.Label(fg, text="Horizon line near gaps within (°)").pack(side="left")
     ttk.Spinbox(fg, textvariable=fill_near, from_=0, to=5, increment=0.5, width=4).pack(side="left", padx=2)
     ttk.Label(fg, text="(0 = off)", foreground="#666").pack(side="left")
     for _v in (fill_edge, fill_slope, fill_near):
         _v.trace_add("write", lambda *a: refresh_fill())
-    sv = ttk.Frame(bb); sv.grid(row=4, column=0, columnspan=2, padx=2, pady=(8, 2), sticky="w")
     save_which = tk.StringVar(value="solid")
-    ttk.Combobox(sv, textvariable=save_which, values=["solid", "with branches"], width=12,
-                 state="readonly").pack(side="left")
-    ttk.Button(sv, text="Save horizon file…", command=save_outputs).pack(side="left", padx=2)
+    ttk.Combobox(hz_box, textvariable=save_which, values=["solid", "with branches"], width=14,
+                 state="readonly").pack(side="top", anchor="w", padx=4, pady=2)
+    ttk.Button(hz_box, text="Save horizon file…", command=save_outputs).pack(side="top", fill="x", padx=4, pady=2)
 
     def poll():
         try:
@@ -2042,7 +2059,9 @@ WORKFLOW
      path shows the order (green = first → yellow → magenta = last), with the first frame number
      of each row, Start/End markers and the meridian flip.
      Mouse wheel zooms around the pointer, drag moves the view, double-click shows the whole sky.
-   • The settings on the left scroll (wheel or scrollbar) when the window is too small for them.
+   • The settings sit in a bar across the top, with the picture below using the full width.
+     The bar scrolls sideways (wheel or scrollbar) when the window is too narrow; the buttons
+     on its right ('Plan' here, 'Build' and the log on the Build tab) always stay visible.
    • Rotator: keeps every frame level with the horizon, so overlap can be ~10 %.
      Offset = sky position angle − mechanical angle (from NINA's rotator panel after a
      plate solve). A wrong 180° doesn't matter here.
