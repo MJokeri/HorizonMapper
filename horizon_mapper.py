@@ -173,6 +173,7 @@ class PlanParams:
         self.exposure = 0.008; self.gain = 0; self.offset = -1; self.binning = 2
         # sequence
         self.unpark = True; self.park = True; self.meridian_split = True
+        self.bottom_up = False        # with the east/west split: west half bottom→top too
         self.template = False; self.collapsed = True
         # time model
         self.sec_per_frame = 8.1; self.sec_per_rot = 5.0
@@ -357,7 +358,7 @@ def _grid(p, fw, fh, lim):
         grid.append((alt, sorted((p.az_start + a) % 360 for a in azs)))
     if p.meridian_split:
         east = [(a, [z for z in zs if z < 180]) for a, zs in grid]
-        west = [(a, [z for z in zs if z >= 180]) for a, zs in reversed(grid)]
+        west = [(a, [z for z in zs if z >= 180]) for a, zs in (grid if p.bottom_up else reversed(grid))]
         rows_all = [r for r in east if r[1]] + [r for r in west if r[1]]
     else:
         rows_all = grid
@@ -1024,6 +1025,91 @@ class CaptureRunner:
         self.emit("done", ok=not stopped)
 
 
+def read_nina_sequence(path):
+    """Frames [(alt, az, rotator or None)] from a NINA sequence or template (as saved by this app,
+    or any sequence using 'Slew to Alt/Az', 'Move rotator mechanical' and 'Take exposure').
+    Also returns the first exposure's settings: dict(exposure, gain, binning)."""
+    with open(path, encoding="utf-8-sig") as fh:
+        root = json.load(fh)
+    frames = []; settings = {}
+    st = {"alt": None, "az": None, "rot": None}
+
+    def dms(d, m, s_):
+        d, m, s_ = float(d or 0), float(m or 0), float(s_ or 0)
+        sign = -1 if (d < 0 or m < 0 or s_ < 0) else 1
+        return sign * (abs(d) + abs(m) / 60 + abs(s_) / 3600)
+
+    def walk(node):
+        if isinstance(node, dict):
+            t = str(node.get("$type", ""))
+            if "SlewScopeToAltAz" in t:
+                c = node.get("Coordinates") or {}
+                st["alt"] = dms(c.get("AltDegrees"), c.get("AltMinutes"), c.get("AltSeconds"))
+                st["az"] = dms(c.get("AzDegrees"), c.get("AzMinutes"), c.get("AzSeconds")) % 360
+            elif "MoveRotatorMechanical" in t:
+                st["rot"] = float(node.get("MechanicalPosition", 0))
+            elif "TakeExposure" in t or "TakeManyExposures" in t:
+                if st["alt"] is not None:
+                    frames.append((st["alt"], st["az"], st["rot"])); st["rot"] = None
+                if not settings:
+                    b = node.get("Binning") or {}
+                    settings.update(exposure=node.get("ExposureTime"), gain=node.get("Gain"), binning=b.get("X"))
+            items = node.get("Items")
+            if isinstance(items, dict):
+                for it in items.get("$values", []):
+                    walk(it)
+            for k, v in node.items():                 # templates nest containers in other keys too
+                if k not in ("Items", "Parent", "Coordinates") and isinstance(v, (dict, list)):
+                    walk(v)
+        elif isinstance(node, list):
+            for it in node:
+                walk(it)
+    walk(root)
+    return frames, settings
+
+
+def rows_of(frames):
+    """Group consecutive frames of equal altitude into rows: [(alt, [az, …])]."""
+    grid = []
+    for alt, az, _ in frames:
+        if grid and abs(grid[-1][0] - alt) < 1e-3:
+            grid[-1][1].append(az)
+        else:
+            grid.append((alt, [az]))
+    return grid
+
+
+def frame_thumbnail(path, K, lat, half_w, half_h, px=110, cache_dir=None):
+    """Project one captured frame onto a small alt/az grid around its own centre (the same maths as
+    the mosaic). Returns dict(az0, az1, alt0, alt1, img) with img rows from top (high) to bottom."""
+    meta, img = _load_one(path, cache_dir)
+    if meta is None:
+        raise ValueError(img)
+    fr = Frame()
+    fr.path, fr.alt, fr.az, fr.rot, fr.pier, fr.scale, fr.img, fr.t = (
+        path, meta["alt"], meta["az"], meta["rot"], meta["pier"], meta["scale"], img, meta.get("t"))
+    lat = meta.get("lat") if meta.get("lat") is not None else lat
+    cw = half_w / max(math.cos(math.radians(min(abs(fr.alt) + half_h, 85.0))), 0.05)
+    n_az = px; n_alt = max(int(px * half_h / max(cw * math.cos(math.radians(fr.alt)), 1e-3)), 8)
+    az = np.linspace(fr.az - cw, fr.az + cw, n_az); alt = np.linspace(fr.alt + half_h, fr.alt - half_h, n_alt)
+    AZ, ALT = np.meshgrid(az, alt)
+    v = sample_frame(img, fr, frame_delta(fr, K, lat), fr.scale, AZ, ALT)
+    return dict(az0=fr.az - cw, az1=fr.az + cw, alt0=fr.alt - half_h, alt1=fr.alt + half_h, img=v)
+
+
+def thumbnail_rgba(img):
+    """Stretched greyscale RGBA PIL image of a thumbnail array (transparent where there is no data)."""
+    from PIL import Image
+    ok = np.isfinite(img)
+    out = np.zeros(img.shape + (4,), np.uint8)
+    if ok.any():
+        v = np.log(np.maximum(img[ok] - np.nanmin(img) + 1.0, 1.0))
+        lo, hi = np.percentile(v, [1, 99.5]); hi = hi if hi > lo else lo + 1
+        g = (np.clip((v - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
+        out[ok, 0] = out[ok, 1] = out[ok, 2] = g; out[ok, 3] = 255
+    return Image.fromarray(out, "RGBA")
+
+
 def write_capture_list(paths, folder=None):
     """Write the captured FITS paths to a list file that the Build tab accepts like a folder."""
     folder = folder or os.path.join(os.path.dirname(default_cache_dir()), "captures")
@@ -1683,6 +1769,8 @@ def run_gui():
     V["meridian_split"] = tk.BooleanVar(value=True); V["unpark"] = tk.BooleanVar(value=True)
     V["park"] = tk.BooleanVar(value=True); V["template"] = tk.BooleanVar(value=False); V["collapsed"] = tk.BooleanVar(value=True)
     ttk.Checkbutton(box, text="East half first, then west (one meridian flip)", variable=V["meridian_split"]).grid(row=0, column=0, columnspan=3, sticky="w")
+    V["bottom_up"] = tk.BooleanVar(value=False)
+    ttk.Checkbutton(box, text="Rows bottom to top in both halves", variable=V["bottom_up"]).grid(row=4, column=0, columnspan=3, sticky="w")
     ttk.Checkbutton(box, text="Unpark at start", variable=V["unpark"]).grid(row=1, column=0, sticky="w")
     ttk.Checkbutton(box, text="Park at end", variable=V["park"]).grid(row=1, column=1, sticky="w")
     ttk.Checkbutton(box, text="Save as template (else full sequence)", variable=V["template"]).grid(row=2, column=0, columnspan=3, sticky="w")
@@ -1705,7 +1793,7 @@ def run_gui():
             setattr(p, k, int(float(V[k].get())))
         for k in ("gain", "offset", "binning", "rot_sign"):
             setattr(p, k, int(float(V[k].get())))
-        for k in ("rotator", "meridian_split", "unpark", "park", "template", "collapsed"):
+        for k in ("rotator", "meridian_split", "bottom_up", "unpark", "park", "template", "collapsed"):
             setattr(p, k, bool(V[k].get()))
         p.orientation = V["orientation"].get(); p.mode = V["mode"].get()
         p.horizon_files = list(hz_list.get(0, "end"))
@@ -2392,7 +2480,8 @@ def run_gui():
     # ------------------------------------------------------------------ CAPTURE (NINA Advanced API)
     cbar, cfixed = topbar(cap_tab)
     C = {"runner": None, "frames": [], "source": "", "api": None, "polling": False, "q": queue.Queue(),
-         "view": (0.0, 360.0, 0.0, 90.0), "box": (50, 20, 900, 400), "cur": None}
+         "view": (0.0, 360.0, 0.0, 90.0), "box": (50, 20, 900, 400), "cur": None,
+         "thumbs": {}, "paths": {}, "plan": None, "params": None, "photos": []}
     cv_ = {}
 
     def cvar(n, v, kind=tk.StringVar):
@@ -2407,7 +2496,13 @@ def run_gui():
     cvar("src", "plan")
     ttk.Radiobutton(g, text="Plan from the Plan tab", variable=cv_["src"], value="plan").grid(row=0, column=0, sticky="w", padx=4)
     ttk.Radiobutton(g, text="Fill-in frames from the Build tab", variable=cv_["src"], value="fill").grid(row=1, column=0, sticky="w", padx=4)
-    frames_lbl = ttk.Label(g, text="No frames loaded", foreground="#666", wraplength=260)
+    sf = ttk.Frame(g); sf.grid(row=2, column=0, sticky="w")
+    ttk.Radiobutton(sf, text="Saved sequence file", variable=cv_["src"], value="file").pack(side="left", padx=4)
+    ttk.Button(sf, text="Browse…", command=lambda: (lambda fn: fn and (cv_["file"].set(fn), cv_["src"].set("file"), cap_load()))(
+        filedialog.askopenfilename(title="Plan or fill-in sequence saved for NINA",
+                                   filetypes=[("NINA sequence", "*.json"), ("All", "*.*")]))).pack(side="left")
+    cvar("file", "")
+    frames_lbl = ttk.Label(g, text="No frames loaded", foreground="#666", wraplength=280)
     frames_lbl.grid(row=3, column=0, sticky="w", padx=4)
     g = group(cbar, "Capture")
     labeled(g, 0, "Exposure (s)", cvar("exposure", V["exposure"].get()), width=7)
@@ -2426,6 +2521,11 @@ def run_gui():
     labeled(g, 0, "Target name", cvar("target", "Horizon mapping"), width=18)
     ttk.Label(g, text="NINA image folder (found automatically)").grid(row=1, column=0, columnspan=3, sticky="w", padx=4)
     ttk.Entry(g, textvariable=cvar("folder", ""), width=30).grid(row=2, column=0, columnspan=2, sticky="w", padx=4)
+    cvar("thumbs", True, tk.BooleanVar); cvar("flip", False, tk.BooleanVar)
+    ttk.Checkbutton(g, text="Show finished frames in the picture", variable=cv_["thumbs"],
+                    command=lambda: draw_cap()).grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
+    ttk.Checkbutton(g, text="Turn previews 180°", variable=cv_["flip"],
+                    command=lambda: cap_rethumb()).grid(row=4, column=0, columnspan=3, sticky="w", padx=4)
     ttk.Button(g, text="…", width=3, command=lambda: cv_["folder"].set(
         filedialog.askdirectory() or cv_["folder"].get())).grid(row=2, column=2, sticky="w")
 
@@ -2449,8 +2549,11 @@ def run_gui():
 
     cright = ttk.Frame(cap_tab); cright.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     dev_lbl = ttk.Label(cright, text="Devices: –", font=("Segoe UI", 10)); dev_lbl.pack(anchor="w")
-    ttk.Label(cright, text="Grey = to do · yellow = in progress · green = done · orange = skipped · red = error"
-              " · wheel: zoom · drag: move · double-click: whole sky", foreground="#666").pack(anchor="w")
+    lg = ttk.Frame(cright); lg.pack(anchor="w", fill="x")
+    ttk.Label(lg, text="Blue = to do · yellow = in progress · green = done (picture in its slot) · orange = skipped"
+              " · red = error · wheel: zoom · drag: move · double-click: whole sky", foreground="#666").pack(side="left")
+    cvar("order", True, tk.BooleanVar)
+    ttk.Checkbutton(lg, text="Show shooting order", variable=cv_["order"], command=lambda: draw_cap()).pack(side="left", padx=8)
     ccan = tk.Canvas(cright, bg="white", height=300); ccan.pack(fill="both", expand=True)
 
     def clog_add(m):
@@ -2507,25 +2610,79 @@ def run_gui():
             C["polling"] = True; threading.Thread(target=job, daemon=True).start()
 
     def cap_load():
-        """Take the frames from the Plan tab (plan) or the Build tab (fill-in)."""
+        """Frames from the Plan tab, the Build tab fill-in, or a saved sequence file."""
         try:
-            if cv_["src"].get() == "fill":
+            p = collect(require_area=False)
+            src = cv_["src"].get()
+            if src == "fill":
                 if not fill.get("plan"):
                     raise ValueError("Generate fill-in frames on the Build tab first.")
-                plan = fill["plan"]; src = "fill-in frames"
+                plan = dict(fill["plan"]); label = "fill-in frames"
+            elif src == "file":
+                fn = cv_["file"].get()
+                if not fn:
+                    raise ValueError("Choose the sequence file (Browse…).")
+                frames, st = read_nina_sequence(fn)
+                if not frames:
+                    raise ValueError("No 'Slew to Alt/Az' + 'Take exposure' steps found in that file.")
+                w, h = p.fov
+                fw, fh = _effective_fov(w, h, p.rot_tolerance) if p.rotator else (w, h)
+                plan = dict(frames=frames, grid=rows_of(frames), fw=fw, fh=fh)
+                for k in ("exposure", "gain", "binning"):
+                    if st.get(k) is not None:
+                        cv_[k].set(st[k])
+                label = os.path.basename(fn)
             else:
-                p = collect(); plan = make_plan(p); src = "Plan tab plan"
+                plan = make_plan(collect()); label = "Plan tab plan"
         except Exception as e:
             messagebox.showerror(APP_NAME, str(e)); return False
-        C["frames"] = list(plan["frames"]); C["plan"] = plan; C["source"] = src
+        if "grid" not in plan:
+            plan["grid"] = rows_of(plan["frames"])
+        C["frames"] = list(plan["frames"]); C["plan"] = plan; C["source"] = label; C["params"] = p
         C["status"] = ["pending"] * len(C["frames"]); C["runner"] = None; C["cur"] = None
+        C["thumbs"] = {}; C["paths"] = {}
         try:
             ex = float(cv_["exposure"].get())
         except ValueError:
             ex = 1.0
         mins = len(C["frames"]) * (ex + 6.0) / 60
-        frames_lbl.config(text=f"{len(C['frames'])} frames ({src}), roughly {mins:.0f} min")
+        frames_lbl.config(text=f"{len(C['frames'])} frames ({label}), roughly {mins:.0f} min")
         draw_cap(); return True
+
+    def thumb_K():
+        """Rotator offset for the previews: the Build tab's calibrated value if there is one."""
+        K = result.get("K")
+        if K is None:
+            try:
+                K = float(V["rot_offset"].get()) + 180.0          # measured: K = offset + 180
+            except ValueError:
+                K = 0.0
+        return K + (180.0 if cv_["flip"].get() else 0.0)
+
+    def cap_thumb(i, path):
+        """Project a finished frame into its slot (in the background)."""
+        if not path or not os.path.isfile(path) or not C.get("plan"):
+            return
+        fw, fh = C["plan"]["fw"], C["plan"]["fh"]
+        try:
+            lat = float(V["lat"].get())
+        except ValueError:
+            lat = 60.0
+        K = thumb_K(); q_ = C["q"]
+
+        def job():
+            try:
+                th = frame_thumbnail(path, K, lat, fw / 2, fh / 2, cache_dir=default_cache_dir())
+                q_.put(("thumb", (i, th, thumbnail_rgba(th["img"]))))
+            except Exception as e:
+                q_.put(("log", f"Preview of frame {i + 1} failed: {e}"))
+        threading.Thread(target=job, daemon=True).start()
+
+    def cap_rethumb():
+        C["thumbs"] = {}
+        for i, pth in list(C.get("paths", {}).items()):
+            cap_thumb(i, pth)
+        draw_cap()
 
     def cap_buttons(st):
         running, paused = st == "running", st == "paused"
@@ -2629,6 +2786,12 @@ def run_gui():
                     clog_add(val)
                 elif kind == "dev":
                     dev_lbl.config(text=val)
+                elif kind == "thumb":
+                    i, th, im = val
+                    if i < len(C["frames"]):
+                        C.setdefault("thumbs", {})[i] = (th, im); draw_cap()
+                elif kind == "log":
+                    clog_add(val)
                 elif kind == "run":
                     k, d = val
                     r = C["runner"]
@@ -2646,6 +2809,8 @@ def run_gui():
                             cap_status.config(text="Running")
                     elif k == "frame":
                         i = d["index"]; C["status"][i] = d["status"]; C["cur"] = i
+                        if d["status"] == "done" and d.get("path"):
+                            C.setdefault("paths", {})[i] = d["path"]; cap_thumb(i, d["path"])
                         n = len(C["frames"]); done = sum(1 for s_ in C["status"] if s_ in ("done", "skipped"))
                         cap_pb["value"] = done / max(n, 1)
                         if d["status"] in ("slewing", "rotating", "exposing"):
@@ -2659,16 +2824,20 @@ def run_gui():
         root.after(150, cap_poll)
     cap_poll()
 
-    STATUS_COL = {"pending": "#9e9e9e", "slewing": "#f9a825", "rotating": "#f9a825", "exposing": "#f9a825",
+    STATUS_COL = {"pending": "#4a7bd0", "slewing": "#f9a825", "rotating": "#f9a825", "exposing": "#f9a825",
                   "done": "#2e7d32", "skipped": "#ef6c00", "error": "#c62828"}
 
     def draw_cap():
-        ccan.delete("all")
+        """Like the Plan preview (strip, horizon, frames, shooting order) plus each frame's state;
+        finished frames are shown in their slots."""
+        ccan.delete("all"); C["photos"] = []
         W = ccan.winfo_width() or 900; H = ccan.winfo_height() or 400
         x0, y0, x1, y1 = 50, 20, W - 15, H - 30
         az0, az1, h0, h1 = C["view"]; C["box"] = (x0, y0, x1, y1)
         XA = lambda a: x0 + (a - az0) / (az1 - az0) * (x1 - x0)
+        X = lambda a: XA(a % 360)
         Y = lambda h: y1 - (h - h0) / (h1 - h0) * (y1 - y0)
+        kx = (x1 - x0) / (az1 - az0)
         st_ = next((t for t in (1, 2, 5, 10, 15, 30) if (az1 - az0) / t <= 12), 30)
         at = [v for v in np.arange(math.ceil(az0 / st_) * st_, az1 + 1e-9, st_)]
         sh_ = next((t for t in (1, 2, 5, 10) if (h1 - h0) / t <= 12), 10)
@@ -2677,31 +2846,58 @@ def run_gui():
             ccan.create_line(XA(a), y0, XA(a), y1, fill="#e3e3e3")
         for h in ht:
             ccan.create_line(x0, Y(h), x1, Y(h), fill="#e3e3e3")
-        plan = C.get("plan")
+        plan = C.get("plan"); p = C.get("params")
+        if plan and plan.get("lim"):                               # strip to image, as on the Plan tab
+            azs = np.arange(0, 360.01, 0.25); lh = [plan["lim"](a % 360) for a in azs]
+            poly = [c for a, (lo, hi) in zip(azs, lh) for c in (XA(a), Y(hi))] + \
+                   [c for a, (lo, hi) in reversed(list(zip(azs, lh))) for c in (XA(a), Y(lo))]
+            ccan.create_polygon(*poly, fill="#d6e6ff", outline="")
+        try:
+            floor_ = float(cv_["floor"].get())
+            ccan.create_line(x0, Y(floor_), x1, Y(floor_), fill="#e0b000", dash=(4, 3))
+        except ValueError:
+            pass
         if plan and C["frames"]:
-            kx = (x1 - x0) / (az1 - az0)
             fw, fh = plan["fw"], plan["fh"]
-            pts = []
             for i, (alt, az, _) in enumerate(C["frames"]):
                 cw = fw / max(math.cos(math.radians(alt)), 0.05) / 2
                 st = C["status"][i] if i < len(C["status"]) else "pending"
-                col = STATUS_COL.get(st, "#9e9e9e")
-                fillc = {"done": "#c8e6c9", "skipped": "#ffe0b2", "error": "#ffcdd2"}.get(st, "")
-                if st in ("slewing", "rotating", "exposing"):
-                    fillc = "#fff59d"
+                th = C.get("thumbs", {}).get(i) if cv_["thumbs"].get() else None
                 for sh in (0, 360, -360):
                     xc = XA(az % 360 + sh)
                     if xc + cw * kx < x0 - 50 or xc - cw * kx > x1 + 50:
                         continue
+                    if th is not None and ImageTk is not None:
+                        t, im = th
+                        tx0, tx1 = XA(t["az0"] - az + az % 360 + sh), XA(t["az1"] - az + az % 360 + sh)
+                        ty0, ty1 = Y(t["alt1"]), Y(t["alt0"])
+                        wpx, hpx = int(round(tx1 - tx0)), int(round(ty1 - ty0))
+                        if 2 <= wpx <= 4000 and 2 <= hpx <= 4000:
+                            ph = ImageTk.PhotoImage(im.resize((wpx, hpx)))
+                            C["photos"].append(ph)
+                            ccan.create_image(tx0, ty0, image=ph, anchor="nw")
+                    col = STATUS_COL.get(st, "#4a7bd0")
+                    wid = 3 if st in ("slewing", "rotating", "exposing") else (2 if st in ("error", "skipped") else 1)
+                    if st == "done" and th is not None:
+                        col = "#43a047"
                     ccan.create_rectangle(xc - cw * kx, Y(alt + fh / 2), xc + cw * kx, Y(alt - fh / 2),
-                                          outline=col, fill=fillc, width=2 if fillc else 1)
-                pts.append((XA(az % 360), Y(alt)))
-            for i in range(len(pts) - 1):
-                if abs(pts[i + 1][0] - pts[i][0]) < (x1 - x0) / 2:
-                    ccan.create_line(*pts[i], *pts[i + 1], fill="#b0bec5")
-            if C["cur"] is not None and C["cur"] < len(pts):
-                x, y = pts[C["cur"]]
-                ccan.create_oval(x - 6, y - 6, x + 6, y + 6, outline="#000", width=2)
+                                          outline=col, width=wid)
+            if p is not None:                                      # current horizon file(s)
+                for hf in (p.horizon_files or []) if p.mode == "horizon" else []:
+                    try:
+                        pts = load_hrz(hf)
+                        a_ = np.arange(0, 360.01, 0.5)
+                        ccan.create_line(*[c for a in a_ for c in (XA(a), Y(hrz_alt(pts, a % 360)))],
+                                         fill="#d00000", width=2)
+                    except Exception:
+                        pass
+            if cv_["order"].get():
+                draw_order(ccan, plan, X, Y, tag="order", numbers="rows",
+                           flip=any(z < 180 for _, z, _ in C["frames"]) and any(z >= 180 for _, z, _ in C["frames"]))
+            if C["cur"] is not None and C["cur"] < len(C["frames"]):
+                alt, az, _ = C["frames"][C["cur"]]
+                x, y = X(az), Y(alt)
+                ccan.create_oval(x - 7, y - 7, x + 7, y + 7, outline="#000", width=3)
         for r_ in ((0, 0, W, y0), (0, y1, W, H), (0, 0, x0, H), (x1, 0, W, H)):
             ccan.create_rectangle(*r_, fill="white", outline="")
         ccan.create_rectangle(x0, y0, x1, y1, outline="#bbb")
@@ -2791,6 +2987,8 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
      on its right ('Plan' here, the log on the Build tab) always stay visible. At start the window
      is made wide enough for all groups if the screen allows.
    • Closing the window asks first if the horizon has not been saved since it was built or edited.
+   • Order: 'East half first, then west' = one meridian flip; east half bottom→top, west half
+     top→bottom unless 'Rows bottom to top in both halves' is ticked.
    • Rotator: keeps every frame level with the horizon, so overlap can be ~10 %.
      Offset = sky position angle − mechanical angle (from NINA's rotator panel after a
      plate solve). A wrong 180° doesn't matter here.
@@ -2805,7 +3003,11 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
    • Setup once: install 'Advanced API' in NINA (Plugins), enable its server (port 1888), let
      NINA save FITS, connect mount, camera and rotator in NINA. No NINA sequence at the same time.
    • 'Test connection' shows the devices, starts the live device line and finds NINA's image
-     folder. 'Frames to shoot': the Plan tab plan or the Build tab fill-in frames; 'Load frames'.
+     folder. 'Frames to shoot': the Plan tab plan, the Build tab fill-in frames, or a saved
+     sequence file (Browse…; exposure, gain and binning come from it); 'Load frames'.
+   • The picture is drawn like the Plan preview (strip, horizon, frames, shooting order); blue =
+     to do, yellow = in progress, green = done, orange = skipped, red = error. Finished frames
+     are shown in their slots (projected like the mosaic; 'Turn previews 180°' if upside down).
    • Safety: frames nearer the Sun than the limit (default 30°) or below the altitude limit
      (default 10°) are skipped and never slewed to. Unpark at start / park when finished.
    • 'Start' asks first. Per frame: slew → rotator → settle → expose; NINA saves the FITS.
@@ -2903,6 +3105,8 @@ def main():
     pp.add_argument("--gain", type=int, default=0)
     pp.add_argument("--bin", type=int, default=2)
     pp.add_argument("--template", action="store_true")
+    pp.add_argument("--bottom-up", action="store_true",
+                    help="shoot the rows bottom to top in the west half too (default: west half top to bottom)")
     pp.add_argument("-o", "--out", default="Horizon mapping.json")
     bp = sub.add_parser("build", help="build mosaic + horizon from FITS folders")
     bp.add_argument("folders", nargs="+")
@@ -2941,7 +3145,7 @@ def main():
                        overlap=a.overlap, rotator=not a.no_rotator, rot_offset=a.rot_offset,
                        rot_tolerance=a.rot_tol, exposure=a.exposure, gain=a.gain, binning=a.bin,
                        template=a.template, margin_below=a.below, margin_above=a.above,
-                       edge_frames=a.edge_frames, edge_slope=a.edge_slope)
+                       edge_frames=a.edge_frames, edge_slope=a.edge_slope, bottom_up=a.bottom_up)
         if a.hrz:
             p.mode = "horizon"; p.horizon_files = a.hrz
         else:

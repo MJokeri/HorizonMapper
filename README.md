@@ -44,6 +44,10 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
     few frames as the overlap allows. Every point of the strip is still covered.
   - **Lowest altitude** sets a floor for the strip. Keep it well above the sun when you shoot by day
     (use **Sun check**).
+- **Order** (Sequence group): **East half first, then west** gives a single meridian flip. The east
+  half is shot bottom to top and, by default, the west half top to bottom (the shortest path). Tick
+  **Rows bottom to top in both halves** to start the west half at the bottom too.
+  CLI: `plan --bottom-up`.
 - **Rotator:** keeps every frame level, so 10% overlap is enough.
   - Offset = sky angle − mechanical angle, as shown in NINA's rotator panel after a plate solve.
   - Being off by 180° doesn't matter.
@@ -69,9 +73,18 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
 
 1. **Test connection** checks the plugin, shows which devices are connected, starts the live device
    line (mount alt/az, pier side, rotator, camera) and fills in NINA's image folder.
-2. **Frames to shoot:** the plan from the Plan tab, or the fill-in frames generated on the Build tab.
-   **Load frames** shows them; the picture shows each frame's state (grey = to do, yellow = in
-   progress, green = done, orange = skipped, red = error). Wheel zooms, drag moves.
+2. **Frames to shoot:** the plan from the Plan tab, the fill-in frames generated on the Build tab,
+   or a **saved sequence file** (a plan or fill-in sequence saved for NINA; **Browse…**). Exposure,
+   gain and binning are taken from the file. **Load frames** shows them.
+   - The picture looks like the Plan preview: the strip to image, the current horizon, the lowest
+     altitude, the frames and the shooting order (**Show shooting order**).
+   - Each frame's outline shows its state: blue = to do, yellow (thick) = in progress, green = done,
+     orange = skipped, red = error.
+   - **When a frame is finished, its picture is drawn in its slot.** It is projected with the same
+     maths as the mosaic, using the rotator offset (the Build tab's calibrated value if there is
+     one). If the previews come out upside down, tick **Turn previews 180°**. **Show finished
+     frames in the picture** turns them off.
+   - Wheel zooms, drag moves, double-click shows the whole sky.
 3. **Capture** (exposure, gain, binning) follows the Plan tab; offset is NINA's camera setting.
    **Settle** waits after each move.
 4. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°) or below **Never
