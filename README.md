@@ -123,6 +123,11 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
 - **■ Stop run** ends the run and keeps the frames taken so far. **Start** again offers to continue
   from where it stopped. Closing the window during a run asks first and stops everything.
 
+A preview is only made once its FITS file is complete: its size covers the header and all the
+image data. NINA writes files in the background, so a file can be there but still empty or short.
+Incomplete files, and previews that fail, are tried again every 3 seconds for up to 3 minutes.
+**Load frames** works again after a run is stopped or has finished.
+
 The **NINA image folder** can be changed at any time, also during a run. File look-ups and the
 folder scan always use the current value. The Capture log runs down the right side of the tab,
 over the full height, with a scrollbar.
