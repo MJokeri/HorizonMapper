@@ -90,7 +90,9 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
 4. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°) or below **Never
    below altitude** (default 10°) are skipped, never slewed to. **Unpark at start** / **Park when
    finished**.
-5. **▶ Start** asks for confirmation, then for every frame: slew (alt/az converted to J2000 RA/Dec
+5. **▶ Start** asks for confirmation and switches tracking on. If the mount driver refuses, a note
+   goes to the log and the run continues; every slew is checked against the mount's RA/Dec. Then,
+   for every frame: slew (alt/az converted to J2000 RA/Dec
    with the mount's own sidereal time) → rotator to its mechanical angle → settle → expose. NINA saves
    the FITS with its usual headers, and Horizon Mapper finds the file in NINA's image folder.
 

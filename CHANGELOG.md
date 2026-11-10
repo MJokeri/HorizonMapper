@@ -22,6 +22,14 @@
 - **Plan tab – Rows bottom to top in both halves:** with the east/west split, the west half can also
   be shot bottom to top (default stays top to bottom, the shortest path). CLI: `plan --bottom-up`.
 
+### Fixed
+- Capture would not start with mounts whose driver reports switching tracking on as failed (seen
+  with the ZWO "ASI Mount": NINA answered "Tracking mode changed" with failure). Tracking is now
+  tried, checked and only noted in the log if it stays off; every slew is still verified.
+- Slew arrival is checked against the mount's RA/Dec (recomputed for the current sidereal time),
+  so it works whether or not the mount tracks.
+- Error messages from NINA that carry no error text now say that NINA reported a failure.
+
 ### Changed
 - Tabs renumbered: 1. Plan sequence, 2. Capture (NINA), 3. Build horizon.
 

@@ -724,7 +724,10 @@ class NinaApi:
         except Exception as e:                      # connection refused, timeout, HTTP error, bad JSON
             raise NinaApiError(f"NINA API {path}: {e}") from e
         if not data.get("Success", False):
-            raise NinaApiError(f"NINA API {path}: {data.get('Error') or data.get('Response') or 'failed'}")
+            if data.get("Error"):
+                raise NinaApiError(f"NINA API {path}: {data['Error']}")
+            raise NinaApiError(f"NINA API {path}: NINA reported that the command failed"
+                               + (f" (its message: '{data.get('Response')}')" if data.get("Response") else ""))
         return data.get("Response")
 
     # convenience wrappers
@@ -744,6 +747,16 @@ class NinaApi:
             except NinaApiError as e:
                 errs.append(str(e))
         return errs
+
+
+def altaz_to_radec_date(alt, az, lat, lst_hours):
+    """Alt/az → apparent RA/Dec of date (JNow), degrees (refraction ignored)."""
+    A, h, p = math.radians(az), math.radians(alt), math.radians(lat)
+    sd = math.sin(p) * math.sin(h) + math.cos(p) * math.cos(h) * math.cos(A)
+    dec = math.asin(max(-1.0, min(1.0, sd)))
+    ha = math.atan2(-math.sin(A) * math.cos(h),
+                    math.cos(p) * math.sin(h) - math.sin(p) * math.cos(h) * math.cos(A))
+    return math.degrees((math.radians(lst_hours * 15.0) - ha) % (2 * math.pi)), math.degrees(dec)
 
 
 def altaz_to_radec_j2000(alt, az, lat, lst_hours, t_utc=None):
@@ -901,7 +914,13 @@ class CaptureRunner:
             self.api.get("/equipment/mount/unpark", timeout=120)
             self._wait_until(lambda: not self.api.mount().get("AtPark"), 120, "unpark")
         if not m.get("TrackingEnabled", True):
-            self.api.get("/equipment/mount/tracking", mode=0)              # sidereal
+            try:
+                self.api.get("/equipment/mount/tracking", mode=0)          # sidereal
+            except NinaApiError as e:
+                self.emit("log", msg=f"Note: {e}")
+            if not self.api.mount().get("TrackingEnabled", False):
+                self.emit("log", msg="Note: tracking could not be switched on through NINA – continuing "
+                                     "(each slew is checked; switch tracking on in NINA if slews fail).")
         if not self.api.camera().get("Connected"):
             raise NinaApiError("the camera is not connected in NINA")
         if any(r is not None for r in self.rot) and not self.api.rotator().get("Connected"):
@@ -920,18 +939,29 @@ class CaptureRunner:
             return "skipped", f"too close to the Sun ({sep:.0f}° < {self.sun_min:.0f}°)"
         # 1 – slew (target computed now, from the mount's own sidereal time)
         m = self.api.mount()
-        ra, dec = altaz_to_radec_j2000(alt, az, lat, float(m["SiderealTime"]))
+        lst_at_slew = float(m["SiderealTime"])
+        ra, dec = altaz_to_radec_j2000(alt, az, lat, lst_at_slew)
         self.emit("frame", index=i, status="slewing")
         self.api.get("/equipment/mount/slew", ra=round(ra, 5), dec=round(dec, 5), waitForResult=False)
         time.sleep(self.poll)
         self._wait_until(lambda: not self.api.mount().get("Slewing"), self.slew_timeout, "the slew")
         self._check()                                   # a pause stops the slew: not an arrival
         m = self.api.mount()
-        d_alt = abs(float(m.get("Altitude", alt)) - alt)
-        d_az = abs((float(m.get("Azimuth", az)) - az + 180) % 360 - 180) * math.cos(math.radians(alt))
-        if max(d_alt, d_az) > 2.0:
-            raise NinaApiError(f"the mount is at alt {m.get('Altitude'):.1f}°, az {m.get('Azimuth'):.1f}° "
-                               f"instead of {alt:.1f}°, {az:.1f}° – slew stopped or limits hit?")
+        # arrival: compare RA/Dec of date (some drivers report alt/az poorly); recompute the target for
+        # the current sidereal time, so a mount without tracking does not count as off target
+        if m.get("RightAscension") is not None and m.get("Declination") is not None:
+            ra_d, dec_d = altaz_to_radec_date(alt, az, lat, float(m["SiderealTime"]))
+            ra_m, dec_m = float(m["RightAscension"]) * 15.0, float(m["Declination"])
+            if m.get("TrackingEnabled"):          # tracking: the mount stays on the RA it slewed to
+                ra_d = altaz_to_radec_date(alt, az, lat, float(lst_at_slew))[0]
+            err = max(abs(dec_m - dec_d), abs((ra_m - ra_d + 180) % 360 - 180) * math.cos(math.radians(dec_d)))
+            where = f"RA {ra_m / 15:.3f} h, Dec {dec_m:.2f}° instead of RA {ra_d / 15:.3f} h, Dec {dec_d:.2f}°"
+        else:
+            err = max(abs(float(m.get("Altitude", alt)) - alt),
+                      abs((float(m.get("Azimuth", az)) - az + 180) % 360 - 180) * math.cos(math.radians(alt)))
+            where = f"alt {m.get('Altitude')}°, az {m.get('Azimuth')}° instead of {alt:.1f}°, {az:.1f}°"
+        if err > 2.0:
+            raise NinaApiError(f"after the slew the mount is at {where} – slew stopped or limits hit?")
         # 2 – rotator
         tgt = self.rot[i]
         if tgt is not None:
