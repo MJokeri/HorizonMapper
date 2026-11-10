@@ -1230,6 +1230,22 @@ def rows_of(frames):
     return grid
 
 
+def fits_complete(path):
+    """True when a FITS file is fully written: its size covers the header and all the image data
+    (NINA writes files in the background, so a file can exist but still be short or empty)."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            h, n = read_fits_header(fh)
+        naxis = int(h.get("NAXIS", 0))
+        data = abs(int(h.get("BITPIX", 16))) // 8
+        for k in range(1, naxis + 1):
+            data *= int(h.get(f"NAXIS{k}", 0))
+        return size >= n + data and data > 0
+    except Exception:
+        return False
+
+
 def frame_thumbnail(path, K, lat, half_w, half_h, px=110, cache_dir=None):
     """Project one captured frame onto a small alt/az grid around its own centre (the same maths as
     the mosaic). Returns dict(az0, az1, alt0, alt1, img) with img rows from top (high) to bottom."""
@@ -2909,7 +2925,11 @@ def run_gui():
             dlog("Load frames while paused: ending the paused run first")
             threading.Thread(target=r.stop, daemon=True, name="stop-for-load").start()
         if C.get("loading"):
-            return False
+            if time.time() - C.get("loading_since", 0) < 60:
+                dlog("Load frames ignored: frames are already being loaded")
+                return False
+            dlog("Load frames: previous load seems stuck (>60 s) – starting again")
+        dlog(f"Load frames: source {cv_['src'].get()!r}, run state {r.state if r else None}")
         try:
             p = collect(require_area=False)
             src = cv_["src"].get(); fn = cv_["file"].get()
@@ -2920,7 +2940,9 @@ def run_gui():
                 raise ValueError("Choose the sequence file (Browse…).")
             fill_plan = dict(fill["plan"]) if src == "fill" else None
         except Exception as e:
+            dlog(f"Load frames refused: {e}")
             messagebox.showerror(APP_NAME, str(e)); return False
+        C["loading_since"] = time.time()
         C["loading"] = True; cap_buttons(C["runner"].state if C.get("runner") else "idle")
         frames_lbl.config(text="Loading frames…")
         dlog(f"loading frames from {src}")
@@ -2949,13 +2971,21 @@ def run_gui():
         return True
 
     def cap_loaded(plan, label, p, st, after):
+        try:
+            _cap_loaded(plan, label, p, st, after)
+        finally:
+            C["loading"] = False
+            r_ = C.get("runner")
+            cap_buttons(r_.state if r_ else "idle")
+
+    def _cap_loaded(plan, label, p, st, after):
         C["loading"] = False
         for k in ("exposure", "gain", "binning"):
             if st.get(k) is not None:
                 cv_[k].set(st[k])
         C["frames"] = list(plan["frames"]); C["plan"] = plan; C["source"] = label; C["params"] = p
         C["status"] = ["pending"] * len(C["frames"]); C["runner"] = None; C["cur"] = None
-        C["thumbs"] = {}; C["paths"] = {}; C["photo_cache"] = {}
+        C["thumbs"] = {}; C["paths"] = {}; C["photo_cache"] = {}; C["thumb_retry"] = {}; C["thumb_attempts"] = {}
         try:
             ex = float(cv_["exposure"].get())
         except ValueError:
@@ -2989,15 +3019,19 @@ def run_gui():
         K = thumb_K(); q_ = C["q"]
 
         def job():
+            if not fits_complete(path):                    # still being written: try again shortly
+                dlog(f"preview frame {i + 1}: file not complete yet ({os.path.getsize(path) if os.path.exists(path) else 0} bytes)")
+                q_.put(("thumb_retry", (i, path, "file not complete yet"))); return
             try:
                 th = frame_thumbnail(path, K, lat, fw / 2, fh / 2, cache_dir=default_cache_dir())
                 q_.put(("thumb", (i, th, thumbnail_rgba(th["img"]))))
             except Exception as e:
-                q_.put(("log", f"Preview of frame {i + 1} failed: {e}"))
-        threading.Thread(target=job, daemon=True).start()
+                dlog(f"preview frame {i + 1} failed: {type(e).__name__}: {e}")
+                q_.put(("thumb_retry", (i, path, f"{type(e).__name__}: {e}")))
+        threading.Thread(target=job, daemon=True, name=f"preview-{i + 1}").start()
 
     def cap_rethumb():
-        C["thumbs"] = {}; C["photo_cache"] = {}
+        C["thumbs"] = {}; C["photo_cache"] = {}; C["thumb_retry"] = {}; C["thumb_attempts"] = {}
         for i, pth in list(C.get("paths", {}).items()):
             cap_thumb(i, pth)
         draw_cap()
@@ -3187,8 +3221,17 @@ def run_gui():
                     clog_add(val)
                 elif kind == "dev":
                     dev_lbl.config(text=val)
+                elif kind == "thumb_retry":
+                    i, pth, why = val
+                    att = C.setdefault("thumb_attempts", {}).get(i, 0) + 1
+                    C["thumb_attempts"][i] = att
+                    if att <= 60:                          # every 3 s for up to 3 minutes
+                        C.setdefault("thumb_retry", {})[i] = (pth, time.time() + 3.0)
+                    else:
+                        clog_add(f"Frame {i + 1}: no preview after 3 minutes ({why}).")
                 elif kind == "thumb":
                     i, th, im = val
+                    C.get("thumb_attempts", {}).pop(i, None)
                     if i < len(C["frames"]):
                         C.setdefault("thumbs", {})[i] = (th, im)
                         for key in [k_ for k_ in C.get("photo_cache", {}) if k_[0] == i]:
@@ -3250,6 +3293,9 @@ def run_gui():
             pass
         except Exception:
             dlog_exc("cap_poll")
+        for i, (pth, due) in list(C.get("thumb_retry", {}).items()):
+            if time.time() >= due:
+                del C["thumb_retry"][i]; cap_thumb(i, pth)
         if n:
             dlog(f"UI handled {n} capture events in {time.time() - t0:.3f} s" + (" – more queued" if not C["q"].empty() else ""))
         if C.get("dirty") and time.time() - C.get("last_draw", 0) > 0.25:
@@ -3460,6 +3506,8 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
    • The NINA image folder can be changed during a run – file look-ups always use the current
      value. 'Load frames' while paused asks, then ends the paused run (frames taken are kept).
    • The log runs down the right side of the tab (scrollable).
+   • A preview is made only when the FITS file is complete (NINA may still be writing it);
+     otherwise it is tried again every 3 s for up to 3 minutes.
    • Files that NINA saves late are picked up by a scan of its image folder every few seconds
      (matched by name or by the pointing in the header; light green = file not arrived yet), also
      for 10 minutes after the run.

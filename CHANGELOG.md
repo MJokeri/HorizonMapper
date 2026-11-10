@@ -42,6 +42,13 @@
   - Loading while paused first asks, then ends the paused run properly (its frames are kept and
     listed for the Build tab).
   - While a run is in progress, Load frames is disabled.
+- **Some frames never got a preview:** the file was found while NINA was still writing it (empty or
+  short), the preview failed and was not tried again. Now a file is used only when its size covers
+  the header and all the image data. Incomplete files, and failed previews, are retried every 3 s
+  for up to 3 minutes.
+- **Load frames could stop reacting** (reported after Stop run). It can no longer get stuck: an
+  internal "loading" flag is always cleared, a stale one is reset after 60 s, and every decision
+  Load frames makes goes to the debug log.
 - **Changing the NINA image folder during a run had no effect** (the folder was read once at Start),
   so no files were found and no pictures appeared. The folder is now read whenever files are looked
   up, and the debug log shows the folder, whether it exists, and NINA's file names.
