@@ -137,6 +137,36 @@ def safe_waypoint(p_from, p_to, lat, sun, sun_min):
     return None
 
 
+def parse_start(date_txt, time_txt, now=None):
+    """Local start time from a date ('2026-11-12', '12.11.2026', '12.11.' or blank = today) and a time
+    ('13:30', '13.30' or blank = the current time of day). Raises ValueError for anything else."""
+    now = time.time() if now is None else now
+    lt = time.localtime(now)
+    d = (date_txt or "").strip()
+    if not d:
+        y, mo, da = lt.tm_year, lt.tm_mon, lt.tm_mday
+    elif "-" in d:
+        y, mo, da = (int(x) for x in d.split("-")[:3])
+    else:
+        parts = [x for x in d.split(".") if x != ""]
+        if len(parts) == 2:
+            da, mo, y = int(parts[0]), int(parts[1]), lt.tm_year
+        elif len(parts) == 3:
+            da, mo, y = int(parts[0]), int(parts[1]), int(parts[2])
+            y += 2000 if y < 100 else 0
+        else:
+            raise ValueError("date")
+    t = (time_txt or "").strip()
+    if t:
+        hh, mm = (int(x) for x in t.replace(".", ":").split(":")[:2])
+        ss = 0
+    else:
+        hh, mm, ss = lt.tm_hour, lt.tm_min, lt.tm_sec
+    if not (1 <= mo <= 12 and 1 <= da <= 31 and 0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError("date or time out of range")
+    return time.mktime((y, mo, da, hh, mm, ss, 0, 0, -1))
+
+
 def frame_times(frames, order, t0, sec_per_frame, sec_per_rot=0.0):
     """Estimated time each frame in `order` is shot, starting at t0 (rotator moves add time)."""
     t, out, last_rot = t0, {}, None
@@ -2139,10 +2169,12 @@ def run_gui(selftest=False):
         if not tr:
             return ""
         t0_, t1_ = tr[0][0], tr[-1][0]
+        day = "" if time.strftime("%Y%m%d", time.localtime(t0_)) == time.strftime("%Y%m%d") else \
+            time.strftime("%d.%m.%Y ", time.localtime(t0_))
         if max(a for _, a, _ in tr) < -sun_min:
-            return f"Sun {time.strftime('%H:%M', time.localtime(t0_))}–{time.strftime('%H:%M', time.localtime(t1_))}: below the horizon – no risk"
+            return f"Sun {day}{time.strftime('%H:%M', time.localtime(t0_))}–{time.strftime('%H:%M', time.localtime(t1_))}: below the horizon – no risk"
         nf, np_ = len(risk.get("frames", [])), len(risk.get("paths", []))
-        return (f"Sun {time.strftime('%H:%M', time.localtime(t0_))}–{time.strftime('%H:%M', time.localtime(t1_))}: "
+        return (f"Sun {day}{time.strftime('%H:%M', time.localtime(t0_))}–{time.strftime('%H:%M', time.localtime(t1_))}: "
                 + (f"{nf} frames within {sun_min:g}° (red)" if nf else "no frame too close")
                 + (f", {np_} slews pass near it (×, detoured)" if np_ else ""))
 
@@ -2478,7 +2510,7 @@ def run_gui(selftest=False):
             draw_sun_overlay(canvas, X, Y, rk, plan["frames"], plan["fw"], plan["fh"], keep, x0, x1)
             sun_txt = sun_summary(rk, keep)
         except (ValueError, KeyError):
-            sun_txt = "Sun: enter latitude, longitude, start time (HH:MM) and distance to show it"
+            sun_txt = "Sun: enter latitude, longitude, start date / time (e.g. 12.11.2026, 13:30) and distance to show it"
         # Tk does not clip: cover what lies outside the plot area, then draw the axis labels on top
         for r in ((0, 0, W, y0), (0, y1, W, H), (0, 0, x0, H), (x1, 0, W, H)):
             canvas.create_rectangle(*r, fill="white", outline="")
@@ -2545,22 +2577,19 @@ def run_gui(selftest=False):
     ttk.Entry(sb, textvariable=sun_lon, width=8).pack(side="left")
     ttk.Button(sb, text="Sun check", command=sun_check).pack(side="left", padx=4)
     sb2 = ttk.Frame(btns); sb2.pack(side="top", fill="x", pady=2)
-    sun_start = tk.StringVar(value=""); sun_keep = tk.StringVar(value="30")
-    ttk.Label(sb2, text="Start time (HH:MM)").pack(side="left", padx=4)
+    sun_start = tk.StringVar(value=""); sun_keep = tk.StringVar(value="30"); sun_date = tk.StringVar(value="")
+    ttk.Label(sb2, text="Start date").pack(side="left", padx=4)
+    ttk.Entry(sb2, textvariable=sun_date, width=10).pack(side="left")
+    ttk.Label(sb2, text="Start time (HH:MM)").pack(side="left", padx=(8, 4))
     ttk.Entry(sb2, textvariable=sun_start, width=6).pack(side="left")
     ttk.Label(sb2, text="Sun distance (°)").pack(side="left", padx=(8, 4))
     ttk.Entry(sb2, textvariable=sun_keep, width=4).pack(side="left")
-    for _v in (sun_start, sun_keep, sun_lon):
+    for _v in (sun_start, sun_keep, sun_lon, sun_date):
         _v.trace_add("write", lambda *a: (state.pop("sunrisk", None), draw_plan()))
 
     def plan_start_time():
-        """Planned start: today at HH:MM local time, or now if the field is blank."""
-        txt = sun_start.get().strip()
-        if not txt:
-            return time.time()
-        hh, mm = (int(x) for x in txt.replace(".", ":").split(":")[:2])
-        lt = time.localtime()
-        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
+        """Planned start in local time: 'Start date' (blank = today) at 'Start time' (blank = now)."""
+        return parse_start(sun_date.get(), sun_start.get())
     canvas.bind("<Configure>", lambda e: draw_plan())
 
     def plan_point(x, y):
@@ -4230,7 +4259,8 @@ TIPS = {
     "Show shooting order": "Draw the order in which the frames are taken (green = first → magenta = last).",
     "Sun check": "Show where the Sun is at the given time and whether any frame is too close to it.",
     "Longitude (°E)": "Your site's longitude in degrees east – used for the Sun check.",
-    "Start time (HH:MM)": "Planned start (local time today; blank = now). The preview shows the Sun's path from then until the plan's estimated end.",
+    "Start date": "Planned start date: 2026-11-12, 12.11.2026 or 12.11. (this year); blank = today. With the start time it sets where the preview draws the Sun.",
+    "Start time (HH:MM)": "Planned start time (local; blank = the current time of day). The preview shows the Sun's path from then until the plan's estimated end.",
     "Sun distance (°)": "Keep-away distance from the Sun for the preview: frames inside it are drawn red, slews passing it get a red cross.",
     # ---- Capture tab
     "Host": "Address of the computer running NINA (localhost = this computer, or its IP address, e.g. 192.168.1.55).",
@@ -4330,7 +4360,8 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
      Sequencer (or save as template and put it in NINA's template folder).
    • Daytime under even cloud gives the best silhouettes. Take a test frame first:
      open sky should read ~10,000–30,000 ADU. Keep the lowest altitude well above the sun.
-   • The Sun in the preview: set 'Start time (HH:MM)' (blank = now) and 'Sun distance (°)'. The
+   • The Sun in the preview: set 'Start date' (e.g. 12.11.2026; blank = today), 'Start time
+     (HH:MM)' (blank = now) and 'Sun distance (°)'. The
      preview draws the Sun's track from the start to the plan's estimated end with the keep-away
      zone; frames too close at their time are red, slews passing near it get a red ×.
 
