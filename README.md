@@ -82,8 +82,17 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
     Each extra frame width costs roughly 10–15% more frames with a typical tree line.
   - Frames are placed per row only over the stretches where the strip enters that row, using as
     few frames as the overlap allows. Every point of the strip is still covered.
-  - **Lowest altitude** sets a floor for the strip. Keep it well above the sun when you shoot by day
-    (use **Sun check**).
+  - **Lowest altitude** sets a floor for the strip. Keep it well above the sun when you shoot by day.
+- **The Sun in the preview:** enter **Start time (HH:MM)** (blank = now) and **Sun distance (°)**
+  (default 30) under the Plan buttons; the longitude is the one next to **Sun check**. The preview
+  then draws:
+  - the Sun at the start (filled) and at the plan's estimated end (ring), with its track between;
+  - the keep-away zone around both;
+  - **frames that would be too close to the Sun when their turn comes, in red** (each frame's time
+    comes from the shooting order and the time estimates);
+  - a **red ×** on frames whose slew from the previous frame would pass near the Sun.
+
+  A line at the top sums it up. Try different start times or azimuth ranges until nothing is red.
 - **Order** (Sequence group): **East half first, then west** gives a single meridian flip. The east
   half is shot bottom to top and, by default, the west half top to bottom (the shortest path). Tick
   **Rows bottom to top in both halves** to start the west half at the bottom too.
@@ -137,6 +146,16 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
 5. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°) or below **Never
    below altitude** (default 10°) are skipped, never slewed to. **Unpark at start** / **Park when
    finished**.
+   - **Slew paths are checked too.** Before each slew the app estimates the mount's path from where
+     it actually is (both axes moving together). If the path would pass closer to the Sun than the
+     limit, it first slews to a safe intermediate position (one axis first, or via the meridian high
+     in the sky). If there is no safe route, the frame is skipped.
+   - **Sun check at Start:** the frames to shoot are timed through the run. If any would be too
+     close to the Sun when its turn comes, or its slew would pass near it, Start lists them. Then
+     choose: **Yes** = shoot as planned (the protections above apply), **No** = leave those frames
+     out of this run (they stay "to do"), **Cancel**.
+   - The Capture picture shows the Sun now, its track over the rest of the run and the keep-away
+     zone, with risky frames in red.
 6. **▶ Start** asks for confirmation. Tracking is left as it is: the exposures are very short and
    every slew is aimed at the current sky position, so it isn't needed. If the mount isn't tracking,
    the log says so once. Only if a slew is refused while the mount isn't tracking does the app

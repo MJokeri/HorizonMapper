@@ -85,6 +85,108 @@ def sun_altaz(t_utc, lat, lon):
     return alt, az
 
 
+def altaz_to_hadec(alt, az, lat):
+    """Alt/az → hour angle and declination, degrees (HA positive to the west)."""
+    A, h, p = math.radians(az), math.radians(alt), math.radians(lat)
+    dec = math.asin(max(-1.0, min(1.0, math.sin(p) * math.sin(h) + math.cos(p) * math.cos(h) * math.cos(A))))
+    ha = math.atan2(-math.sin(A) * math.cos(h), math.cos(p) * math.sin(h) - math.sin(p) * math.cos(h) * math.cos(A))
+    return math.degrees(ha), math.degrees(dec)
+
+
+def hadec_to_altaz(ha, dec, lat):
+    """Hour angle / declination → alt/az, degrees."""
+    H, d, p = math.radians(ha), math.radians(dec), math.radians(lat)
+    alt = math.asin(max(-1.0, min(1.0, math.sin(p) * math.sin(d) + math.cos(p) * math.cos(d) * math.cos(H))))
+    az = math.atan2(-math.sin(H) * math.cos(d), math.cos(p) * math.sin(d) - math.sin(p) * math.cos(d) * math.cos(H))
+    return math.degrees(alt), math.degrees(az) % 360
+
+
+def angular_sep(alt1, az1, alt2, az2):
+    a1, a2 = math.radians(alt1), math.radians(alt2)
+    c = math.sin(a1) * math.sin(a2) + math.cos(a1) * math.cos(a2) * math.cos(math.radians(az1 - az2))
+    return math.degrees(math.acos(max(-1.0, min(1.0, c))))
+
+
+def slew_path(p_from, p_to, lat, n=24):
+    """Approximate path of an equatorial mount between two alt/az pointings: both axes move at once,
+    so hour angle and declination change linearly. Returns alt/az points (ends included)."""
+    h1, d1 = altaz_to_hadec(p_from[0], p_from[1], lat)
+    h2, d2 = altaz_to_hadec(p_to[0], p_to[1], lat)
+    dh = (h2 - h1 + 180) % 360 - 180
+    return [hadec_to_altaz(h1 + dh * k / n, d1 + (d2 - d1) * k / n, lat) for k in range(n + 1)]
+
+
+def path_sun_sep(points, sun):
+    """Smallest distance (degrees) between a list of alt/az points and the Sun (alt, az)."""
+    return min(angular_sep(a, z, sun[0], sun[1]) for a, z in points) if points else 180.0
+
+
+def safe_waypoint(p_from, p_to, lat, sun, sun_min):
+    """An intermediate pointing that keeps both legs of a slew at least `sun_min` from the Sun:
+    first move only one axis, then the other; else via the meridian high in the sky. None if no
+    such route is found."""
+    h1, d1 = altaz_to_hadec(p_from[0], p_from[1], lat)
+    h2, d2 = altaz_to_hadec(p_to[0], p_to[1], lat)
+    cands = [hadec_to_altaz(h1, d2, lat), hadec_to_altaz(h2, d1, lat),
+             hadec_to_altaz(0.0, (d1 + d2) / 2, lat), hadec_to_altaz(0.0, lat, lat)]
+    for w in cands:
+        if w[0] < 5:
+            continue
+        if min(path_sun_sep(slew_path(p_from, w, lat), sun), path_sun_sep(slew_path(w, p_to, lat), sun)) >= sun_min:
+            return w
+    return None
+
+
+def frame_times(frames, order, t0, sec_per_frame, sec_per_rot=0.0):
+    """Estimated time each frame in `order` is shot, starting at t0 (rotator moves add time)."""
+    t, out, last_rot = t0, {}, None
+    for i in order:
+        r = frames[i][2]
+        if r is not None and r != last_rot:
+            t += sec_per_rot; last_rot = r
+        out[i] = t
+        t += sec_per_frame
+    return out
+
+
+def sun_risk(frames, order, t0, sec_per_frame, sec_per_rot, lat, lon, sun_min, start_pos=None):
+    """Which frames of a run come closer to the Sun than `sun_min`, at the time they are shot, and
+    which slews (from the previous pointing, or `start_pos` for the first) pass too close on the way.
+    Returns dict(frames=[(i, t, sep)], paths=[(i, t, sep)], end=t_end, track=[(t, alt, az)])."""
+    times = frame_times(frames, order, t0, sec_per_frame, sec_per_rot)
+    fr, pa = [], []
+    prev = start_pos
+    for i in order:
+        t = times[i]; sun = sun_altaz(t, lat, lon)
+        alt, az = frames[i][0], frames[i][1]
+        if sun[0] > -sun_min:                          # the Sun can matter at all
+            sep = angular_sep(alt, az, sun[0], sun[1])
+            if sep < sun_min:
+                fr.append((i, t, sep))
+            elif prev is not None:
+                psep = path_sun_sep(slew_path(prev, (alt, az), lat), sun)
+                if psep < sun_min:
+                    pa.append((i, t, psep))
+        prev = (alt, az)
+    t_end = (max(times.values()) + sec_per_frame) if times else t0
+    steps = max(int((t_end - t0) / 600), 1)
+    track = [(t0 + (t_end - t0) * k / steps,) + sun_altaz(t0 + (t_end - t0) * k / steps, lat, lon)
+             for k in range(steps + 1)]
+    return dict(frames=fr, paths=pa, end=t_end, track=track)
+
+
+def sun_circle(sun_alt, sun_az, radius, n=72):
+    """Alt/az points at `radius` degrees around the Sun (for drawing the keep-away zone)."""
+    a, r = math.radians(sun_alt), math.radians(radius)
+    pts = []
+    for k in range(n + 1):
+        b = 2 * math.pi * k / n
+        alt2 = math.asin(max(-1.0, min(1.0, math.sin(a) * math.cos(r) + math.cos(a) * math.sin(r) * math.cos(b))))
+        daz = math.atan2(math.sin(b) * math.sin(r) * math.cos(a), math.cos(r) - math.sin(a) * math.sin(alt2))
+        pts.append((math.degrees(alt2), (sun_az + math.degrees(daz)) % 360))
+    return pts
+
+
 # =============================================================================
 #  Horizon files
 # =============================================================================
@@ -1029,6 +1131,23 @@ class CaptureRunner:
         # 1 – slew (target computed now, from the mount's own sidereal time)
         m = self.api.mount()
         lst_at_slew = float(m["SiderealTime"])
+        # the slew path must keep away from the Sun too: go via a safe intermediate position if needed
+        sun = sun_altaz(time.time(), lat, lon)
+        if sun[0] > -self.sun_min and m.get("RightAscension") is not None:
+            ha_m = (lst_at_slew * 15.0 - float(m["RightAscension"]) * 15.0 + 180) % 360 - 180
+            here = hadec_to_altaz(ha_m, float(m["Declination"]), lat)
+            psep = path_sun_sep(slew_path(here, (alt, az), lat), sun)
+            if psep < self.sun_min:
+                w = safe_waypoint(here, (alt, az), lat, sun, self.sun_min)
+                if w is None:
+                    return "skipped", f"the slew there would pass {psep:.0f}° from the Sun (no safe route)"
+                self.emit("log", msg=f"Frame {i + 1}: the direct slew would pass {psep:.0f}° from the Sun – "
+                                     f"going via alt {w[0]:.0f}°, az {w[1]:.0f}° first.")
+                wra, wdec = altaz_to_radec_j2000(w[0], w[1], lat, lst_at_slew)
+                self.api.get("/equipment/mount/slew", ra=round(wra, 5), dec=round(wdec, 5),
+                             waitForResult=True, timeout=self.slew_timeout + 15)
+                self._check()
+                m = self.api.mount(); lst_at_slew = float(m["SiderealTime"])
         ra, dec = altaz_to_radec_j2000(alt, az, lat, lst_at_slew)
         self.emit("frame", index=i, status="slewing")
         # NINA's own slew handling decides when the slew is over: the request waits for it, in a
@@ -1978,6 +2097,55 @@ def run_gui(selftest=False):
     ttk.Label = _hovered(ttk.Label, "label"); ttk.Entry = _hovered(ttk.Entry, "entry")
     ttk.Spinbox = _hovered(ttk.Spinbox, "spinbox"); ttk.Combobox = _hovered(ttk.Combobox, "combobox")
 
+    def draw_sun_overlay(cv, X, Y, risk, frames, fw, fh, sun_min, x0, x1, tag="sun"):
+        """Sun at the start (filled) and end (ring) of the run, its track, the keep-away zone around
+        both, frames too close to the Sun (red) and frames whose slew passes near it (red cross)."""
+        half = (x1 - x0) / 2
+
+        def poly(pts, **kw):                       # split where the azimuth wraps around 0°/360°
+            seg = []
+            for a, z in pts:
+                xy = (X(z), Y(a))
+                if seg and abs(xy[0] - seg[-1][0]) > half:
+                    if len(seg) > 1:
+                        cv.create_line(*[c for p_ in seg for c in p_], tags=tag, **kw)
+                    seg = []
+                seg.append(xy)
+            if len(seg) > 1:
+                cv.create_line(*[c for p_ in seg for c in p_], tags=tag, **kw)
+        tr = risk.get("track") or []
+        if not tr:
+            return
+        poly([(a, z) for _, a, z in tr], fill="#ff9800", width=2)
+        for k, (t_, a, z) in enumerate((tr[0], tr[-1])):
+            poly(sun_circle(a, z, sun_min), fill="#ff9800", dash=(6, 4) if k else (), width=2)
+            x, y = X(z), Y(a)
+            cv.create_oval(x - 8, y - 8, x + 8, y + 8, outline="#e65100", width=2,
+                           fill="#ffd54f" if k == 0 else "", tags=tag)
+            cv.create_text(x + 11, y - 11, anchor="w", text=time.strftime("%H:%M", time.localtime(t_)),
+                           fill="#e65100", font=("Segoe UI", 8, "bold"), tags=tag)
+        for i, t_, sep in risk.get("frames", []):
+            alt, az, _ = frames[i]; cw = fw / max(math.cos(math.radians(alt)), 0.05) / 2
+            kx = abs(X(az + 1) - X(az)) if abs(X(az + 1) - X(az)) < half else abs(X(az) - X(az - 1))
+            cv.create_rectangle(X(az) - cw * kx, Y(alt + fh / 2), X(az) + cw * kx, Y(alt - fh / 2),
+                                outline="#d50000", width=3, fill="#ffcdd2", tags=tag)
+        for i, t_, sep in risk.get("paths", []):
+            alt, az, _ = frames[i]; x, y = X(az), Y(alt)
+            cv.create_line(x - 6, y - 6, x + 6, y + 6, fill="#d50000", width=3, tags=tag)
+            cv.create_line(x - 6, y + 6, x + 6, y - 6, fill="#d50000", width=3, tags=tag)
+
+    def sun_summary(risk, sun_min):
+        tr = risk.get("track") or []
+        if not tr:
+            return ""
+        t0_, t1_ = tr[0][0], tr[-1][0]
+        if max(a for _, a, _ in tr) < -sun_min:
+            return f"Sun {time.strftime('%H:%M', time.localtime(t0_))}–{time.strftime('%H:%M', time.localtime(t1_))}: below the horizon – no risk"
+        nf, np_ = len(risk.get("frames", [])), len(risk.get("paths", []))
+        return (f"Sun {time.strftime('%H:%M', time.localtime(t0_))}–{time.strftime('%H:%M', time.localtime(t1_))}: "
+                + (f"{nf} frames within {sun_min:g}° (red)" if nf else "no frame too close")
+                + (f", {np_} slews pass near it (×, detoured)" if np_ else ""))
+
     # every button / check box / radio button click goes to the debug log
     def _logged(cls, kind):
         class Logged(cls):
@@ -2297,6 +2465,20 @@ def run_gui(selftest=False):
         canvas.create_line(x0, Y(p.floor), x1, Y(p.floor), fill="#e0b000", dash=(4, 3))
         if show_order.get():
             draw_order(canvas, plan, X, Y, flip=p.meridian_split)
+        # the Sun during the planned session (start time + plan duration)
+        sun_txt = ""
+        try:
+            t0_ = plan_start_time(); keep = float(sun_keep.get()); lat_ = float(V["lat"].get()); lon_ = float(sun_lon.get())
+            key = (id(plan), round(t0_ / 60), keep, lat_, lon_, V["sec_per_frame"].get(), V["sec_per_rot"].get())
+            if state.get("sunrisk", (None,))[0] != key:
+                rk = sun_risk(plan["frames"], list(range(len(plan["frames"]))), t0_, float(V["sec_per_frame"].get()),
+                              float(V["sec_per_rot"].get()), lat_, lon_, keep)
+                state["sunrisk"] = (key, rk)
+            rk = state["sunrisk"][1]
+            draw_sun_overlay(canvas, X, Y, rk, plan["frames"], plan["fw"], plan["fh"], keep, x0, x1)
+            sun_txt = sun_summary(rk, keep)
+        except (ValueError, KeyError):
+            sun_txt = "Sun: enter latitude, longitude, start time (HH:MM) and distance to show it"
         # Tk does not clip: cover what lies outside the plot area, then draw the axis labels on top
         for r in ((0, 0, W, y0), (0, y1, W, H), (0, 0, x0, H), (x1, 0, W, H)):
             canvas.create_rectangle(*r, fill="white", outline="")
@@ -2305,6 +2487,8 @@ def run_gui(selftest=False):
             canvas.create_text(XA(a), y1 + 14, text=f"{a:g}°")
         for h in h_ticks:
             canvas.create_text(x0 - 22, Y(h), text=f"{h:g}°")
+        if sun_txt:
+            canvas.create_text(x0, y0 - 10, anchor="w", font=("Segoe UI", 9), fill="#e65100", text=sun_txt)
         if show_order.get():
             canvas.create_text(x1, y0 - 10, anchor="ne", font=("Segoe UI", 9),
                                text="Shooting order: green = first → yellow → magenta = last · numbers = first frame of each row")
@@ -2360,6 +2544,23 @@ def run_gui(selftest=False):
     ttk.Label(sb, text="Longitude (°E)").pack(side="left", padx=4)
     ttk.Entry(sb, textvariable=sun_lon, width=8).pack(side="left")
     ttk.Button(sb, text="Sun check", command=sun_check).pack(side="left", padx=4)
+    sb2 = ttk.Frame(btns); sb2.pack(side="top", fill="x", pady=2)
+    sun_start = tk.StringVar(value=""); sun_keep = tk.StringVar(value="30")
+    ttk.Label(sb2, text="Start time (HH:MM)").pack(side="left", padx=4)
+    ttk.Entry(sb2, textvariable=sun_start, width=6).pack(side="left")
+    ttk.Label(sb2, text="Sun distance (°)").pack(side="left", padx=(8, 4))
+    ttk.Entry(sb2, textvariable=sun_keep, width=4).pack(side="left")
+    for _v in (sun_start, sun_keep, sun_lon):
+        _v.trace_add("write", lambda *a: (state.pop("sunrisk", None), draw_plan()))
+
+    def plan_start_time():
+        """Planned start: today at HH:MM local time, or now if the field is blank."""
+        txt = sun_start.get().strip()
+        if not txt:
+            return time.time()
+        hh, mm = (int(x) for x in txt.replace(".", ":").split(":")[:2])
+        lt = time.localtime()
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
     canvas.bind("<Configure>", lambda e: draw_plan())
 
     def plan_point(x, y):
@@ -3149,7 +3350,11 @@ def run_gui(selftest=False):
             while C["polling"]:
                 api = C["api"]
                 try:
-                    m = api.mount(); txt = (f"Mount: alt {m.get('Altitude', 0):.1f}°  az {m.get('Azimuth', 0):.1f}°  "
+                    m = api.mount()
+                    C["mount_pos"] = (float(m.get("Altitude", 0)), float(m.get("Azimuth", 0)))
+                    if m.get("SiteLatitude") is not None:
+                        C["site"] = (float(m["SiteLatitude"]), float(m["SiteLongitude"]))
+                    txt = (f"Mount: alt {m.get('Altitude', 0):.1f}°  az {m.get('Azimuth', 0):.1f}°  "
                                             f"{str(m.get('SideOfPier', '')).replace('pier', 'pier ')}"
                                             f"{'  PARKED' if m.get('AtPark') else ''}{'  slewing' if m.get('Slewing') else ''}")
                 except NinaApiError:
@@ -3283,6 +3488,12 @@ def run_gui(selftest=False):
         if not (1 <= first <= max(n_, 1)) or last < first:
             raise ValueError(f"The frame range must lie within 1–{n_}, with From ≤ To.")
         return first, min(last, n_)
+
+    def capture_sun_risk(order, t0=None):
+        """Sun risk for the frames in `order`, shot from now (or t0) at the Plan tab's time estimates."""
+        lat_, lon_ = C.get("site") or (float(V["lat"].get()), float(sun_lon.get()))
+        return sun_risk(C["frames"], order, time.time() if t0 is None else t0, float(V["sec_per_frame"].get()),
+                        float(V["sec_per_rot"].get()), lat_, lon_, float(cv_["sun"].get()), start_pos=C.get("mount_pos"))
 
     def update_progress():
         """Percentage bar: progress of the current run, or frames taken overall when there is none."""
@@ -3496,6 +3707,35 @@ def run_gui(selftest=False):
         if not order:
             messagebox.showinfo(APP_NAME, f"Frames {first}–{last} are all taken already.\n"
                                           "Tick 'Re-shoot frames already taken' to shoot them again."); return
+        try:
+            rk = capture_sun_risk(order)
+        except Exception:
+            dlog_exc("sun risk at start"); rk = {"frames": [], "paths": []}
+        if rk["frames"] or rk["paths"]:
+            fmt = lambda t_: time.strftime("%H:%M", time.localtime(t_))
+            fr_ = rk["frames"]; pa_ = rk["paths"]
+            lines = []
+            if fr_:
+                azs = [C["frames"][i][1] for i, _, _ in fr_]
+                lines.append(f"• {len(fr_)} frames will be closer than {sun:g}° to the Sun when their turn comes "
+                             f"(azimuth {min(azs):.0f}–{max(azs):.0f}°, around {fmt(fr_[0][1])}–{fmt(fr_[-1][1])}). "
+                             "They are skipped automatically – never slewed to.")
+            if pa_:
+                lines.append(f"• {len(pa_)} slews would pass near the Sun on the way; they go via a safe "
+                             "intermediate position (or are skipped if there is none).")
+            dlog(f"sun risk at start: {len(fr_)} frames, {len(pa_)} slews")
+            ans = messagebox.askyesnocancel(
+                APP_NAME, "Sun check for this run:\n\n" + "\n".join(lines) +
+                "\n\nYes = shoot as planned (the protections above apply)\n"
+                "No = leave those frames out of this run (they stay 'to do' for later)\nCancel = don't start",
+                icon="warning")
+            if ans is None:
+                return
+            if ans is False:
+                bad = {i for i, _, _ in fr_}
+                order = [i for i in order if i not in bad]
+                if not order:
+                    messagebox.showinfo(APP_NAME, "No frames left to shoot in this range."); return
         taken_in = sum(1 for i in range(first - 1, last) if status[i] == "done")
         if not messagebox.askokcancel(APP_NAME,
                 f"Shoot {len(order)} frames through NINA?\n"
@@ -3817,6 +4057,20 @@ def run_gui(selftest=False):
                                          fill="#d00000", width=2)
                     except Exception:
                         pass
+            try:
+                st_now = C.get("status") or []
+                todo = [i for i in range(len(C["frames"])) if (st_now[i] if i < len(st_now) else "pending") != "done"]
+                r_ = C.get("runner")
+                if r_ is not None and r_.state in ("running", "paused"):
+                    todo = [i for i in r_.order[r_.pos:]]
+                key = (len(todo), todo[:1], int(time.time() // 30), cv_["sun"].get())
+                if C.get("sunrisk", (None,))[0] != key:
+                    C["sunrisk"] = (key, capture_sun_risk(todo))
+                draw_sun_overlay(ccan, X, Y, C["sunrisk"][1], C["frames"], plan["fw"], plan["fh"],
+                                 float(cv_["sun"].get()), x0, x1)
+                C["sun_txt"] = sun_summary(C["sunrisk"][1], float(cv_["sun"].get()))
+            except Exception:
+                C["sun_txt"] = ""
             if cv_["order"].get():
                 draw_order(ccan, plan, X, Y, tag="order", numbers="rows",
                            flip=any(z < 180 for _, z, _ in C["frames"]) and any(z >= 180 for _, z, _ in C["frames"]))
@@ -3827,6 +4081,8 @@ def run_gui(selftest=False):
         for r_ in ((0, 0, W, y0), (0, y1, W, H), (0, 0, x0, H), (x1, 0, W, H)):
             ccan.create_rectangle(*r_, fill="white", outline="")
         ccan.create_rectangle(x0, y0, x1, y1, outline="#bbb")
+        if C.get("sun_txt"):
+            ccan.create_text(x0, y0 - 10, anchor="w", font=("Segoe UI", 9), fill="#e65100", text=C["sun_txt"])
         for a in at:
             ccan.create_text(XA(a), y1 + 12, text=f"{a:g}°")
         for h in ht:
@@ -3974,6 +4230,8 @@ TIPS = {
     "Show shooting order": "Draw the order in which the frames are taken (green = first → magenta = last).",
     "Sun check": "Show where the Sun is at the given time and whether any frame is too close to it.",
     "Longitude (°E)": "Your site's longitude in degrees east – used for the Sun check.",
+    "Start time (HH:MM)": "Planned start (local time today; blank = now). The preview shows the Sun's path from then until the plan's estimated end.",
+    "Sun distance (°)": "Keep-away distance from the Sun for the preview: frames inside it are drawn red, slews passing it get a red cross.",
     # ---- Capture tab
     "Host": "Address of the computer running NINA (localhost = this computer, or its IP address, e.g. 192.168.1.55).",
     "Port": "Port of NINA's Advanced API plugin (default 1888).",
@@ -4071,8 +4329,10 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
    • Preview, then 'Save NINA sequence…'. Open it with Load sequence in the Advanced
      Sequencer (or save as template and put it in NINA's template folder).
    • Daytime under even cloud gives the best silhouettes. Take a test frame first:
-     open sky should read ~10,000–30,000 ADU. Use 'Sun check' and keep the lowest
-     altitude well above the sun.
+     open sky should read ~10,000–30,000 ADU. Keep the lowest altitude well above the sun.
+   • The Sun in the preview: set 'Start time (HH:MM)' (blank = now) and 'Sun distance (°)'. The
+     preview draws the Sun's track from the start to the plan's estimated end with the keep-away
+     zone; frames too close at their time are red, slews passing near it get a red ×.
 
 2. Capture (NINA)  – shoot the frames from here, through NINA's Advanced API plugin
    • Setup once: install 'Advanced API' in NINA (Plugins), enable its server (port 1888), let
@@ -4092,6 +4352,9 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
      are shown in their slots (projected like the mosaic; 'Turn previews 180°' if upside down).
    • Safety: frames nearer the Sun than the limit (default 30°) or below the altitude limit
      (default 10°) are skipped and never slewed to. Unpark at start / park when finished.
+     Slew paths are checked as well: a slew that would pass near the Sun goes via a safe
+     intermediate position (or the frame is skipped). At Start, frames that will be too close
+     to the Sun during the run are listed: Yes = shoot as planned, No = leave them out.
    • 'Start' asks first. Per frame: slew → rotator → settle → expose; NINA saves the FITS.
    • ⏸ PAUSE (red button) or Esc anywhere: stops slew, rotator and exposure at once and holds.
      'Resume' repeats the interrupted frame; 'Skip frame' skips it; 'End run' ends the run.
