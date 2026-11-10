@@ -942,10 +942,38 @@ class CaptureRunner:
         lst_at_slew = float(m["SiderealTime"])
         ra, dec = altaz_to_radec_j2000(alt, az, lat, lst_at_slew)
         self.emit("frame", index=i, status="slewing")
-        self.api.get("/equipment/mount/slew", ra=round(ra, 5), dec=round(dec, 5), waitForResult=False)
-        time.sleep(self.poll)
-        self._wait_until(lambda: not self.api.mount().get("Slewing"), self.slew_timeout, "the slew")
+        # NINA's own slew handling decides when the slew is over: the request waits for it, in a
+        # background thread, while this thread keeps checking for PAUSE / Stop (which stop the slew).
+        box = {}
+
+        def do_slew():
+            try:
+                box["r"] = self.api.get("/equipment/mount/slew", ra=round(ra, 5), dec=round(dec, 5),
+                                        waitForResult=True, timeout=self.slew_timeout + 15)
+            except NinaApiError as e:
+                box["e"] = e
+        th = threading.Thread(target=do_slew, daemon=True); th.start()
+        self._wait_until(lambda: not th.is_alive(), self.slew_timeout + 20, "the slew")
         self._check()                                   # a pause stops the slew: not an arrival
+        if "e" in box:
+            raise box["e"]
+        # some mounts report the end a moment early: wait until it is not slewing and stands still
+        last = [None]
+
+        def settled():
+            """Not slewing, and standing still: RA/Dec unchanged (tracking) or hour angle/Dec
+            unchanged (not tracking) since the previous check."""
+            mm = self.api.mount()
+            ra = float(mm.get("RightAscension") or 0) * 15.0; dec = float(mm.get("Declination") or 0)
+            ha = float(mm.get("SiderealTime") or 0) * 15.0 - ra
+            prev = last[0]; last[0] = (ra, ha, dec)
+            if prev is None or mm.get("Slewing"):
+                return False
+            k = math.cos(math.radians(dec))
+            d_ra = abs((ra - prev[0] + 180) % 360 - 180) * k
+            d_ha = abs((ha - prev[1] + 180) % 360 - 180) * k
+            return abs(dec - prev[2]) < 0.003 and min(d_ra, d_ha) < 0.003
+        self._wait_until(settled, 30, "the mount to stand still after the slew")
         m = self.api.mount()
         # arrival: compare RA/Dec of date (some drivers report alt/az poorly); recompute the target for
         # the current sidereal time, so a mount without tracking does not count as off target
