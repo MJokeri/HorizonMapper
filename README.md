@@ -6,8 +6,10 @@ Plans a NINA Advanced Sequencer run that photographs the sky around your horizon
 FITS frames into a measured NINA horizon file (`.hrz`).
 
 On both tabs the settings sit in a bar across the top and the picture fills the width below it.
-The bar scrolls sideways (mouse wheel or scrollbar) when the window is too narrow; the action
-buttons on its right (and the log on the Build tab) always stay visible.
+The bar scrolls sideways (mouse wheel or scrollbar) when the window is too narrow; the Plan
+buttons (and the log on the Build tab) on its right always stay visible. At start the window is made
+wide enough for all groups if the screen allows. Closing the window asks first if the horizon has
+not been saved since it was built or last edited.
 
 ## Install (Windows)
 
@@ -30,9 +32,9 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
     optional second file (for example an all-sky estimate) widens the strip to cover both, plus the
     margins. The first file is also filled in automatically on the Build tab.
   - **Extra frames at steep edges** (horizon mode): where the current horizon rises or drops more
-    steeply than **Steep = more than (°/°)** (default 3° altitude per 1° azimuth, about 72°), the strip
+    steeply than **Steep = more than (°/°)** (default 2° altitude per 1° azimuth, about 63°), the strip
     is widened sideways by this many frame widths on both sides and covers the whole height of the
-    jump. This images the sides of trees and roofs properly. Default 1; 0 = off; 2 for extra safety.
+    jump. This images the sides of trees and roofs properly. Default 0.5; 0 = off; 1–2 for extra safety.
     Fractions work too: with 0.5 a narrow edge strip is usually covered by two frames per row.
     Each extra frame width costs roughly 10–15% more frames with a typical tree line.
   - Frames are placed per row only over the stretches where the strip enters that row, using as
@@ -74,10 +76,10 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   - **Save fill-in sequence…** saves exactly the plan that is shown as a short NINA sequence.
   Shoot it, add its folder, and build again. Thanks to the cache, only the new frames are read.
   - **Fill-in: extra frames at steep edges** (above the buttons): every steep rise or drop of the new
-    horizon line (steeper than **steep = more than**, default 3°/°, and at least 2° high) gets a
+    horizon line (steeper than **steep = more than**, default 2°/°, and at least 2° high) gets a
     **Steep edge** area. It spans the jump (±1°) and this many frame widths to each side of it. Only
     frames over gaps in the mosaic are shot, so edges that are already imaged cost nothing.
-    Default 1, 0 = off. Both values are copied from the Plan tab's **Extra frames at steep edges**
+    Default 0.5, 0 = off. Both values are copied from the Plan tab's **Extra frames at steep edges**
     and **Steep = more than**, and follow changes made there; you can still change them here.
     Frames shared by overlapping areas are shot only once. CLI:
     `build … --fillin FILE.json --fillin-edge-frames N --fillin-edge-slope S`.
@@ -94,8 +96,8 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
 - **Side margin at steep edges** (in the toolbar above the image): where the horizon rises or drops steeply (the side of a tree, the
   end of a roof), the higher value is extended this many degrees sideways. That stops NINA
   starting a target that is still right next to the obstruction. Gentle slopes stay unchanged.
-  - "Steep" means more than the given degrees of altitude per degree of azimuth (default 3, about a
-    72° slope).
+  - "Steep" means more than the given degrees of altitude per degree of azimuth (default 2, about a
+    63° slope).
   - 1–2° is a sensible margin; 0 switches it off.
   - The lines on screen and the saved files include the margin.
 - **Editing the line:** above the image, choose **solid line** or **branches line**, then:
