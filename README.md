@@ -14,6 +14,20 @@ buttons (and the log on the Build tab) on its right always stay visible. At star
 wide enough for all groups if the screen allows. Closing the window asks first if the horizon has
 not been saved since it was built or last edited.
 
+## Debug log
+
+**Debug → Debug log (all actions)** writes everything the app does to a log file in
+`%LOCALAPPDATA%\HorizonMapper\logs\`, with millisecond times and the thread that did it:
+- every click and Esc press;
+- every NINA request with its timing and answer;
+- every step, wait, pause and state change of a capture run;
+- folder scans and redraw times;
+- errors, including ones the window would otherwise hide.
+
+A watchdog adds a line whenever the window is blocked for more than a second. **Debug → Open log
+folder** opens the folder. The setting is remembered; it is on by default during development.
+Please attach the log when reporting a problem.
+
 ## Install (Windows)
 
 **Easiest:** download `HorizonMapper-windows.zip` from the repository's

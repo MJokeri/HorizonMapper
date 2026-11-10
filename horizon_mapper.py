@@ -700,6 +700,67 @@ def save_plan(p, plan, path):
 
 
 # =============================================================================
+#  DEBUG LOG – every action, with timing and thread (menu: Debug → Debug log)
+# =============================================================================
+
+import logging
+
+_DBG = {"on": False, "logger": None, "path": None}
+
+
+def app_data_dir():
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    d = os.path.join(base, "HorizonMapper"); os.makedirs(d, exist_ok=True)
+    return d
+
+
+def load_settings():
+    try:
+        with open(os.path.join(app_data_dir(), "settings.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def save_settings(**kw):
+    st = load_settings(); st.update(kw)
+    try:
+        with open(os.path.join(app_data_dir(), "settings.json"), "w", encoding="utf-8") as fh:
+            json.dump(st, fh, indent=1)
+    except Exception:
+        pass
+
+
+def debug_enable(on=True):
+    """Switch the debug log on/off. The file goes to <app data>/logs/debug_<date_time>.log."""
+    _DBG["on"] = bool(on)
+    if on and _DBG["logger"] is None:
+        d = os.path.join(app_data_dir(), "logs"); os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, time.strftime("debug_%Y-%m-%d_%H%M%S.log"))
+        lg = logging.getLogger("horizonmapper.debug"); lg.setLevel(logging.DEBUG); lg.propagate = False
+        h = logging.FileHandler(path, encoding="utf-8")
+        h.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d [%(threadName)s] %(message)s", "%H:%M:%S"))
+        lg.addHandler(h)
+        _DBG["logger"], _DBG["path"] = lg, path
+        lg.debug(f"=== {APP_NAME} {APP_VERSION} debug log – Python {sys.version.split()[0]}, {sys.platform} ===")
+    if _DBG["logger"]:
+        _DBG["logger"].debug(f"debug log {'ON' if on else 'OFF'}")
+    return _DBG["path"]
+
+
+def dlog(msg):
+    if _DBG["on"] and _DBG["logger"] is not None:
+        try:
+            _DBG["logger"].debug(msg)
+        except Exception:
+            pass
+
+
+def dlog_exc(where):
+    dlog(f"EXCEPTION in {where}:\n{traceback.format_exc()}")
+
+
+# =============================================================================
 #  CAPTURE – drive NINA through its "Advanced API" plugin
 # =============================================================================
 
@@ -718,11 +779,21 @@ class NinaApi:
         import urllib.request, urllib.parse
         q = {k: (str(v).lower() if isinstance(v, bool) else v) for k, v in params.items() if v is not None}
         url = self.base + path + ("?" + urllib.parse.urlencode(q) if q else "")
+        t0 = time.time()
+        dlog(f"API → {path} {q if q else ''}")
         try:
             with urllib.request.urlopen(url, timeout=timeout or self.timeout) as r:
                 data = json.loads(r.read().decode("utf-8", "replace"))
         except Exception as e:                      # connection refused, timeout, HTTP error, bad JSON
+            dlog(f"API ✗ {path} after {time.time() - t0:.2f} s: {type(e).__name__}: {e}")
             raise NinaApiError(f"NINA API {path}: {e}") from e
+        if _DBG["on"]:
+            resp = data.get("Response")
+            if isinstance(resp, dict) and path == "/equipment/mount/info":
+                resp = {k: resp.get(k) for k in ("Slewing", "TrackingEnabled", "AtPark", "RightAscension",
+                                                 "Declination", "Altitude", "Azimuth", "SideOfPier")}
+            dlog(f"API ← {path} {time.time() - t0:.2f} s Success={data.get('Success')} "
+                 f"Error={data.get('Error')!r} Response={str(resp)[:200]}")
         if not data.get("Success", False):
             if data.get("Error"):
                 raise NinaApiError(f"NINA API {path}: {data['Error']}")
@@ -832,6 +903,7 @@ class CaptureRunner:
 
     def pause(self, reason="Paused by user"):
         """Stop all movement and exposure now and hold."""
+        dlog(f"runner.pause({reason!r}) called, state {self.state}")
         if self.state in ("done", "stopped"):
             return
         self.pause_reason = reason
@@ -843,21 +915,25 @@ class CaptureRunner:
                                                     " – mount, rotator and camera stopped."))
 
     def resume(self):
+        dlog(f"runner.resume() called, state {self.state}")
         if self._pause.is_set():
             self._pause.clear(); self._set_state("running")
             self.emit("log", msg=f"Resumed at frame {self.index + 1}.")
 
     def skip(self):
         """While paused: skip the current frame and continue with the next one when resumed."""
+        dlog(f"runner.skip() called at frame {self.index + 1}")
         self._skip.set()
 
     def stop(self):
+        dlog(f"runner.stop() called, state {self.state}")
         self._stop.set(); self._pause.clear()
         self.api.stop_all()
         self.emit("log", msg="Stopping: mount, rotator and camera stopped.")
 
     # ---------------------------------------------------------------- internals
     def _set_state(self, st):
+        dlog(f"runner state {self.state} → {st} (frame {self.index + 1})")
         self.state = st; self.emit("state", state=st)
 
     class _Interrupted(Exception):
@@ -868,6 +944,7 @@ class CaptureRunner:
 
     def _check(self):
         if self._interrupted():
+            dlog("step interrupted (pause/stop)")
             raise self._Interrupted()
 
     def _wait(self, seconds):
@@ -876,12 +953,15 @@ class CaptureRunner:
             self._check(); time.sleep(min(self.poll, max(end - time.time(), 0.01)))
 
     def _wait_until(self, cond, timeout, what):
-        end = time.time() + timeout
+        t0 = time.time(); end = t0 + timeout
+        dlog(f"waiting for {what} (timeout {timeout:.0f} s)")
         while True:
             self._check()
             if cond():
+                dlog(f"… {what}: done after {time.time() - t0:.1f} s")
                 return
             if time.time() > end:
+                dlog(f"… {what}: TIMEOUT after {timeout:.0f} s")
                 raise NinaApiError(f"timeout after {timeout:.0f} s waiting for {what}")
             time.sleep(self.poll)
 
@@ -934,6 +1014,7 @@ class CaptureRunner:
 
     def _frame(self, i, site):
         alt, az, _ = self.frames[i]
+        dlog(f"--- frame {i + 1}/{len(self.frames)}: alt {alt:.2f}°, az {az:.2f}°, rotator {self.rot[i]}")
         lat, lon = site
         if alt < self.floor - 1e-6:
             return "skipped", f"below the lowest altitude ({alt:.1f}° < {self.floor:.1f}°)"
@@ -1066,11 +1147,13 @@ class CaptureRunner:
             except self._Interrupted:
                 self.status[i] = "pending"; self.emit("frame", index=i, status="pending"); continue
             except NinaApiError as e:
+                dlog(f"frame {i + 1} error: {e}")
                 if self._interrupted():                     # caused by our own stop commands
                     self.status[i] = "pending"; self.emit("frame", index=i, status="pending"); continue
                 self.status[i] = "error"; self.emit("frame", index=i, status="error")
                 self.pause(f"error at frame {i + 1} – {e}"); continue
             except Exception as e:                      # unexpected: pause, never run on blindly
+                dlog_exc(f"frame {i + 1}")
                 self.status[i] = "error"; self.emit("frame", index=i, status="error")
                 self.pause(f"unexpected error at frame {i + 1} – {type(e).__name__}: {e}"); continue
             self.status[i] = st
@@ -1718,8 +1801,78 @@ def run_gui():
     except ImportError:
         ImageTk = None
 
+    debug_enable(load_settings().get("debug_log", True))      # on by default during development
+
+    # every button / check box / radio button click goes to the debug log
+    def _logged(cls, kind):
+        class Logged(cls):
+            def __init__(self, *a, **kw):
+                cmd = kw.get("command")
+                if callable(cmd):
+                    label = kw.get("text") or kind
+
+                    def wrapped(*ca, _cmd=cmd, _label=label):
+                        dlog(f"UI {kind}: {_label!r}")
+                        return _cmd(*ca)
+                    kw["command"] = wrapped
+                super().__init__(*a, **kw)
+        return Logged
+    ttk.Button = _logged(ttk.Button, "button"); ttk.Checkbutton = _logged(ttk.Checkbutton, "check")
+    ttk.Radiobutton = _logged(ttk.Radiobutton, "radio"); tk.Button = _logged(tk.Button, "button")
+
     root = tk.Tk()
     root.title(f"{APP_NAME}  v{APP_VERSION}")
+
+    def tk_error(exc, val, tb):
+        """Errors inside window callbacks: log them (the windowed exe has no console) and show them."""
+        msg = "".join(traceback.format_exception(exc, val, tb))
+        dlog(f"EXCEPTION in a window callback:\n{msg}")
+        try:
+            messagebox.showerror(APP_NAME, f"Unexpected error: {val}\n\nDetails are in the debug log.")
+        except Exception:
+            pass
+    root.report_callback_exception = tk_error
+    threading.excepthook = lambda a: dlog(f"EXCEPTION in thread {a.thread.name if a.thread else '?'}:\n"
+                                          + "".join(traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback)))
+
+    # Debug menu
+    menubar = tk.Menu(root); root.config(menu=menubar)
+    dbg_menu = tk.Menu(menubar, tearoff=False); menubar.add_cascade(label="Debug", menu=dbg_menu)
+    dbg_var = tk.BooleanVar(value=_DBG["on"])
+
+    def toggle_debug():
+        p = debug_enable(dbg_var.get()); save_settings(debug_log=dbg_var.get())
+        if dbg_var.get() and p:
+            messagebox.showinfo(APP_NAME, f"Debug log on:\n{p}")
+
+    def open_log_folder():
+        d = os.path.join(app_data_dir(), "logs"); os.makedirs(d, exist_ok=True)
+        try:
+            os.startfile(d)                                   # Windows
+        except Exception:
+            messagebox.showinfo(APP_NAME, d)
+    dbg_menu.add_checkbutton(label="Debug log (all actions)", variable=dbg_var, command=toggle_debug)
+    dbg_menu.add_command(label="Open log folder", command=open_log_folder)
+    dbg_menu.add_command(label="Show current log file", command=lambda: messagebox.showinfo(
+        APP_NAME, _DBG["path"] or "The debug log is off."))
+
+    # watchdog: notes in the debug log whenever the window was blocked for more than a second
+    ui_beat = {"t": time.time(), "doing": "idle"}
+
+    def heartbeat():
+        ui_beat["t"] = time.time(); root.after(200, heartbeat)
+
+    def watchdog():
+        warned = False
+        while True:
+            time.sleep(0.5)
+            gap = time.time() - ui_beat["t"]
+            if gap > 1.0 and not warned:
+                dlog(f"UI BLOCKED for {gap:.1f} s so far – busy with: {ui_beat['doing']}"); warned = True
+            elif gap <= 1.0 and warned:
+                dlog("UI responsive again"); warned = False
+    root.after(200, heartbeat)
+    threading.Thread(target=watchdog, daemon=True, name="watchdog").start()
     root.geometry("1600x900")
     nb = ttk.Notebook(root); nb.pack(fill="both", expand=True)
     scroll_panels = []          # (holder frame, canvas, scrollbar) of the settings bars
@@ -2750,7 +2903,7 @@ def run_gui():
             plan["grid"] = rows_of(plan["frames"])
         C["frames"] = list(plan["frames"]); C["plan"] = plan; C["source"] = label; C["params"] = p
         C["status"] = ["pending"] * len(C["frames"]); C["runner"] = None; C["cur"] = None
-        C["thumbs"] = {}; C["paths"] = {}
+        C["thumbs"] = {}; C["paths"] = {}; C["photo_cache"] = {}
         try:
             ex = float(cv_["exposure"].get())
         except ValueError:
@@ -2789,7 +2942,7 @@ def run_gui():
         threading.Thread(target=job, daemon=True).start()
 
     def cap_rethumb():
-        C["thumbs"] = {}
+        C["thumbs"] = {}; C["photo_cache"] = {}
         for i, pth in list(C.get("paths", {}).items()):
             cap_thumb(i, pth)
         draw_cap()
@@ -2862,7 +3015,7 @@ def run_gui():
                                              "(Use PAUSE instead if you want to continue later.)"):
                 threading.Thread(target=r.stop, daemon=True).start()
 
-    root.bind_all("<Escape>", lambda e: cap_pause("Esc pressed"), add="+")
+    root.bind_all("<Escape>", lambda e: (dlog("UI key: Esc"), cap_pause("Esc pressed")), add="+")
 
     def waiting_frames():
         r = C["runner"]
@@ -2893,6 +3046,7 @@ def run_gui():
         if C.get("scanning"):
             return
         C["scanning"] = True; C["seen"] = {}
+        C["folder_snap"] = cv_["folder"].get()          # read here: background threads never touch Tk
 
         def job():
             idle_until = None
@@ -2911,10 +3065,11 @@ def run_gui():
                         break
                 if wait:
                     try:
-                        hits = match_late_files(cv_["folder"].get(), r.frames, wait, r.names,
+                        hits = match_late_files(C["folder_snap"], r.frames, wait, r.names,
                                                 since=r.t_start - 120, seen=C["seen"])
                     except Exception as e:
                         hits = {}; C["q"].put(("log", f"Folder scan failed: {e}"))
+                    dlog(f"folder scan: {len(wait)} frames waiting, {len(hits)} files found")
                     for i, pth in hits.items():
                         C["q"].put(("late_file", (i, pth)))
                 time.sleep(4.0)
@@ -2935,10 +3090,17 @@ def run_gui():
         clog_add(msg.replace("\n", " ")); cap_buttons(r.state)
         messagebox.showinfo(APP_NAME, msg)
 
+    def request_draw():
+        C["dirty"] = True
+
     def cap_poll():
+        """Handle events from the worker threads – for at most ~80 ms per tick so the window stays
+        responsive (PAUSE must always work), and redraw the picture at most ~4 times a second."""
+        t0 = time.time(); n = 0
         try:
-            while True:
-                kind, val = C["q"].get_nowait()
+            while time.time() - t0 < 0.08:
+                kind, val = C["q"].get_nowait(); n += 1
+                ui_beat["doing"] = f"capture event {kind}"
                 if kind == "connected":
                     ver, folder, ftype, parts = val
                     conn_lbl.config(text=f"Advanced API {ver}: " + ", ".join(parts))
@@ -2956,7 +3118,10 @@ def run_gui():
                 elif kind == "thumb":
                     i, th, im = val
                     if i < len(C["frames"]):
-                        C.setdefault("thumbs", {})[i] = (th, im); draw_cap()
+                        C.setdefault("thumbs", {})[i] = (th, im)
+                        for key in [k_ for k_ in C.get("photo_cache", {}) if k_[0] == i]:
+                            del C["photo_cache"][key]
+                        request_draw()
                 elif kind == "log":
                     clog_add(val)
                 elif kind == "late_file":
@@ -2996,12 +3161,21 @@ def run_gui():
                         if d["status"] in ("slewing", "rotating", "exposing"):
                             alt, az, _ = C["frames"][i]
                             cap_status.config(text=f"Frame {i + 1}/{n}: {d['status']} – alt {alt:.1f}°, az {az:.1f}°")
-                        draw_cap()
+                        request_draw()
                     elif k == "done":
                         cap_finished(d.get("ok", False))
         except queue.Empty:
             pass
-        root.after(150, cap_poll)
+        except Exception:
+            dlog_exc("cap_poll")
+        if n:
+            dlog(f"UI handled {n} capture events in {time.time() - t0:.3f} s" + (" – more queued" if not C["q"].empty() else ""))
+        if C.get("dirty") and time.time() - C.get("last_draw", 0) > 0.25:
+            C["dirty"] = False; ui_beat["doing"] = "drawing the capture picture"
+            t1 = time.time(); draw_cap(); C["last_draw"] = time.time()
+            dlog(f"capture picture drawn in {C['last_draw'] - t1:.3f} s ({len(C.get('thumbs', {}))} previews)")
+        ui_beat["doing"] = "idle"
+        root.after(50 if not C["q"].empty() else 150, cap_poll)
     cap_poll()
 
     STATUS_COL = {"pending": "#4a7bd0", "slewing": "#f9a825", "rotating": "#f9a825", "exposing": "#f9a825",
@@ -3011,6 +3185,8 @@ def run_gui():
         """Like the Plan preview (strip, horizon, frames, shooting order) plus each frame's state;
         finished frames are shown in their slots."""
         ccan.delete("all"); C["photos"] = []
+        if len(C.setdefault("photo_cache", {})) > 3000:      # zoom levels pile up: start afresh
+            C["photo_cache"] = {}
         W = ccan.winfo_width() or 900; H = ccan.winfo_height() or 400
         x0, y0, x1, y1 = 50, 20, W - 15, H - 30
         az0, az1, h0, h1 = C["view"]; C["box"] = (x0, y0, x1, y1)
@@ -3053,7 +3229,10 @@ def run_gui():
                         ty0, ty1 = Y(t["alt1"]), Y(t["alt0"])
                         wpx, hpx = int(round(tx1 - tx0)), int(round(ty1 - ty0))
                         if 2 <= wpx <= 4000 and 2 <= hpx <= 4000:
-                            ph = ImageTk.PhotoImage(im.resize((wpx, hpx)))
+                            key = (i, wpx, hpx)                     # re-use the resized preview
+                            ph = C["photo_cache"].get(key)
+                            if ph is None:
+                                ph = C["photo_cache"][key] = ImageTk.PhotoImage(im.resize((wpx, hpx)))
                             C["photos"].append(ph)
                             ccan.create_image(tx0, ty0, image=ph, anchor="nw")
                     col = STATUS_COL.get(st, "#4a7bd0")
@@ -3201,6 +3380,11 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
      for 10 minutes after the run.
    • At the end the list of files is added to the Build tab ('Start' again can continue a
      stopped run).
+
+DEBUG MENU
+   • 'Debug log (all actions)' writes every click, NINA request (with timing and answer), capture
+     step, pause, error and window stall to %LOCALAPPDATA%\\HorizonMapper\\logs. On by default
+     for now. 'Open log folder' opens it – please attach the log when reporting a problem.
 
 3. Build horizon
    • Add the folder(s) with the frames. NINA's headers provide pointing (CENTALT/CENTAZ),
