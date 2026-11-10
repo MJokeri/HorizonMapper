@@ -29,7 +29,10 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
     steeply than **Steep = more than (°/°)** (default 3° altitude per 1° azimuth, about 72°), the strip
     is widened sideways by this many frame widths on both sides and covers the whole height of the
     jump. This images the sides of trees and roofs properly. Default 1; 0 = off; 2 for extra safety.
+    Fractions work too: with 0.5 a narrow edge strip is usually covered by two frames per row.
     Each extra frame width costs roughly 10–15% more frames with a typical tree line.
+  - Frames are placed per row only over the stretches where the strip enters that row, using as
+    few frames as the overlap allows. Every point of the strip is still covered.
   - **Lowest altitude** sets a floor for the strip. Keep it well above the sun when you shoot by day
     (use **Sun check**).
 - **Rotator:** keeps every frame level, so 10% overlap is enough.

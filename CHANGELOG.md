@@ -7,7 +7,13 @@
   (threshold **Steep = more than**, default 3° altitude per degree of azimuth), the planned strip is
   widened sideways by the chosen number of frame widths (default 1, 0 = off) and spans the full
   height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With the Tikankuja horizon,
-  0 / 1 / 2 extra frames give 647 / 733 / 819 frames.
+  0 / 0.5 / 1 / 2 extra frames give 569 / 611 / 650 / 739 frames.
+- **Plan tab – fewer frames:** each row now places its frames only over the stretches where the
+  strip enters that row's altitude zone, as few as the overlap allows. Before, frames sat on a fixed
+  grid and every grid frame that touched the strip was kept, so a narrow strip (for example with
+  0.5 extra frames at a steep edge) often got three frames where two cover it. Horizon plans need
+  10–13% fewer frames (Tikankuja: 647 → 569 without extra edge frames); full-circle band plans are
+  unchanged. Coverage was checked on a 0.2° grid: no gaps.
 - **Build tab – Generate fill-in frames / Save fill-in sequence…:** generating and saving are
   separate buttons. Generate draws the plan and logs a summary; Save writes exactly the plan shown.
 - **Build tab – Fill-in: extra frames at steep edges:** the same idea for the fill-in frames.
