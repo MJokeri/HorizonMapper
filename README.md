@@ -55,7 +55,8 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   is drawn in yellow, used for the usable-sky comparison, and used for any azimuths that weren't
   imaged.
 - Click **Build mosaic & horizon**.
-- **Save horizon file…** saves one NINA `.hrz` file. Choose the line next to the button:
+- **Save horizon file…** (below the fill-in buttons) saves one NINA `.hrz` file. Choose the line next
+  to the button:
   - **solid:** trees, roofs and walls
   - **with branches:** also avoids thin bare branches
 
@@ -74,6 +75,10 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
     and **Steep = more than**, and follow changes made there; you can still change them here.
     Frames shared by overlapping areas are shot only once. CLI:
     `build … --fillin FILE.json --fillin-edge-frames N --fillin-edge-slope S`.
+  - **Fill-in: horizon line near gaps within (°)**: wherever the solid or branches line runs through
+    a spot without pictures, or comes within this many degrees of one, a **Gap** area is added there,
+    whether or not the horizon is steep. Only frames over the gap are shot. Default 1°, 0 = off.
+    CLI: `--fillin-gap-near D`.
 - **Show fill-in frames** (toolbar above the image) draws the fill-in areas (dashed magenta), their
   frames (orange) and the shooting order: a path from green (first) to magenta (last), with the first
   frame of each row numbered (every frame at zoom 20). After you edit the lines or change the

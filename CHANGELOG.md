@@ -21,6 +21,10 @@
   spanning the jump and the chosen number of frame widths to each side; only frames over gaps in
   the mosaic are shot. The fields below the button take their values from the Plan tab and follow
   changes made there. CLI: `build --fillin-edge-frames N --fillin-edge-slope S`.
+- **Build tab – Fill-in: horizon line near gaps within (°):** wherever the solid or branches line
+  runs through a spot without pictures, or comes within this distance of one (default 1°), a **Gap**
+  area is added, whether or not the horizon is steep there. Only frames over the gap are shot.
+  CLI: `build --fillin-gap-near D`.
 - **Build tab – Show fill-in frames:** draws the fill-in areas, their frames and the shooting order
   on the horizon image, updating live.
 - **Plan tab – Show shooting order:** the preview shows the order of frames as a colour-graded path
@@ -35,6 +39,8 @@
 - Fill-in frames shared by overlapping areas are now shot only once.
 
 ### Changed
+- **Build tab:** **Save horizon file…** and its solid / with branches choice moved below the fill-in
+  buttons, so the order follows the workflow: build, fill in, save.
 - **Side margin at steep edges:** the setting and its steepness threshold moved from the Build tab's
   Settings box to the toolbar directly above the image, as spin boxes. The lines on screen update as
   you change them. On smaller screens the old place could be cut off and hard to find.
