@@ -83,8 +83,9 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
   - Frames are placed per row only over the stretches where the strip enters that row, using as
     few frames as the overlap allows. Every point of the strip is still covered.
   - **Lowest altitude** sets a floor for the strip. Keep it well above the sun when you shoot by day.
-- **The Sun in the preview:** enter **Start time (HH:MM)** (blank = now) and **Sun distance (°)**
-  (default 30) under the Plan buttons; the longitude is the one next to **Sun check**. The preview
+- **The Sun in the preview:** enter **Start date** and **Start time (HH:MM)**, plus **Sun distance
+  (°)** (default 30), under the Plan buttons. The date can be `2026-11-12`, `12.11.2026` or
+  `12.11.` (this year); blank means today, and a blank time means the current time of day; the longitude is the one next to **Sun check**. The preview
   then draws:
   - the Sun at the start (filled) and at the plan's estimated end (ring), with its track between;
   - the keep-away zone around both;

@@ -33,7 +33,8 @@
   loaded capture is resumed simply by pressing Start.
 - Choosing a frame source shows its frames at once; a fresh Start uses the source as it is then.
 - **Sun safety, beyond single frames:**
-  - **Plan preview:** shows the Sun's track from the chosen start time to the plan's estimated end,
+  - **Plan preview:** shows the Sun's track from the chosen start date and time to the plan's
+    estimated end,
     with the keep-away zone. Frames that would be too close when their turn comes are red; slews
     passing near the Sun get a red ×.
   - **Capture Start:** times the frames through the run and lists any frames or slews that would
