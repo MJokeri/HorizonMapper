@@ -9,10 +9,10 @@
   height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With the Tikankuja horizon,
   0 / 1 / 2 extra frames give 647 / 733 / 819 frames.
 - **Build tab – Fill-in: extra frames at steep edges:** the same idea for **Plan fill-in frames…**.
-  Fields below the button set the number of extra frame widths (default 1, 0 = off) and the
-  steepness threshold. A fill-in area whose side lies at a steep rise or drop of the measured
-  (and edited) horizon is extended sideways, keeping its altitude range; it is labelled
-  "+ steep edge". CLI: `build --fillin-edge-frames N --fillin-edge-slope S`.
+  Every steep rise or drop of the new horizon line (at least 2° high) gets a **Steep edge** area
+  spanning the jump and the chosen number of frame widths to each side; only frames over gaps in
+  the mosaic are shot. The fields below the button take their values from the Plan tab and follow
+  changes made there. CLI: `build --fillin-edge-frames N --fillin-edge-slope S`.
 - **Build tab – Show fill-in frames:** draws the fill-in areas, their frames and the shooting order
   on the horizon image, updating live.
 - **Plan tab – Show shooting order:** the preview shows the order of frames as a colour-graded path

@@ -60,10 +60,12 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
 - Azimuths reported as **clear to bottom** or **blocked to top** reached the edge of the imaged area.
   **Plan fill-in frames…** turns them into a short NINA sequence. Shoot it, add its folder, and build
   again. Thanks to the cache, only the new frames are read.
-  - **Fill-in: extra frames at steep edges** (below the button): when a fill-in area ends at a steep
-    rise or drop of the measured horizon (steeper than **steep = more than**, default 3°/°), that side
-    is extended by this many frame widths, keeping its altitude range (the main run already imaged
-    the rest of the jump). Default 1, 0 = off. Areas widened this way are labelled "+ steep edge".
+  - **Fill-in: extra frames at steep edges** (below the button): every steep rise or drop of the new
+    horizon line (steeper than **steep = more than**, default 3°/°, and at least 2° high) gets a
+    **Steep edge** area. It spans the jump (±1°) and this many frame widths to each side of it. Only
+    frames over gaps in the mosaic are shot, so edges that are already imaged cost nothing.
+    Default 1, 0 = off. Both values are copied from the Plan tab's **Extra frames at steep edges**
+    and **Steep = more than**, and follow changes made there; you can still change them here.
     Frames shared by overlapping areas are shot only once. CLI:
     `build … --fillin FILE.json --fillin-edge-frames N --fillin-edge-slope S`.
 - **Show fill-in frames** (toolbar above the image) draws the fill-in areas (dashed magenta), their
