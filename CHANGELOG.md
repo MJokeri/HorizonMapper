@@ -1,6 +1,70 @@
 # Changelog
 
-## Unreleased
+## 1.0.1 – 2026-11-09
+
+### Added
+- **Plan tab – Extra frames at steep edges:** where the current horizon rises or drops steeply
+  (threshold **Steep = more than**, default 2° altitude per degree of azimuth), the planned strip is
+  widened sideways by the chosen number of frame widths (default 0.5, 0 = off) and spans the full
+  height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With the sample site horizon,
+  0 / 0.5 / 1 / 2 extra frames give 569 / 638 / 713 / 873 frames (steep = 2°/°).
+- **Plan tab – fewer frames:** each row now places its frames only over the stretches where the
+  strip enters that row's altitude zone, as few as the overlap allows. Before, frames sat on a fixed
+  grid and every grid frame that touched the strip was kept, so a narrow strip (for example with
+  0.5 extra frames at a steep edge) often got three frames where two cover it. Horizon plans need
+  10–13% fewer frames (sample site: 647 → 569 without extra edge frames); full-circle band plans are
+  unchanged. Coverage was checked on a 0.2° grid: no gaps.
+- **Build tab – Generate fill-in frames / Save fill-in sequence…:** generating and saving are
+  separate buttons. Generate draws the plan and logs a summary; Save writes exactly the plan shown.
+- **Build tab – Fill-in: extra frames at steep edges:** the same idea for the fill-in frames.
+  Every steep rise or drop of the new horizon line (at least 2° high) gets a **Steep edge** area
+  spanning the jump and the chosen number of frame widths to each side; only frames over gaps in
+  the mosaic are shot. The fields below the button take their values from the Plan tab and follow
+  changes made there. CLI: `build --fillin-edge-frames N --fillin-edge-slope S`.
+- **Build tab – Fill-in: horizon line near gaps within (°):** wherever the solid or branches line
+  runs through a spot without pictures, or comes within this distance of one (default 1°), a **Gap**
+  area is added, whether or not the horizon is steep there. Only frames over the gap are shot.
+  CLI: `build --fillin-gap-near D`.
+- **Build tab – Show fill-in frames:** draws the fill-in areas, their frames and the shooting order
+  on the horizon image, updating live.
+- **Plan tab – Show shooting order:** the preview shows the order of frames as a colour-graded path
+  (green = first → magenta = last) with row numbers, Start/End and the meridian flip.
+
+- **Mouse zoom:** the wheel zooms the Plan preview (drag moves it, double-click shows the whole sky)
+  and the Build tab image (around the pointer, 2–24 px/°; Shift+wheel or middle-drag moves it)
+  instead of scrolling sideways.
+- **Settings bar at the top:** on both tabs the settings are grouped in a horizontal bar across the
+  top and the picture fills the full width below it (it is always wider than high). The bar scrolls
+  sideways when the window is too narrow; the action buttons (and the Build tab's log) on its right
+  stay visible. Long groups were split into short columns; the default window is 1600×900.
+
+- **Exit check:** closing the window asks for confirmation if the horizon has not been saved since
+  it was built or last edited.
+- **Window size:** at start the window is made wide enough for all settings groups, as far as the
+  screen allows.
+
+### Fixed
+- Plan preview: a frame lying across 0°/360° was drawn as a box across the whole preview.
+- Fill-in areas are checked against the solid and branches lines (with edits). Before, the detector's
+  raw "blocked to top" flags also fired on dark frame edges high in the sky that the lines had
+  rejected, which planned many useless frames at the top of the imaged area.
+- The fill-in overlay now always follows the settings and line edits: the plan is generated again
+  and redrawn after every change, and errors are written to the log instead of failing silently.
+- Fill-in frames shared by overlapping areas are now shot only once.
+
+### Changed
+- Defaults: **Extra frames at steep edges** 0.5 (was 1) and **Steep = more than** 2°/° (was 3), on the
+  Plan tab, for fill-in and in the CLI; the Build toolbar's side-margin steepness is also 2.
+- **Build tab:** the **Build** group (Build mosaic & horizon, Re-detect, progress) sits in the settings
+  bar between **Current horizon** and **Fill-in frames**; only the log stays fixed on the right.
+- **Build tab:** **Save horizon file…** and its solid / with branches choice moved below the fill-in
+  buttons, so the order follows the workflow: build, fill in, save.
+- **Side margin at steep edges:** the setting and its steepness threshold moved from the Build tab's
+  Settings box to the toolbar directly above the image, as spin boxes. The lines on screen update as
+  you change them. On smaller screens the old place could be cut off and hard to find.
+- The window title shows the version number, so you can tell which build you are running.
+
+## 1.0.0 – 2026-11-09
 
 ### Added
 - **Plan fill-in frames:** finds the azimuths whose horizon reached the edge of the imaged area

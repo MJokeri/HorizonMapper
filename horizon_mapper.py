@@ -22,6 +22,7 @@ except ImportError:  # GUI will complain later
     Image = None
 
 APP_NAME = "Horizon Mapper for NINA"
+APP_VERSION = "1.0.1"
 
 # =============================================================================
 #  Small numeric helpers (no scipy needed)
@@ -162,6 +163,8 @@ class PlanParams:
         self.horizon_files = []       # 1 or 2 files for mode "horizon"
         self.margin_below = 4.0; self.margin_above = 4.0
         self.floor = 20.0; self.ceiling = 85.0
+        self.edge_frames = 0.5        # extra frame widths beside steep horizon edges (0 = off)
+        self.edge_slope = 2.0         # "steep" = more than this many deg altitude per deg azimuth
         self.overlap = 0.10
         # rotator
         self.rotator = True; self.rot_offset = -58.04; self.rot_sign = 1; self.rot_tolerance = 3.0
@@ -238,14 +241,44 @@ def _expose(ids, pid, p):
 
 
 def band_limits(p):
-    """Return function az -> (lo, hi) of the strip to image."""
-    if p.mode == "horizon" and p.horizon_files:
-        hz = [load_hrz(f) for f in p.horizon_files]
-        def f(az):
-            v = [hrz_alt(h, az) for h in hz]
-            return max(min(v) - p.margin_below, p.floor), min(max(v) + p.margin_above, p.ceiling)
-        return f
-    return lambda az: (max(p.alt_min, p.floor), min(p.alt_max, p.ceiling))
+    """Return function az -> (lo, hi) of the strip to image.
+
+    In horizon mode the strip follows the current horizon (and an optional second file) with
+    margins. Where a horizon rises or drops more steeply than `p.edge_slope`, the strip is
+    widened sideways by `p.edge_frames` frame widths and spans the whole height of the jump,
+    so both sides of tree and roof edges are imaged.
+    """
+    if not (p.mode == "horizon" and p.horizon_files):
+        return lambda az: (max(p.alt_min, p.floor), min(p.alt_max, p.ceiling))
+    hz = [load_hrz(f) for f in p.horizon_files]
+    step = 0.25
+    grid = np.arange(0, 360, step)
+    vals = np.array([[hrz_alt(h, a) for a in grid] for h in hz])          # (files, n)
+    lo = vals.min(0) - p.margin_below
+    hi = vals.max(0) + p.margin_above
+    if p.edge_frames > 0:
+        fw = max(p.fov)            # wider side: safe whichever way the camera is turned
+        n = len(grid)
+        lo_new, hi_new = lo.copy(), hi.copy()
+        for v in vals:
+            slope = np.abs(np.roll(v, -1) - v) / step
+            for i in np.where(slope >= p.edge_slope)[0]:
+                j = (i + 1) % n
+                top = max(v[i], v[j]) + p.margin_above
+                bot = min(v[i], v[j]) - p.margin_below
+                w = p.edge_frames * fw / max(math.cos(math.radians(min(top, 80.0))), 0.17)
+                k = int(math.ceil(w / step))
+                idx = np.arange(i - k, j + k + 1) % n
+                lo_new[idx] = np.minimum(lo_new[idx], bot)
+                hi_new[idx] = np.maximum(hi_new[idx], top)
+        lo, hi = lo_new, hi_new
+    lo = np.maximum(lo, p.floor); hi = np.minimum(hi, p.ceiling)
+
+    def f(az):
+        x = (az % 360) / step
+        i0 = int(math.floor(x)) % len(grid); i1 = (i0 + 1) % len(grid); t = x - math.floor(x)
+        return lo[i0] * (1 - t) + lo[i1] * t, hi[i0] * (1 - t) + hi[i1] * t
+    return f
 
 
 def _effective_fov(w, h, tilt):
@@ -269,24 +302,59 @@ def _grid(p, fw, fh, lim):
     else:
         lo, hi = amin + fh / 2, amax - fh / 2
         rows = [lo + i * (hi - lo) / (n_rows - 1) for i in range(n_rows)]
+    # Each row is responsible for its own altitude zone (half-way to the neighbouring rows; the
+    # outer rows reach their frame edge). The zones together cover [amin, amax], and every frame
+    # covers its row's whole zone, so a row only needs frames where the strip enters its zone.
+    zones = []
+    for i, alt in enumerate(rows):
+        z0 = alt - fh / 2 if i == 0 else (rows[i - 1] + alt) / 2
+        z1 = alt + fh / 2 if i == len(rows) - 1 else (alt + rows[i + 1]) / 2
+        zones.append((z0, z1))
+    ds = 0.25                                                    # azimuth sampling step
+    ns = int(round(span_az / ds))
+    e_lim = [lim(p.az_start + k * ds) for k in range(ns + 1)]   # cell edges
+    c_lim = [lim(p.az_start + (k + 0.5) * ds) for k in range(ns)]  # cell centres
+    s_lim = [(min(e_lim[k][0], c_lim[k][0], e_lim[k + 1][0]), max(e_lim[k][1], c_lim[k][1], e_lim[k + 1][1]))
+             for k in range(ns)]                                 # strip extent within each cell
     grid = []
-    for alt in rows:
+    for alt, (z0, z1) in zip(rows, zones):
         low_edge = max(alt - fh / 2, 0.0)
-        cov = fw / max(math.cos(math.radians(low_edge)), 1e-3)
+        cov = fw / max(math.cos(math.radians(low_edge)), 1e-3)   # narrowest azimuth width of the frame
         stp = cov * (1 - p.overlap)
-        if full:
-            n = math.ceil(360 / stp); azs = [p.az_start + k * 360 / n for k in range(n)]
-        else:
-            n = 1 if span_az <= cov else math.ceil((span_az - cov) / stp) + 1
-            a0 = p.az_start + cov / 2; a1 = p.az_start + span_az - cov / 2
-            azs = [a0 + k * (a1 - a0) / max(n - 1, 1) for k in range(n)] if n > 1 else [p.az_start + span_az / 2]
-        keep = []
-        for az in azs:
-            los, his = zip(*[lim(az + cov / 2 * k / 4) for k in range(-4, 5)])
-            if alt + fh / 2 >= min(los) and alt - fh / 2 <= max(his):
-                keep.append(az % 360)
-        if keep:
-            grid.append((alt, sorted(keep)))
+        need = [lo_ < z1 and hi_ > z0 for lo_, hi_ in s_lim]
+        if not any(need):
+            continue
+        if all(need) and full:
+            n = math.ceil(360 / stp)
+            grid.append((alt, sorted((p.az_start + k * 360 / n) % 360 for k in range(n)))); continue
+        # contiguous needed stretches [start, end) in degrees from az_start (joined across 0/360)
+        runs = []; k = 0
+        while k < ns:
+            if need[k]:
+                j = k
+                while j < ns and need[j]:
+                    j += 1
+                runs.append([k * ds, j * ds]); k = j
+            else:
+                k += 1
+        if full and len(runs) > 1 and runs[0][0] == 0 and runs[-1][1] >= span_az - 1e-9:
+            last = runs.pop(); runs[0][0] = last[0] - 360
+        count = lambda L: 1 if L <= cov else math.ceil((L - cov) / stp) + 1
+        merged = []
+        for r in runs:      # join neighbouring stretches when that needs no more frames
+            if merged and count(r[1] - merged[-1][0]) <= count(merged[-1][1] - merged[-1][0]) + count(r[1] - r[0]):
+                merged[-1][1] = r[1]
+            else:
+                merged.append(list(r))
+        azs = []
+        for s0, s1 in merged:
+            s0 -= 0.05; s1 += 0.05                               # small safety margin at the ends
+            L = s1 - s0; n = count(L)
+            if n == 1:
+                azs.append(s0 + L / 2)
+            else:
+                azs += [s0 + cov / 2 + i * (L - cov) / (n - 1) for i in range(n)]
+        grid.append((alt, sorted((p.az_start + a) % 360 for a in azs)))
     if p.meridian_split:
         east = [(a, [z for z in zs if z < 180]) for a, zs in grid]
         west = [(a, [z for z in zs if z >= 180]) for a, zs in reversed(grid)]
@@ -335,10 +403,25 @@ def assign_rotator(p, grid, orient="landscape"):
     return frames, rot_moves
 
 
-def fillin_boxes(det, extra_below=8.0, extra_above=6.0, floor=0.0, ceiling=85.0, pad_az=1.0):
-    """Turn 'clear to bottom' / 'blocked to top' azimuths into (az0, az1, alt0, alt1, label) boxes."""
+def fillin_boxes(det, extra_below=8.0, extra_above=6.0, floor=0.0, ceiling=85.0, pad_az=1.0,
+                 lines=None, tol=1.0):
+    """Turn 'clear to bottom' / 'blocked to top' azimuths into (az0, az1, alt0, alt1, label) boxes.
+
+    `lines` = (az, solid, branches): the final (possibly edited) horizon lines. When given, an
+    azimuth only counts if the lines really reach the edge of the imaged area there: the higher
+    line within `tol` degrees of the top for 'blocked to top', the lower line within `tol` of the
+    bottom for 'clear to bottom'. The detector's raw flags also fire on dark frame edges high in
+    the sky that the solid/branches lines have already rejected.
+    """
+    def keep(o):
+        if lines is None:
+            return True
+        laz, ls, lb = (np.asarray(x, float) for x in lines)
+        top_ = max(np.interp(o["az"], laz, ls, period=360), np.interp(o["az"], laz, lb, period=360))
+        bot_ = min(np.interp(o["az"], laz, ls, period=360), np.interp(o["az"], laz, lb, period=360))
+        return top_ >= o["hi"] - tol if o["flag"] == "blocked_to_top" else bot_ <= o["lo"] + tol
     items = sorted((o["az"], o["flag"], o["lo"], o["hi"]) for o in det["details"]
-                   if o["flag"] in ("clear_to_bottom", "blocked_to_top"))
+                   if o["flag"] in ("clear_to_bottom", "blocked_to_top") and keep(o))
     groups = []
     for az, flag, lo, hi in items:
         if groups and groups[-1]["flag"] == flag and az - groups[-1]["az1"] <= 1.01:
@@ -370,8 +453,168 @@ def fillin_boxes(det, extra_below=8.0, extra_above=6.0, floor=0.0, ceiling=85.0,
     return boxes
 
 
-def plan_fillin(p, boxes):
-    """Plan frames covering the given boxes (az0, az1, alt0, alt1, label)."""
+def steep_edge_boxes(az, lines, frame_w, edge_frames=1.0, edge_slope=3.0, min_jump=2.0,
+                     margin=1.0, floor=0.0, ceiling=85.0):
+    """Fill-in areas around the steep rises and drops of the measured horizon line(s).
+
+    For every run of the line steeper than `edge_slope` (deg altitude per deg azimuth) whose
+    total jump is at least `min_jump` degrees, an area is made that spans the jump in altitude
+    (plus `margin`) and reaches `edge_frames` frame widths (scaled by 1/cos(alt)) to both sides.
+    Areas from the different lines that overlap are merged. Returns (az0, az1, alt0, alt1, label).
+    """
+    if edge_frames <= 0:
+        return []
+    az = np.asarray(az, float); n = len(az)
+    step = float(np.median(np.diff(az))) if n > 1 else 0.5
+    raw = []
+    for v in lines:
+        v = np.asarray(v, float)
+        steep = np.abs(np.roll(v, -1) - v) / step >= edge_slope           # segment i -> i+1
+        i = 0
+        while i < n:
+            if not steep[i]:
+                i += 1; continue
+            j = i
+            while j + 1 < n and steep[j + 1] and np.sign(v[(j + 2) % n] - v[j + 1]) == np.sign(v[(i + 1) % n] - v[i]):
+                j += 1                                          # same direction: one rise or one drop
+            seg = v[np.arange(i, j + 2) % n]
+            bot, top = float(seg.min()), float(seg.max())
+            if top - bot >= min_jump:
+                w = edge_frames * frame_w / max(math.cos(math.radians(min(top + margin, 80.0))), 0.17)
+                raw.append([az[i] - w, az[(j + 1) % n] + (360 if j + 1 >= n else 0) + w,
+                            max(floor, bot - margin), min(ceiling, top + margin)])
+            i = j + 2
+    raw.sort(key=lambda r: r[0])
+    merged = []      # only identical edges (seen on both lines) are merged; frames shared by
+    for r in raw:    # neighbouring areas are planned once by plan_fillin
+        m = merged[-1] if merged else None
+        if m and abs(r[0] - m[0]) < 1.0 and abs(r[1] - m[1]) < 1.0:
+            m[0] = min(m[0], r[0]); m[1] = max(m[1], r[1]); m[2] = min(m[2], r[2]); m[3] = max(m[3], r[3])
+        else:
+            merged.append(list(r))
+    return [(a0, a1, h0, h1, f"Steep edge Az {a0 % 360:.0f}-{a1 % 360:.0f} ({h0:.0f}-{h1:.0f}°)")
+            for a0, a1, h0, h1 in merged if h1 > h0]
+
+
+def gap_boxes(mos, az, lines, near=1.0, min_gap=0.02, pad_az=0.5, floor=0.0, ceiling=85.0,
+              names=("solid", "branches")):
+    """Fill-in areas where a horizon line runs through, or within `near` degrees of, a spot of the
+    mosaic without pictures (inside the mosaic or past its edge).
+
+    For every azimuth sample and line, the box line ± `near` (altitude) × ± `near`/cos(alt)
+    (azimuth) is checked; if more than `min_gap` of it has no data, the sample is marked.
+    Neighbouring marked samples (within 1°) form one area around that stretch of the line.
+    """
+    if near <= 0 or mos is None:
+        return []
+    M = mos["M"]; res = mos["res"]; a0 = mos["alt0"]; NH, NA = M.shape
+    az = np.asarray(az, float)
+    boxes = []
+    for v, name in zip(lines, names):
+        v = np.asarray(v, float)
+        bad = np.zeros(len(az), bool)
+        for i, (a, h) in enumerate(zip(az, v)):
+            hw = near / max(math.cos(math.radians(min(h, 80.0))), 0.17)
+            rs = np.floor((np.linspace(h - near, h + near, 9) - a0) / res).astype(int)
+            cs = np.floor((np.linspace(a - hw, a + hw, 9) % 360) / 360 * NA).astype(int) % NA
+            inside = (rs >= 0) & (rs < NH)
+            vals = M[np.ix_(rs[inside], cs)]
+            missing = (~inside).sum() * len(cs) + (~np.isfinite(vals)).sum()
+            bad[i] = missing / (len(rs) * len(cs)) > min_gap
+        idx = np.where(bad)[0]
+        if not len(idx):
+            continue
+        step = float(np.median(np.diff(az))) if len(az) > 1 else 0.5
+        groups = [[idx[0], idx[0]]]
+        for k in idx[1:]:
+            if (az[k] - az[groups[-1][1]]) <= 1.0 + 1e-9:
+                groups[-1][1] = k
+            else:
+                groups.append([k, k])
+        if len(groups) > 1 and az[groups[0][0]] - step < 1e-9 and az[groups[-1][1]] + step >= 360 - 1e-9:
+            last = groups.pop(); groups[0][0] = last[0] - len(az)       # join across 0/360
+        for g0, g1 in groups:
+            ii = np.arange(g0, g1 + 1) % len(az)
+            seg = v[ii]
+            h0 = max(floor, float(seg.min()) - near); h1 = min(ceiling, float(seg.max()) + near)
+            za = az[g0 % len(az)] - (360 if g0 < 0 else 0)
+            zb = az[g1] + (360 if az[g1] < za else 0)
+            za -= pad_az + near; zb += step + pad_az + near
+            if h1 > h0:
+                boxes.append((za, zb, h0, h1, f"Gap Az {za % 360:.0f}-{zb % 360:.0f} ({name} line, {h0:.0f}-{h1:.0f}°)"))
+    return boxes
+
+
+def frame_coverage(mos, alt, az, half_w, half_h):
+    """Fraction of a frame footprint (alt/az box) that the mosaic already has data for."""
+    M = mos["M"]; res = mos["res"]; a0 = mos["alt0"]
+    NH, NA = M.shape
+    hs = np.linspace(alt - half_h, alt + half_h, 9); zs = np.linspace(az - half_w, az + half_w, 13)
+    r = np.floor((hs - a0) / res).astype(int); c = np.floor((zs % 360) / 360 * NA).astype(int) % NA
+    ok = (r >= 0) & (r < NH)
+    if not ok.any():
+        return 0.0
+    sub = M[np.ix_(r[ok], c)]
+    return float(np.isfinite(sub).sum()) / (len(hs) * len(zs))
+
+
+def order_color(t):
+    """Colour for position t (0 = first frame, 1 = last): green → yellow → magenta."""
+    stops = [(0.0, (0, 170, 80)), (0.5, (240, 200, 0)), (1.0, (220, 0, 160))]
+    t = min(max(t, 0.0), 1.0)
+    for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+        if t <= t1:
+            u = (t - t0) / (t1 - t0)
+            return "#%02x%02x%02x" % tuple(int(a + (b - a) * u) for a, b in zip(c0, c1))
+    return "#dc00a0"
+
+
+def draw_order(canvas, plan, X, Y, tag="order", numbers="rows", flip=True, width=2):
+    """Draw the shooting order of plan['frames'] on a Tk canvas: a colour-graded path with arrows,
+    frame numbers (at row starts or on every frame), Start/End markers and the meridian flip."""
+    fr = plan["frames"]; n = len(fr)
+    if not n:
+        return
+    pts = [(X(a), Y(alt)) for alt, a, _ in fr]
+    step = max(1, n // 150)
+    for i in range(n - 1):
+        (xa, ya), (xb, yb) = pts[i], pts[i + 1]
+        col = order_color(i / max(n - 1, 1))
+        if abs(xb - xa) > abs(X(180) - X(0)):        # wraps over 0°/360°: no line across the image
+            continue
+        canvas.create_line(xa, ya, xb, yb, fill=col, width=width, tags=tag,
+                           arrow="last" if i % step == 0 else "none", arrowshape=(7, 8, 3))
+    idx = range(n) if numbers == "all" else []
+    if numbers == "rows":
+        fi = 0; idx = []
+        for _, azs in plan["grid"]:
+            if azs:
+                idx.append(fi)
+            fi += len(azs)
+    for i in idx:
+        x, y = pts[i]
+        canvas.create_text(x, y - 9, text=str(i + 1), font=("Segoe UI", 8, "bold"),
+                           fill=order_color(i / max(n - 1, 1)), tags=tag)
+    for i, txt in ((0, "Start"), (n - 1, "End")):
+        x, y = pts[i]
+        canvas.create_oval(x - 5, y - 5, x + 5, y + 5, outline="black", width=2,
+                           fill=order_color(i / max(n - 1, 1)), tags=tag)
+        canvas.create_text(x + 8, y + 10, text=txt, anchor="w", font=("Segoe UI", 9, "bold"), tags=tag)
+    if flip:
+        for i in range(1, n):
+            if fr[i - 1][1] < 180 <= fr[i][1]:
+                x, y = pts[i]
+                canvas.create_text(x, y + 14, text="↻ meridian flip", font=("Segoe UI", 8),
+                                   fill="#b00060", tags=tag)
+                break
+
+
+def plan_fillin(p, boxes, mos=None, max_cover=0.97):
+    """Plan frames covering the given boxes (az0, az1, alt0, alt1, label).
+
+    With `mos`, frames of 'Steep edge' and 'Gap' areas whose footprint the mosaic already covers
+    (more than `max_cover`) are left out, so only the gaps near the horizon line are shot.
+    """
     w, h = p.fov
     fw, fh = _effective_fov(w, h, p.rot_tolerance) if p.rotator else (w, h)
     ov = p.overlap
@@ -380,7 +623,15 @@ def plan_fillin(p, boxes):
     order = sorted(east, key=lambda b: (b[0] + b[1]) / 2 % 360) + \
         sorted(west, key=lambda b: (b[0] + b[1]) / 2 % 360) if p.meridian_split else \
         sorted(boxes, key=lambda b: (b[0] + b[1]) / 2 % 360)
-    grid = []; labels = []
+    grid = []; labels = []; done = []          # done: centres of frames already planned
+
+    def covered(alt, az):
+        for h, z in done:
+            if abs(alt - h) < fh * (0.5 - ov / 2) and \
+                    abs((az - z + 180) % 360 - 180) < fw / max(math.cos(math.radians(h)), 1e-3) * (0.5 - ov / 2):
+                return True
+        return False
+
     for a0, a1, h0, h1, label in order:
         span_h = h1 - h0
         nr = 1 if span_h <= fh else math.ceil((span_h - fh) / (fh * (1 - ov))) + 1
@@ -390,9 +641,15 @@ def plan_fillin(p, boxes):
             span_a = a1 - a0
             n = 1 if span_a <= cov else math.ceil((span_a - cov) / (cov * (1 - ov))) + 1
             azs = [(a0 + a1) / 2] if n == 1 else [a0 + cov / 2 + k * (span_a - cov) / (n - 1) for k in range(n)]
-            azs = [z % 360 for z in azs]
+            azs = [z % 360 for z in azs if not covered(alt, z % 360)]   # overlapping areas: shoot once
+            if mos is not None and label.startswith(("Steep edge", "Gap")):
+                hw = fw / max(math.cos(math.radians(alt)), 1e-3) / 2
+                azs = [z for z in azs if frame_coverage(mos, alt, z, hw, fh / 2) <= max_cover]
+            if not azs:
+                continue
             if ri % 2:
                 azs.reverse()
+            done.extend((alt, z) for z in azs)
             grid.append((alt, azs)); labels.append(label)
     frames, rot_moves = assign_rotator(p, grid, "landscape")
     secs = len(frames) * (p.sec_per_frame + p.exposure) + rot_moves * p.sec_per_rot
@@ -817,7 +1074,7 @@ def detect_horizon(mos, solid_frac=0.6, thin_frac=0.85, step=0.5, max_branch_gap
     return dict(az=az, solid=solid_f, branches=branches, details=out, uncertain=unsure, measured=measured)
 
 
-def widen_steep_edges(az, alt, side_deg=0.0, steep_slope=3.0):
+def widen_steep_edges(az, alt, side_deg=0.0, steep_slope=2.0):
     """Extend the horizon sideways at steep edges.
 
     Where the horizon rises or falls faster than `steep_slope` degrees of altitude per degree of
@@ -922,9 +1179,57 @@ def run_gui():
         ImageTk = None
 
     root = tk.Tk()
-    root.title(APP_NAME)
-    root.geometry("1280x860")
+    root.title(f"{APP_NAME}  v{APP_VERSION}")
+    root.geometry("1600x900")
     nb = ttk.Notebook(root); nb.pack(fill="both", expand=True)
+    scroll_panels = []          # (holder frame, canvas, scrollbar) of the settings bars
+    bars = []                   # (groups frame, fixed frame) of each settings bar
+
+    def topbar(parent):
+        """Settings bar across the top of a tab. Returns (bar, fixed): `bar` holds the setting groups
+        side by side and scrolls sideways when they don't fit; `fixed` is a strip on the right
+        (actions, log) that always stays visible."""
+        outer = ttk.Frame(parent); outer.pack(side="top", fill="x", padx=6, pady=(6, 2))
+        fixed = ttk.Frame(outer); fixed.pack(side="right", fill="y", padx=(6, 0))
+        holder = ttk.Frame(outer); holder.pack(side="left", fill="both", expand=True)
+        c = tk.Canvas(holder, highlightthickness=0, borderwidth=0)
+        sb = ttk.Scrollbar(holder, orient="horizontal", command=c.xview)
+        inner = ttk.Frame(c)
+        c.create_window(0, 0, anchor="nw", window=inner)
+        c.configure(xscrollcommand=sb.set)
+        c.pack(side="top", fill="x", expand=True)
+
+        def update(_=None):
+            c.configure(scrollregion=(0, 0, inner.winfo_reqwidth(), inner.winfo_reqheight()),
+                        height=max(inner.winfo_reqheight(), fixed.winfo_reqheight()))
+            if inner.winfo_reqwidth() > c.winfo_width() > 1:
+                if not sb.winfo_ismapped():
+                    sb.pack(side="bottom", fill="x")
+            else:
+                if sb.winfo_ismapped():
+                    sb.pack_forget()
+                c.xview_moveto(0)
+        inner.bind("<Configure>", update); c.bind("<Configure>", update); fixed.bind("<Configure>", update)
+        scroll_panels.append((holder, c, sb)); bars.append((inner, fixed))
+        ttk.Separator(parent, orient="horizontal").pack(side="top", fill="x", padx=6)
+        return inner, fixed
+
+    def group(parent, text):
+        """One group of settings in a top bar."""
+        g = ttk.LabelFrame(parent, text=text); g.pack(side="left", fill="y", padx=3, pady=2, anchor="n")
+        return g
+
+    def panel_wheel(e):
+        """Mouse wheel over a settings bar scrolls it sideways (lists and text boxes keep their own)."""
+        w = root.winfo_containing(e.x_root, e.y_root)
+        if w is None or w.winfo_class() in ("Listbox", "Text", "TCombobox", "TSpinbox"):
+            return
+        for outer, c, sb in scroll_panels:
+            if str(w).startswith(str(outer)) and sb.winfo_ismapped():
+                step = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
+                c.xview_scroll(step * 3, "units"); return
+    root.bind_all("<MouseWheel>", panel_wheel, add="+")
+    root.bind_all("<Button-4>", panel_wheel, add="+"); root.bind_all("<Button-5>", panel_wheel, add="+")
 
     def labeled(parent, r, text, var, width=10, col=0, tip=None):
         ttk.Label(parent, text=text).grid(row=r, column=col, sticky="w", padx=4, pady=2)
@@ -935,8 +1240,8 @@ def run_gui():
 
     # ------------------------------------------------------------------ PLAN
     plan_tab = ttk.Frame(nb); nb.add(plan_tab, text="1. Plan sequence")
-    left = ttk.Frame(plan_tab); left.pack(side="left", fill="y", padx=6, pady=6)
-    right = ttk.Frame(plan_tab); right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
+    left, plan_fixed = topbar(plan_tab)
+    right = ttk.Frame(plan_tab); right.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     P = PlanParams()
     V = {}
     current_hz = tk.StringVar(value="")   # shared: Plan tab horizon file -> Build tab comparison
@@ -944,7 +1249,7 @@ def run_gui():
     def var(name, value, kind=tk.StringVar):
         V[name] = kind(value=value); return V[name]
 
-    box = ttk.LabelFrame(left, text="Camera & telescope"); box.pack(fill="x", pady=3)
+    box = group(left, "Camera & telescope")
     labeled(box, 0, "Sensor width (px)", var("sensor_w_px", P.sensor_w_px))
     labeled(box, 1, "Sensor height (px)", var("sensor_h_px", P.sensor_h_px))
     labeled(box, 2, "Pixel size (µm)", var("pixel_um", P.pixel_um))
@@ -969,16 +1274,15 @@ def run_gui():
         update_fov()
     ttk.Button(box, text="Read from a FITS file…", command=from_fits).grid(row=5, column=0, columnspan=2, sticky="w", padx=4, pady=3)
 
-    box = ttk.LabelFrame(left, text="Site & area to image"); box.pack(fill="x", pady=3)
+    box = group(left, "Site & area to image")
     labeled(box, 0, "Latitude (°)", var("lat", P.lat))
     V["mode"] = tk.StringVar(value="horizon")
     ttk.Radiobutton(box, text="Fixed altitude band", variable=V["mode"], value="band").grid(row=1, column=0, sticky="w")
     ttk.Radiobutton(box, text="Around current horizon", variable=V["mode"], value="horizon").grid(row=1, column=1, sticky="w")
     labeled(box, 2, "Band: alt min (°)", var("alt_min", P.alt_min))
     labeled(box, 3, "Band: alt max (°)", var("alt_max", P.alt_max))
-    hzf = ttk.Frame(box); hzf.grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 0))
-    ttk.Label(hzf, text="Current horizon (.hrz)").pack(anchor="w")
-    hz_list = tk.Listbox(hzf, height=2, width=40); hz_list.pack(anchor="w")
+    hzf = group(left, "Current horizon (.hrz)")
+    hz_list = tk.Listbox(hzf, height=2, width=40); hz_list.pack(anchor="w", padx=4)
 
     def sync_current():
         files = list(hz_list.get(0, "end"))
@@ -996,20 +1300,23 @@ def run_gui():
         hz_list.delete(0, "end")
         if files and current_hz.get() == files[0]:
             current_hz.set("")
-    hzb = ttk.Frame(hzf); hzb.pack(anchor="w", pady=2)
+    hzb = ttk.Frame(hzf); hzb.pack(anchor="w", pady=2, padx=4)
     ttk.Button(hzb, text="Add current horizon…", command=add_hz).pack(side="left")
     ttk.Button(hzb, text="Clear", command=clear_hz).pack(side="left", padx=4)
     ttk.Label(hzf, text="The first file is your current horizon; it is also used on the Build tab.\n"
                         "Optional second file (e.g. an all-sky estimate): the strip spans both.",
-              foreground="#666", justify="left").pack(anchor="w")
-    labeled(box, 7, "Margin below (°)", var("margin_below", P.margin_below))
-    labeled(box, 8, "Margin above (°)", var("margin_above", P.margin_above))
-    labeled(box, 9, "Lowest altitude (°)", var("floor", P.floor))
-    labeled(box, 10, "Azimuth start (°)", var("az_start", P.az_start))
-    labeled(box, 11, "Azimuth end (°)", var("az_end", P.az_end))
-    labeled(box, 12, "Overlap (0-1)", var("overlap", P.overlap))
+              foreground="#666", justify="left").pack(anchor="w", padx=4)
+    box = group(left, "Strip to image")
+    labeled(box, 0, "Margin below (°)", var("margin_below", P.margin_below), width=6)
+    labeled(box, 1, "Margin above (°)", var("margin_above", P.margin_above), width=6)
+    labeled(box, 2, "Lowest altitude (°)", var("floor", P.floor), width=6)
+    labeled(box, 3, "Overlap (0-1)", var("overlap", P.overlap), width=6)
+    labeled(box, 0, "Extra frames at steep edges", var("edge_frames", P.edge_frames), width=6, col=3, tip="0 = off")
+    labeled(box, 1, "Steep = more than (°/°)", var("edge_slope", P.edge_slope), width=6, col=3, tip="alt per az")
+    labeled(box, 2, "Azimuth start (°)", var("az_start", P.az_start), width=6, col=3)
+    labeled(box, 3, "Azimuth end (°)", var("az_end", P.az_end), width=6, col=3)
 
-    box = ttk.LabelFrame(left, text="Rotator"); box.pack(fill="x", pady=3)
+    box = group(left, "Rotator")
     V["rotator"] = tk.BooleanVar(value=True)
     ttk.Checkbutton(box, text="Keep frames level with rotator", variable=V["rotator"]).grid(row=0, column=0, columnspan=2, sticky="w")
     labeled(box, 1, "Offset (sky - mech, °)", var("rot_offset", P.rot_offset))
@@ -1019,31 +1326,33 @@ def run_gui():
     ttk.Label(box, text="Orientation").grid(row=4, column=0, sticky="w", padx=4)
     ttk.Combobox(box, textvariable=V["orientation"], values=["auto", "landscape", "portrait"], width=10, state="readonly").grid(row=4, column=1, sticky="w")
 
-    box = ttk.LabelFrame(left, text="Exposure & sequence"); box.pack(fill="x", pady=3)
+    box = group(left, "Exposure")
     labeled(box, 0, "Exposure (s)", var("exposure", P.exposure))
     labeled(box, 1, "Gain (-1 = default)", var("gain", P.gain))
     labeled(box, 2, "Offset (-1 = default)", var("offset", P.offset))
     labeled(box, 3, "Binning", var("binning", P.binning))
+    labeled(box, 4, "Seconds per frame", var("sec_per_frame", P.sec_per_frame))
+    labeled(box, 5, "Seconds per rotator move", var("sec_per_rot", P.sec_per_rot))
+    box = group(left, "Sequence")
     V["meridian_split"] = tk.BooleanVar(value=True); V["unpark"] = tk.BooleanVar(value=True)
     V["park"] = tk.BooleanVar(value=True); V["template"] = tk.BooleanVar(value=False); V["collapsed"] = tk.BooleanVar(value=True)
-    ttk.Checkbutton(box, text="East half first, then west (one meridian flip)", variable=V["meridian_split"]).grid(row=4, column=0, columnspan=3, sticky="w")
-    ttk.Checkbutton(box, text="Unpark at start", variable=V["unpark"]).grid(row=5, column=0, sticky="w")
-    ttk.Checkbutton(box, text="Park at end", variable=V["park"]).grid(row=5, column=1, sticky="w")
-    ttk.Checkbutton(box, text="Save as template (else full sequence)", variable=V["template"]).grid(row=6, column=0, columnspan=3, sticky="w")
-    ttk.Checkbutton(box, text="Rows collapsed (use Load sequence)", variable=V["collapsed"]).grid(row=7, column=0, columnspan=3, sticky="w")
-    labeled(box, 8, "Seconds per frame", var("sec_per_frame", P.sec_per_frame))
-    labeled(box, 9, "Seconds per rotator move", var("sec_per_rot", P.sec_per_rot))
+    ttk.Checkbutton(box, text="East half first, then west (one meridian flip)", variable=V["meridian_split"]).grid(row=0, column=0, columnspan=3, sticky="w")
+    ttk.Checkbutton(box, text="Unpark at start", variable=V["unpark"]).grid(row=1, column=0, sticky="w")
+    ttk.Checkbutton(box, text="Park at end", variable=V["park"]).grid(row=1, column=1, sticky="w")
+    ttk.Checkbutton(box, text="Save as template (else full sequence)", variable=V["template"]).grid(row=2, column=0, columnspan=3, sticky="w")
+    ttk.Checkbutton(box, text="Rows collapsed (use Load sequence)", variable=V["collapsed"]).grid(row=3, column=0, columnspan=3, sticky="w")
 
-    btns = ttk.Frame(left); btns.pack(fill="x", pady=6)
+    btns = ttk.LabelFrame(plan_fixed, text="Plan"); btns.pack(side="top", fill="both", expand=True, pady=2)
     plan_info = ttk.Label(right, text="", font=("Segoe UI", 10, "bold")); plan_info.pack(anchor="w")
-    canvas = tk.Canvas(right, bg="white", height=560); canvas.pack(fill="both", expand=True)
-    state = {"plan": None, "params": None}
+    ttk.Label(right, text="Wheel: zoom · drag: move · double-click: whole sky", foreground="#666").pack(anchor="w")
+    canvas = tk.Canvas(right, bg="white", height=300); canvas.pack(fill="both", expand=True)
+    state = {"plan": None, "params": None, "view": (0.0, 360.0, 0.0, 90.0), "box": (50, 20, 900, 540)}
 
     def collect(require_area=True):
         p = PlanParams()
         num = ["sensor_w_px", "sensor_h_px", "pixel_um", "focal_mm", "lat", "alt_min", "alt_max", "margin_below",
                "margin_above", "floor", "az_start", "az_end", "overlap", "rot_offset", "rot_tolerance", "exposure",
-               "sec_per_frame", "sec_per_rot"]
+               "sec_per_frame", "sec_per_rot", "edge_frames", "edge_slope"]
         for k in num:
             setattr(p, k, float(V[k].get()))
         for k in ("sensor_w_px", "sensor_h_px"):
@@ -1075,27 +1384,51 @@ def run_gui():
             return
         W = canvas.winfo_width() or 900; H = canvas.winfo_height() or 540
         x0, y0, x1, y1 = 50, 20, W - 15, H - 35
-        amin, amax = 0, 90
-        X = lambda a: x0 + (a % 360) / 360 * (x1 - x0)
+        az0, az1, amin, amax = state["view"]
+        state["box"] = (x0, y0, x1, y1)
+        X = lambda a: x0 + ((a % 360) - az0) / (az1 - az0) * (x1 - x0)
         Y = lambda h: y1 - (h - amin) / (amax - amin) * (y1 - y0)
-        for a in range(0, 361, 30):
-            canvas.create_line(X(a) if a < 360 else x1, y0, X(a) if a < 360 else x1, y1, fill="#ddd")
-            canvas.create_text(X(a) if a < 360 else x1, y1 + 14, text=f"{a}°")
-        for h in range(0, 91, 10):
-            canvas.create_line(x0, Y(h), x1, Y(h), fill="#ddd"); canvas.create_text(x0 - 22, Y(h), text=f"{h}°")
-        az = np.arange(0, 360, 1.0)
+
+        def ticks(lo, hi, steps):
+            st = next((t for t in steps if (hi - lo) / t <= 12), steps[-1])
+            return [v for v in np.arange(math.ceil(lo / st) * st, hi + 1e-9, st)]
+        XA = lambda a: x0 + (a - az0) / (az1 - az0) * (x1 - x0)       # no wrap, for tick marks
+        a_ticks = ticks(az0, az1, (1, 2, 5, 10, 15, 30)); h_ticks = ticks(amin, amax, (1, 2, 5, 10))
+        for a in a_ticks:
+            canvas.create_line(XA(a), y0, XA(a), y1, fill="#ddd")
+        for h in h_ticks:
+            canvas.create_line(x0, Y(h), x1, Y(h), fill="#ddd")
+        az = np.arange(0, 360, 0.25)
         lo_hi = [plan["lim"](a) for a in az]
         poly = [(X(a), Y(hi)) for a, (lo, hi) in zip(az, lo_hi)] + [(X(a), Y(lo)) for a, (lo, hi) in reversed(list(zip(az, lo_hi)))]
         canvas.create_polygon(*[c for pt in poly for c in pt], fill="#d6e6ff", outline="")
+        kx = (x1 - x0) / (az1 - az0)
         for alt, a, rot in plan["frames"]:
             cw = plan["fw"] / max(math.cos(math.radians(alt)), 0.05) / 2; ch = plan["fh"] / 2
-            canvas.create_rectangle(X(a - cw), Y(alt + ch), X(a + cw), Y(alt - ch), outline="#4a7bd0")
+            for sh in (0, 360, -360):              # a frame across 0°/360° is drawn on both sides
+                xc = XA(a % 360 + sh)
+                if xc + cw * kx < x0 - 50 or xc - cw * kx > x1 + 50:
+                    continue
+                canvas.create_rectangle(xc - cw * kx, Y(alt + ch), xc + cw * kx, Y(alt - ch), outline="#4a7bd0")
         colors = ["#d00000", "#00a000"]
         for i, f in enumerate(p.horizon_files):
             pts = load_hrz(f)
             line = [c for a in az for c in (X(a), Y(hrz_alt(pts, a)))]
             canvas.create_line(*line, fill=colors[i % 2], width=2)
         canvas.create_line(x0, Y(p.floor), x1, Y(p.floor), fill="#e0b000", dash=(4, 3))
+        if show_order.get():
+            draw_order(canvas, plan, X, Y, flip=p.meridian_split)
+        # Tk does not clip: cover what lies outside the plot area, then draw the axis labels on top
+        for r in ((0, 0, W, y0), (0, y1, W, H), (0, 0, x0, H), (x1, 0, W, H)):
+            canvas.create_rectangle(*r, fill="white", outline="")
+        canvas.create_rectangle(x0, y0, x1, y1, outline="#bbb")
+        for a in a_ticks:
+            canvas.create_text(XA(a), y1 + 14, text=f"{a:g}°")
+        for h in h_ticks:
+            canvas.create_text(x0 - 22, Y(h), text=f"{h:g}°")
+        if show_order.get():
+            canvas.create_text(x1, y0 - 10, anchor="ne", font=("Segoe UI", 9),
+                               text="Shooting order: green = first → yellow → magenta = last · numbers = first frame of each row")
 
     def preview():
         try:
@@ -1138,29 +1471,65 @@ def run_gui():
         messagebox.showinfo(APP_NAME, "Sun position (from now):\n" + "\n".join(lines) +
                             "\n\nKeep the lowest imaged altitude well above the sun when shooting by day.")
 
-    ttk.Button(btns, text="Preview plan", command=preview).pack(side="left", padx=3)
-    ttk.Button(btns, text="Save NINA sequence…", command=save).pack(side="left", padx=3)
+    ttk.Button(btns, text="Preview plan", command=preview).pack(side="top", fill="x", padx=4, pady=2)
+    ttk.Button(btns, text="Save NINA sequence…", command=save).pack(side="top", fill="x", padx=4, pady=2)
+    show_order = tk.BooleanVar(value=True)
+    ttk.Checkbutton(btns, text="Show shooting order", variable=show_order,
+                    command=lambda: draw_plan()).pack(side="top", anchor="w", padx=4, pady=2)
     sun_lon = tk.StringVar(value="25.0")
-    sb = ttk.Frame(left); sb.pack(fill="x")
+    sb = ttk.Frame(btns); sb.pack(side="top", fill="x", pady=2)
     ttk.Label(sb, text="Longitude (°E)").pack(side="left", padx=4)
     ttk.Entry(sb, textvariable=sun_lon, width=8).pack(side="left")
     ttk.Button(sb, text="Sun check", command=sun_check).pack(side="left", padx=4)
     canvas.bind("<Configure>", lambda e: draw_plan())
+
+    def plan_point(x, y):
+        x0, y0, x1, y1 = state["box"]; az0, az1, h0, h1 = state["view"]
+        return az0 + (x - x0) / (x1 - x0) * (az1 - az0), h0 + (y1 - y) / (y1 - y0) * (h1 - h0)
+
+    def set_view(az0, az1, h0, h1):
+        w = min(max(az1 - az0, 5.0), 360.0); h = min(max(h1 - h0, 3.0), 90.0)
+        az0 = min(max(az0, 0.0), 360.0 - w); h0 = min(max(h0, 0.0), 90.0 - h)
+        state["view"] = (az0, az0 + w, h0, h0 + h); draw_plan()
+
+    def plan_wheel(e):
+        a, h = plan_point(e.x, e.y)
+        up = getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0
+        f = 0.8 if up else 1.25
+        az0, az1, h0, h1 = state["view"]
+        set_view(a - (a - az0) * f, a + (az1 - a) * f, h - (h - h0) * f, h + (h1 - h) * f)
+        return "break"
+
+    def plan_drag_start(e):
+        state["drag"] = (e.x, e.y, state["view"])
+
+    def plan_drag(e):
+        if "drag" not in state:
+            return
+        sx, sy, (az0, az1, h0, h1) = state["drag"]
+        x0, y0, x1, y1 = state["box"]
+        da = -(e.x - sx) / (x1 - x0) * (az1 - az0); dh = (e.y - sy) / (y1 - y0) * (h1 - h0)
+        set_view(az0 + da, az1 + da, h0 + dh, h1 + dh)
+
+    canvas.bind("<MouseWheel>", plan_wheel)
+    canvas.bind("<Button-4>", plan_wheel); canvas.bind("<Button-5>", plan_wheel)
+    canvas.bind("<ButtonPress-1>", plan_drag_start); canvas.bind("<B1-Motion>", plan_drag)
+    canvas.bind("<Double-Button-1>", lambda e: set_view(0, 360, 0, 90))
     for k in ("sensor_w_px", "sensor_h_px", "pixel_um", "focal_mm"):
         V[k].trace_add("write", update_fov)
     update_fov()
 
     # ------------------------------------------------------------------ PROCESS
     proc = ttk.Frame(nb); nb.add(proc, text="2. Build horizon")
-    pl = ttk.Frame(proc); pl.pack(side="left", fill="y", padx=6, pady=6)
-    pr = ttk.Frame(proc); pr.pack(side="left", fill="both", expand=True, padx=6, pady=6)
-    box = ttk.LabelFrame(pl, text="FITS folders (searched recursively)"); box.pack(fill="x", pady=3)
-    folders = tk.Listbox(box, height=5, width=48); folders.pack(fill="x", padx=4, pady=2)
+    pl, build_fixed = topbar(proc)
+    pr = ttk.Frame(proc); pr.pack(side="top", fill="both", expand=True, padx=6, pady=6)
+    box = group(pl, "FITS folders (searched recursively)")
+    folders = tk.Listbox(box, height=5, width=44); folders.pack(fill="x", padx=4, pady=2)
     fb = ttk.Frame(box); fb.pack(fill="x")
     ttk.Button(fb, text="Add folder…", command=lambda: (lambda d: d and folders.insert("end", d))(
         filedialog.askdirectory())).pack(side="left", padx=3)
     ttk.Button(fb, text="Remove", command=lambda: [folders.delete(i) for i in reversed(folders.curselection())]).pack(side="left")
-    box = ttk.LabelFrame(pl, text="Settings"); box.pack(fill="x", pady=3)
+    box = group(pl, "Settings")
     pv = {}
     def pvar(n, v): pv[n] = tk.StringVar(value=v); return pv[n]
     labeled(box, 0, "Rotator offset guess (°)", pvar("K", "-58.04"), tip="sky - mech")
@@ -1170,26 +1539,27 @@ def run_gui():
     ttk.Checkbutton(box, text="Full 360° search (offset unknown)", variable=pv["full"]).grid(row=2, column=0, columnspan=3, sticky="w")
     labeled(box, 3, "Latitude (°, blank = FITS)", pvar("lat", ""))
     labeled(box, 4, "Mosaic resolution (°)", pvar("res", "0.03"))
-    labeled(box, 5, "Solid: darker than", pvar("solid", "0.60"), tip="× sky")
-    labeled(box, 6, "Branches: darker than", pvar("thin", "0.85"), tip="× sky")
-    labeled(box, 7, "Bias level (blank = auto)", pvar("bias", ""))
-    labeled(box, 8, "Side margin at steep edges (°)", pvar("side", "0"), tip="0 = off")
-    labeled(box, 9, "Steep = steeper than (°/°)", pvar("steep", "3"), tip="alt per az")
-    for k in ("side", "steep"):
-        pv[k].trace_add("write", lambda *a: (redraw_lines(), update_stats()) if E.get("solid") is not None else None)
+    labeled(box, 0, "Solid: darker than", pvar("solid", "0.60"), width=6, col=3, tip="× sky")
+    labeled(box, 1, "Branches: darker than", pvar("thin", "0.85"), width=6, col=3, tip="× sky")
+    labeled(box, 2, "Bias level (blank = auto)", pvar("bias", ""), width=6, col=3)
+    pvar("side", "0"); pvar("steep", "2")   # shown in the toolbar above the image
     pv["cache"] = tk.BooleanVar(value=True)
-    ttk.Checkbutton(box, text="Cache reduced frames (fast re-runs)", variable=pv["cache"]).grid(row=10, column=0, columnspan=2, sticky="w")
+    ttk.Checkbutton(box, text="Cache reduced frames", variable=pv["cache"]).grid(row=3, column=3, columnspan=2, sticky="w", padx=4)
     ttk.Button(box, text="Clear cache", command=lambda: messagebox.showinfo(
-        APP_NAME, f"Removed {clear_cache(default_cache_dir())} cached frames.")).grid(row=10, column=2, sticky="w")
-    box = ttk.LabelFrame(pl, text="Current horizon (compare / fill gaps)"); box.pack(fill="x", pady=3)
+        APP_NAME, f"Removed {clear_cache(default_cache_dir())} cached frames.")).grid(row=4, column=3, sticky="w", padx=4)
+    box = group(pl, "Current horizon (compare / fill gaps)")
     old_var = current_hz   # filled automatically from the Plan tab
-    ttk.Entry(box, textvariable=old_var, width=40).pack(side="left", padx=4)
+    ttk.Entry(box, textvariable=old_var, width=34).pack(side="top", anchor="w", padx=4, pady=2)
     ttk.Button(box, text="Browse…", command=lambda: old_var.set(filedialog.askopenfilename(
-        filetypes=[("Horizon", "*.hrz *.txt"), ("All", "*.*")]) or old_var.get())).pack(side="left")
-    bb = ttk.Frame(pl); bb.pack(fill="x", pady=4)
-    pb = ttk.Progressbar(pl, length=340, maximum=1.0); pb.pack(fill="x", pady=4)
-    status = ttk.Label(pl, text="Idle"); status.pack(anchor="w")
-    logbox = tk.Text(pl, height=10, width=58, wrap="word"); logbox.pack(fill="both", expand=True, pady=3)
+        filetypes=[("Horizon", "*.hrz *.txt"), ("All", "*.*")]) or old_var.get())).pack(side="top", anchor="w", padx=4)
+    run_box = group(pl, "Build")
+    fill_box = group(pl, "Fill-in frames")
+    hz_box = group(pl, "Horizon file")
+    bb = ttk.Frame(run_box); bb.pack(side="top", fill="x", padx=4, pady=2)
+    pb = ttk.Progressbar(run_box, length=200, maximum=1.0); pb.pack(side="top", fill="x", padx=4, pady=4)
+    status = ttk.Label(run_box, text="Idle", wraplength=220); status.pack(side="top", anchor="w", padx=4)
+    log_box = ttk.LabelFrame(build_fixed, text="Log"); log_box.pack(side="left", fill="y", padx=(6, 0), pady=2)
+    logbox = tk.Text(log_box, height=8, width=56, wrap="word"); logbox.pack(fill="both", expand=True, padx=2, pady=2)
 
     # ---- editor (right side)
     tb = ttk.Frame(pr); tb.pack(fill="x")
@@ -1204,7 +1574,18 @@ def run_gui():
     zc.pack(side="left")
     ttk.Button(tb, text="Undo", command=lambda: undo()).pack(side="left", padx=6)
     ttk.Button(tb, text="Reset edits", command=lambda: reset_edits()).pack(side="left")
-    ttk.Label(pr, text="Left-drag on the image to redraw the selected line · right-click: restore detected value · Ctrl+Z: undo",
+    tb2 = ttk.Frame(pr); tb2.pack(fill="x", pady=(3, 0))
+    ttk.Label(tb2, text="Side margin at steep edges (°)").pack(side="left")
+    ttk.Spinbox(tb2, textvariable=pv["side"], from_=0, to=10, increment=0.5, width=5).pack(side="left", padx=(2, 8))
+    ttk.Label(tb2, text="steep = more than").pack(side="left")
+    ttk.Spinbox(tb2, textvariable=pv["steep"], from_=0.5, to=20, increment=0.5, width=5).pack(side="left", padx=2)
+    ttk.Label(tb2, text="° altitude per ° azimuth   (0 = off; 1–2° recommended)", foreground="#666").pack(side="left")
+    show_fill = tk.BooleanVar(value=False)
+    ttk.Checkbutton(tb2, text="Show fill-in frames", variable=show_fill,
+                    command=lambda: generate_fill(quiet=True) if show_fill.get() and fill["plan"] is None
+                    else draw_fill()).pack(side="left", padx=(12, 2))
+    ttk.Label(pr, text="Wheel: zoom · Shift+wheel / middle-drag / scrollbars: move · left-drag: redraw the selected line"
+              " · right-click: restore detected value · Ctrl+Z: undo",
               foreground="#666").pack(anchor="w")
     cf = ttk.Frame(pr); cf.pack(fill="both", expand=True)
     cv = tk.Canvas(cf, bg="#1c1c24", highlightthickness=0)
@@ -1286,11 +1667,11 @@ def run_gui():
             return
         d = base_det()
         E["solid"] = np.array(d["solid"], float); E["branches"] = np.array(d["branches"], float)
-        E["undo"].clear(); redraw_all()
+        E["undo"].clear(); redraw_all(); refresh_fill()
 
     def undo():
         if E["undo"]:
-            E["solid"], E["branches"] = E["undo"].pop(); redraw_lines(); update_stats()
+            E["solid"], E["branches"] = E["undo"].pop(); redraw_lines(); update_stats(); refresh_fill()
 
     def side_settings():
         try:
@@ -1336,6 +1717,8 @@ def run_gui():
         W = int(360 * z); H = int(M.shape[0] * mos["res"] * z)
         im = Image.fromarray(rgb[::-1]).resize((max(W, 1), max(H, 1)), Image.BILINEAR)
         E["bg"][z] = ImageTk.PhotoImage(im) if ImageTk else None
+        while len(E["bg"]) > 4:                         # keep memory in check while zooming
+            E["bg"].pop(next(iter(E["bg"])))
         return E["bg"][z]
 
     def redraw_all(*_):
@@ -1384,6 +1767,7 @@ def run_gui():
                 cv.coords(E["items"][key], *c)
             else:
                 E["items"][key] = cv.create_line(*c, fill=col, width=w)
+        draw_fill()
 
     def paint(ev, push):
         tgt = ed["target"].get()
@@ -1418,14 +1802,35 @@ def run_gui():
         d = base_det(); az = result["det"]["az"]
         m = np.abs((az - a + 180) % 360 - 180) <= bw / 2
         E[tgt][m] = np.asarray(d[tgt])[m]
-        redraw_lines(); update_stats()
+        redraw_lines(); update_stats(); refresh_fill()
 
     current_hz.trace_add("write", lambda *a: redraw_all())
+    for k in ("side", "steep"):
+        pv[k].trace_add("write", lambda *a: (redraw_lines(), update_stats(), refresh_fill()) if E.get("solid") is not None else None)
     cv.bind("<ButtonPress-1>", lambda e: paint(e, True))
     cv.bind("<B1-Motion>", lambda e: paint(e, False))
-    cv.bind("<ButtonRelease-1>", lambda e: update_stats())
+    cv.bind("<ButtonRelease-1>", lambda e: (update_stats(), refresh_fill()))
     cv.bind("<Button-3>", restore)
-    cv.bind("<MouseWheel>", lambda e: cv.xview_scroll(int(-e.delta / 40), "units"))
+    def wheel_zoom(e):
+        if "mos" not in result or E.get("solid") is None:
+            return
+        x, y = cv.canvasx(e.x), cv.canvasy(e.y)
+        a, h = from_xy(x, y)                                  # keep this point under the mouse
+        up = getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0
+        z = zoom(); nz = min(max(z * (1.25 if up else 0.8), 2.0), 24.0)
+        if abs(nz - z) < 1e-6:
+            return
+        ed["zoom"].set(f"{nz:.3g}"); redraw_all()
+        nx, ny = to_xy(a, h); z2, a0, top = geom()
+        W = MARG * 2 + 360 * z2; H = MARG * 2 + (top - a0) * z2
+        cv.xview_moveto(max(nx - e.x, 0) / W); cv.yview_moveto(max(ny - e.y, 0) / H)
+        return "break"
+
+    cv.bind("<MouseWheel>", wheel_zoom)
+    cv.bind("<Button-4>", wheel_zoom); cv.bind("<Button-5>", wheel_zoom)
+    cv.bind("<Shift-MouseWheel>", lambda e: cv.xview_scroll(int(-e.delta / 40), "units"))
+    cv.bind("<ButtonPress-2>", lambda e: cv.scan_mark(e.x, e.y))
+    cv.bind("<B2-Motion>", lambda e: cv.scan_dragto(e.x, e.y, gain=1))
     root.bind("<Control-z>", lambda e: undo())
     zc.bind("<<ComboboxSelected>>", redraw_all)
 
@@ -1452,12 +1857,25 @@ def run_gui():
 
     def report_uncertain():
         unc = result["det"]["uncertain"]
-        if unc:
-            boxes = fillin_boxes(result["det"])
-            log(f"{len(unc)} azimuth samples reached the edge of the imaged area "
-                f"({len(boxes)} areas) – use 'Plan fill-in frames…' to shoot them.")
+        fill.update(plan=None, boxes=[], p=None); fill_info.config(text="")
+        if show_fill.get():
+            generate_fill(quiet=True)       # new horizon: show its fill-in right away
+        else:
+            draw_fill()
+        d = result["det"]
+        boxes = fillin_boxes(d, lines=(d["az"], d["solid"], d["branches"])) if unc else []
+        if boxes:
+            log(f"{len(boxes)} areas where the horizon line reaches the edge of the imaged area "
+                f"– use 'Generate fill-in frames' to plan them.")
         else:
             log("No uncertain areas – every azimuth has sky and obstruction inside the imaged area.")
+
+    def lines_fingerprint():
+        """Identifies the horizon as it would be saved now (lines with edits and side margin)."""
+        if E.get("solid") is None:
+            return None
+        az, s_, b_ = final_lines()
+        return hash((np.round(s_, 3).tobytes(), np.round(b_, 3).tobytes()))
 
     def save_outputs():
         if E["solid"] is None:
@@ -1471,39 +1889,139 @@ def run_gui():
         if not f:
             return
         write_hrz(f, az, vals)
+        E["saved_fp"] = lines_fingerprint()
         messagebox.showinfo(APP_NAME, f"Saved the {which} horizon:\n{f}\n\n"
                                       "In NINA: Options → General → Astrometry → Horizon.")
 
-    def plan_fill():
-        if "det" not in result:
-            messagebox.showerror(APP_NAME, "Build the horizon first."); return
+    def compute_fill():
+        """(params, boxes, plan) for the fill-in frames; raises ValueError with a readable message."""
+        if "det" not in result or E.get("solid") is None:
+            raise ValueError("Build the horizon first.")
         try:
             p = collect(require_area=False)
         except Exception as e:
-            messagebox.showerror(APP_NAME, f"Check the settings on the Plan tab: {e}"); return
-        boxes = fillin_boxes(result["det"], floor=p.floor, ceiling=p.ceiling)
+            raise ValueError(f"Check the settings on the Plan tab: {e}")
+        try:
+            ef = max(float(fill_edge.get()), 0.0); es = max(float(fill_slope.get()), 0.1)
+        except ValueError:
+            raise ValueError("Check the fill-in steep-edge values.")
+        az_, s_, b_ = final_lines()
+        boxes = fillin_boxes(result["det"], floor=p.floor, ceiling=p.ceiling, lines=(az_, s_, b_))
+        boxes = boxes + steep_edge_boxes(az_, (s_, b_), max(p.fov), ef, es, floor=p.floor, ceiling=p.ceiling)
+        try:
+            gn = max(float(fill_near.get()), 0.0)
+        except ValueError:
+            raise ValueError("Check the fill-in 'near gaps' value.")
+        boxes = boxes + gap_boxes(result.get("mos"), az_, (s_, b_), gn, floor=p.floor, ceiling=p.ceiling)
         if not boxes:
-            messagebox.showinfo(APP_NAME, "Nothing to fill in – every azimuth is resolved."); return
-        plan = plan_fillin(p, boxes)
-        msg = (f"{len(boxes)} areas, {len(plan['frames'])} frames, ~{plan['seconds'] / 60:.0f} min\n\n" +
-               "\n".join(b[4] for b in boxes[:15]) + ("\n…" if len(boxes) > 15 else "") +
-               "\n\nCamera, rotator and exposure settings come from the Plan tab.")
-        if not messagebox.askokcancel(APP_NAME, msg):
+            return p, [], None
+        plan = plan_fillin(p, boxes, mos=result.get("mos"))
+        used = set(plan["labels"])
+        boxes = [b for b in boxes if b[4] in used]        # drop steep-edge areas that are fully imaged
+        return p, boxes, (plan if boxes else None)
+
+    fill = {"p": None, "boxes": [], "plan": None}       # the last generated fill-in plan
+
+    def generate_fill(quiet=False):
+        """Plan the fill-in frames with the current lines and settings, store and show them."""
+        try:
+            p, boxes, plan = compute_fill()
+        except ValueError as e:
+            if not quiet:
+                messagebox.showerror(APP_NAME, str(e))
+            log(f"Fill-in not generated: {e}"); return False
+        except Exception as e:                          # never fail silently
+            log(f"Fill-in failed: {type(e).__name__}: {e}")
+            if not quiet:
+                messagebox.showerror(APP_NAME, f"Fill-in failed: {e}")
+            return False
+        fill.update(p=p, boxes=boxes, plan=plan)
+        if plan:
+            n_edge = sum(1 for b in boxes if b[4].startswith("Steep edge"))
+            n_gap = sum(1 for b in boxes if b[4].startswith("Gap"))
+            txt = (f"Fill-in: {len(boxes)} areas ({n_edge} steep edges, {n_gap} gaps), {len(plan['frames'])} frames, "
+                   f"~{plan['seconds'] / 60:.0f} min")
+        else:
+            txt = "Fill-in: nothing to shoot – every edge is imaged."
+        fill_info.config(text=txt)
+        if not quiet:
+            log(txt + ("\n  " + "\n  ".join(b[4] for b in boxes) if boxes else ""))
+            show_fill.set(True)
+        draw_fill()
+        return True
+
+    def refresh_fill():
+        """Re-generate after a change of lines or settings, if a fill-in plan is being shown."""
+        if fill["plan"] is not None or (show_fill.get() and fill["p"] is not None):
+            generate_fill(quiet=True)
+
+    def draw_fill():
+        cv.delete("fill")
+        plan, boxes = fill["plan"], fill["boxes"]
+        if not show_fill.get() or "mos" not in result or E.get("solid") is None or not plan:
             return
+        X = lambda a: to_xy(a, 0)[0]; Y = lambda h: to_xy(0, h)[1]
+        for a0, a1, h0, h1, label in boxes:
+            for sh in (0, 360, -360):
+                if a1 + sh < 0 or a0 + sh > 360:
+                    continue
+                cv.create_rectangle(X(a0 + sh), Y(h1), X(a1 + sh), Y(h0), outline="#ff60ff", dash=(5, 3),
+                                    width=2, tags="fill")
+            cv.create_text(X(max(a0, 0)) + 3, Y(h1) - 8, anchor="w", text=label, fill="#ff9cff",
+                           font=("Segoe UI", 8), tags="fill")
+        for alt, a, rot in plan["frames"]:
+            cw = plan["fw"] / max(math.cos(math.radians(alt)), 0.05) / 2; ch = plan["fh"] / 2
+            for sh in (0, 360, -360):
+                if a + cw + sh < 0 or a - cw + sh > 360:
+                    continue
+                cv.create_rectangle(X(a - cw + sh), Y(alt + ch), X(a + cw + sh), Y(alt - ch),
+                                    outline="#ffa000", width=1, tags="fill")
+        draw_order(cv, plan, lambda a: X(a % 360), Y, tag="fill",
+                   numbers="all" if zoom() >= 20 else "rows", flip=False, width=1)
+
+    def save_fill():
+        if fill["plan"] is None and not generate_fill():
+            return
+        if fill["plan"] is None:
+            messagebox.showinfo(APP_NAME, "Nothing to fill in – every edge is imaged."); return
+        p, plan = fill["p"], fill["plan"]
         f = filedialog.asksaveasfilename(defaultextension=".json", initialfile="Horizon fill-in.json",
                                          filetypes=[("NINA sequence", "*.json")])
         if f:
             out = save_plan(p, plan, f)
-            messagebox.showinfo(APP_NAME, f"Saved:\n{out}")
+            messagebox.showinfo(APP_NAME, f"Saved {len(plan['frames'])} frames:\n{out}\n\n"
+                                          "Camera, rotator and exposure settings come from the Plan tab.")
 
-    ttk.Button(bb, text="Build mosaic & horizon", command=start).grid(row=0, column=0, padx=2, pady=2, sticky="ew")
-    ttk.Button(bb, text="Re-detect (new thresholds)", command=redetect).grid(row=0, column=1, padx=2, pady=2, sticky="ew")
-    ttk.Button(bb, text="Plan fill-in frames…", command=plan_fill).grid(row=1, column=0, padx=2, pady=2, sticky="ew")
-    sv = ttk.Frame(bb); sv.grid(row=1, column=1, padx=2, pady=2, sticky="ew")
+    ttk.Button(bb, text="Build mosaic & horizon", command=start).pack(side="top", fill="x", pady=2)
+    ttk.Button(bb, text="Re-detect (new thresholds)", command=redetect).pack(side="top", fill="x", pady=2)
+    fb = ttk.Frame(fill_box); fb.grid(row=3, column=0, padx=4, pady=2, sticky="w")
+    ttk.Button(fb, text="Generate fill-in frames", command=generate_fill).pack(side="left")
+    ttk.Button(fb, text="Save fill-in sequence…", command=save_fill).pack(side="left", padx=4)
+    fill_info = ttk.Label(fill_box, text="", foreground="#555", wraplength=380)
+    fill_info.grid(row=4, column=0, padx=4, sticky="w")
+    fe = ttk.Frame(fill_box); fe.grid(row=0, column=0, padx=4, pady=2, sticky="w")
+    # Start from the Plan tab's values and follow them whenever they change there.
+    fill_edge = tk.StringVar(value=V["edge_frames"].get()); fill_slope = tk.StringVar(value=V["edge_slope"].get())
+    V["edge_frames"].trace_add("write", lambda *a: fill_edge.set(V["edge_frames"].get()))
+    V["edge_slope"].trace_add("write", lambda *a: fill_slope.set(V["edge_slope"].get()))
+    ttk.Label(fe, text="Extra frames at steep edges").pack(side="left")
+    ttk.Spinbox(fe, textvariable=fill_edge, from_=0, to=5, increment=0.5, width=4).pack(side="left", padx=(2, 8))
+    ttk.Label(fe, text="steep = more than").pack(side="left")
+    ttk.Spinbox(fe, textvariable=fill_slope, from_=0.5, to=20, increment=0.5, width=4).pack(side="left", padx=2)
+    ttk.Label(fe, text="°/°", foreground="#666").pack(side="left")
+    ttk.Label(fill_box, text="0 = off; steep-edge values are copied from the Plan tab", foreground="#666").grid(
+        row=1, column=0, padx=4, sticky="w")
+    fg = ttk.Frame(fill_box); fg.grid(row=2, column=0, padx=4, pady=2, sticky="w")
+    fill_near = tk.StringVar(value="1.0")
+    ttk.Label(fg, text="Horizon line near gaps within (°)").pack(side="left")
+    ttk.Spinbox(fg, textvariable=fill_near, from_=0, to=5, increment=0.5, width=4).pack(side="left", padx=2)
+    ttk.Label(fg, text="(0 = off)", foreground="#666").pack(side="left")
+    for _v in (fill_edge, fill_slope, fill_near):
+        _v.trace_add("write", lambda *a: refresh_fill())
     save_which = tk.StringVar(value="solid")
-    ttk.Combobox(sv, textvariable=save_which, values=["solid", "with branches"], width=12,
-                 state="readonly").pack(side="left")
-    ttk.Button(sv, text="Save horizon file…", command=save_outputs).pack(side="left", padx=2)
+    ttk.Combobox(hz_box, textvariable=save_which, values=["solid", "with branches"], width=14,
+                 state="readonly").pack(side="top", anchor="w", padx=4, pady=2)
+    ttk.Button(hz_box, text="Save horizon file…", command=save_outputs).pack(side="top", fill="x", padx=4, pady=2)
 
     def poll():
         try:
@@ -1528,10 +2046,29 @@ def run_gui():
     help_tab = ttk.Frame(nb); nb.add(help_tab, text="Help")
     t = tk.Text(help_tab, wrap="word"); t.pack(fill="both", expand=True)
     t.insert("1.0", HELP_TEXT); t.config(state="disabled")
+
+    def on_close():
+        fp = lines_fingerprint()
+        if fp is not None and fp != E.get("saved_fp"):
+            if not messagebox.askyesno(APP_NAME, "The horizon has not been saved since it was built or "
+                                                 "last edited.\n\nExit without saving it?", icon="warning"):
+                nb.select(proc); return
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", on_close)
+
+    # Start wide enough for every settings group (and the fixed boxes), if the screen allows it.
+    try:
+        root.update_idletasks()
+        need = max(inner.winfo_reqwidth() + fixed.winfo_reqwidth() for inner, fixed in bars) + 40
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w = min(max(need, 1280), sw - 20); h = min(900, sh - 80)
+        root.geometry(f"{w}x{h}+{max((sw - w) // 2, 0)}+{max((sh - h) // 2 - 20, 0)}")
+    except Exception:
+        pass
     root.mainloop()
 
 
-HELP_TEXT = """HORIZON MAPPER FOR NINA
+HELP_TEXT = """HORIZON MAPPER FOR NINA   (the version is shown in the window title)
 
 WORKFLOW
 1. Plan sequence
@@ -1539,7 +2076,22 @@ WORKFLOW
    • Choose the area: a fixed altitude band, or a strip around your current horizon file
      (optionally plus a second estimate, e.g. from an all-sky camera); the strip spans both,
      plus margins. The current horizon is also filled in on the Build tab for comparison.
+   • 'Extra frames at steep edges' (horizon mode): where the current horizon rises or drops
+     more steeply than 'Steep = more than' (altitude ° per azimuth °, 2 ≈ 63°), the strip is
+     widened sideways by this many frame widths and covers the whole height of the jump, so
+     the sides of trees and roofs are imaged. Default 0.5; 0 = off.
+     Fractions work: 0.5 usually gives two frames per row at a narrow edge.
+   • Each row gets frames only where the strip enters it, as few as the overlap allows.
    • 'Lowest altitude' keeps frames (and the sun) out of the low sky.
+   • 'Preview plan' draws the frames; with 'Show shooting order' (on by default) a colour-graded
+     path shows the order (green = first → yellow → magenta = last), with the first frame number
+     of each row, Start/End markers and the meridian flip.
+     Mouse wheel zooms around the pointer, drag moves the view, double-click shows the whole sky.
+   • The settings sit in a bar across the top, with the picture below using the full width.
+     The bar scrolls sideways (wheel or scrollbar) when the window is too narrow; the buttons
+     on its right ('Plan' here, the log on the Build tab) always stay visible. At start the window
+     is made wide enough for all groups if the screen allows.
+   • Closing the window asks first if the horizon has not been saved since it was built or edited.
    • Rotator: keeps every frame level with the horizon, so overlap can be ~10 %.
      Offset = sky position angle − mechanical angle (from NINA's rotator panel after a
      plate solve). A wrong 180° doesn't matter here.
@@ -1558,26 +2110,43 @@ WORKFLOW
    • The horizon is the highest altitude where the view is blocked:
        solid      – pixels darker than 0.60 × the local sky (trees, roofs, walls)
        branches   – darker than 0.85 × sky (also thin bare branches)
-   • Azimuths listed as 'clear to bottom' or 'blocked to top' reached the edge of the
-     imaged area – shoot a few extra frames there for a precise value.
-   • 'Plan fill-in frames…' turns those areas into a short NINA sequence (camera, rotator and
+   • Fill-in areas are where the solid or branches line (with your edits) reaches the edge of
+     the imaged area – 'clear to bottom' or 'blocked to top' – so the true horizon may lie
+     outside it. Dark frame edges high in the sky that the lines rejected are ignored.
+   • 'Generate fill-in frames' plans the frames and shows them on the image, with a summary in
+     the log. 'Save fill-in sequence…' saves exactly the plan that is shown (camera, rotator and
      exposure settings come from the Plan tab). Shoot it, add its folder and build again.
+   • 'Fill-in: extra frames at steep edges' (above the buttons): around every steep rise or
+     drop of the new horizon line, an area ('Steep edge …') spanning the jump and this many
+     frame widths to each side is checked; only frames over gaps in the mosaic are shot.
+     0 = off. The values are copied from the Plan tab and follow changes made there; you can
+     still change them here. Frames shared by overlapping areas are shot only once.
+   • 'Fill-in: horizon line near gaps within (°)': wherever the solid or branches line runs
+     through a spot without pictures, or comes within this many degrees of one, a 'Gap …' area
+     is added – also where the horizon is not steep. Only frames over the gap are shot.
+     Default 1°, 0 = off.
+   • 'Show fill-in frames' (toolbar above the image) draws the fill-in areas (dashed magenta),
+     their frames (orange) and the shooting order (green = first → magenta = last, numbers =
+     first frame of each row; every frame is numbered at zoom 20). It follows your edits and
+     the fill-in settings: after a change the plan is generated again and redrawn.
    • 'Re-detect' applies new thresholds instantly without re-reading the frames.
-   • 'Side margin at steep edges': where the horizon rises or drops steeply (the side of a
+   • 'Side margin at steep edges' (toolbar above the image): where the horizon rises or drops steeply (the side of a
      tree, the end of a roof), the higher value is extended that many degrees sideways, so a
      target just beside the obstruction isn't scheduled too early. Gentle slopes are not
      changed. 'Steep' means more than the given degrees of altitude per degree of azimuth
-     (3 ≈ a 72° slope). 1-2° is a sensible margin; 0 switches it off. The lines on screen and
+     (2 ≈ a 63° slope; default 2). 1-2° is a sensible margin; 0 switches it off. The lines on screen and
      the saved files include the margin; your edits are made on the unwidened line.
    • The two lines are edited independently – the branches line may be drawn below the solid
      line (e.g. where the "solid" part is really a thin, see-through tree top).
    • Editing: choose 'solid line' or 'branches line' above the image, then left-drag to
      redraw the line (brush width in degrees), right-click to restore the detected value,
-     Ctrl+Z to undo. Zoom and scroll to work precisely. Edits are used when saving.
+     Ctrl+Z to undo. Edits are used when saving.
+   • Mouse wheel zooms the image around the pointer (2–24 px/°, or pick a level in 'zoom');
+     Shift+wheel, middle-drag or the scrollbars move it.
    • Reduced frames are cached (in %LOCALAPPDATA%\\HorizonMapper\\cache), so building again
      – e.g. after adding fill-in frames – only reads the new files. 'Clear cache' frees the space.
-   • 'Save horizon file…' saves one NINA .hrz file: choose 'solid' or 'with branches' next to
-     the button. Edits and the side margin are included.
+   • 'Save horizon file…' (below the fill-in buttons) saves one NINA .hrz file: choose 'solid'
+     or 'with branches' next to the button. Edits and the side margin are included.
      In NINA: Options → General → Astrometry → Horizon file.
 
 NOTES
@@ -1608,6 +2177,10 @@ def main():
     pp.add_argument("--hrz", nargs="+", help="1-2 horizon files")
     pp.add_argument("--below", type=float, default=4); pp.add_argument("--above", type=float, default=4)
     pp.add_argument("--floor", type=float, default=20)
+    pp.add_argument("--edge-frames", type=float, default=0.5,
+                    help="extra frame widths beside steep edges of the horizon file(s) (0 = off)")
+    pp.add_argument("--edge-slope", type=float, default=2.0,
+                    help="an edge is steep above this many degrees altitude per degree azimuth")
     pp.add_argument("--az", nargs=2, type=float, default=[0, 360])
     pp.add_argument("--overlap", type=float, default=0.10)
     pp.add_argument("--no-rotator", action="store_true")
@@ -1628,12 +2201,19 @@ def main():
     bp.add_argument("--old", help="old .hrz for comparison")
     bp.add_argument("--side-margin", type=float, default=0.0,
                     help="extend the higher side of steep horizon edges this many degrees sideways")
-    bp.add_argument("--steep-slope", type=float, default=3.0,
+    bp.add_argument("--steep-slope", type=float, default=2.0,
                     help="an edge is steep above this many degrees altitude per degree azimuth")
     bp.add_argument("--no-cache", action="store_true", help="don't use/create the frame cache")
     bp.add_argument("--fillin", metavar="FILE.json", help="also write a NINA fill-in sequence for uncertain areas")
     bp.add_argument("--fillin-exposure", type=float, default=0.008)
     bp.add_argument("--fillin-floor", type=float, default=15.0)
+    bp.add_argument("--fillin-edge-frames", type=float, default=0.5,
+                    help="for --fillin: extra frame widths beside steep horizon edges (0 = off)")
+    bp.add_argument("--fillin-gap-near", type=float, default=1.0,
+                    help="for --fillin: also cover places where a horizon line is within this many degrees "
+                         "of a spot without pictures (0 = off)")
+    bp.add_argument("--fillin-edge-slope", type=float, default=2.0,
+                    help="for --fillin: steep = more than this many deg altitude per deg azimuth")
     bp.add_argument("--sensor", nargs=3, type=float, metavar=("WPX", "HPX", "UM"), default=[6248, 4176, 3.76],
                     help="for --fillin: unbinned sensor size and pixel size")
     bp.add_argument("--focal", type=float, default=408, help="for --fillin: focal length (mm)")
@@ -1647,7 +2227,8 @@ def main():
                        focal_mm=a.focal, lat=a.lat, floor=a.floor, az_start=a.az[0], az_end=a.az[1],
                        overlap=a.overlap, rotator=not a.no_rotator, rot_offset=a.rot_offset,
                        rot_tolerance=a.rot_tol, exposure=a.exposure, gain=a.gain, binning=a.bin,
-                       template=a.template, margin_below=a.below, margin_above=a.above)
+                       template=a.template, margin_below=a.below, margin_above=a.above,
+                       edge_frames=a.edge_frames, edge_slope=a.edge_slope)
         if a.hrz:
             p.mode = "horizon"; p.horizon_files = a.hrz
         else:
@@ -1682,17 +2263,28 @@ def main():
         render_mosaic(mos, lines).save(a.outbase + "_mosaic.png")
         print(f"usable sky: solid {sky_area_sqdeg(det['az'], det['solid']):.0f} sq.deg, "
               f"branches {sky_area_sqdeg(det['az'], det['branches']):.0f} sq.deg")
-        if det["uncertain"]:
-            boxes = fillin_boxes(det, floor=a.fillin_floor)
+        boxes = fillin_boxes(det, floor=a.fillin_floor,
+                             lines=(det["az"], det["solid"], det["branches"])) if det["uncertain"] else []
+        if boxes:
             print(f"{len(det['uncertain'])} uncertain azimuth samples in {len(boxes)} areas:",
                   "; ".join(b[4] for b in boxes))
-            if a.fillin and boxes:
-                p = PlanParams(sensor_w_px=int(a.sensor[0]), sensor_h_px=int(a.sensor[1]), pixel_um=a.sensor[2],
-                               focal_mm=a.focal, lat=lat, rot_offset=a.rot_offset, exposure=a.fillin_exposure,
-                               floor=a.fillin_floor)
-                plan = plan_fillin(p, boxes)
+        if a.fillin:
+            p = PlanParams(sensor_w_px=int(a.sensor[0]), sensor_h_px=int(a.sensor[1]), pixel_um=a.sensor[2],
+                           focal_mm=a.focal, lat=lat, rot_offset=a.rot_offset, exposure=a.fillin_exposure,
+                           floor=a.fillin_floor)
+            boxes = boxes + steep_edge_boxes(det["az"], (det["solid"], det["branches"]), max(p.fov),
+                                             a.fillin_edge_frames, a.fillin_edge_slope,
+                                             floor=p.floor, ceiling=p.ceiling)
+            boxes = boxes + gap_boxes(mos, det["az"], (det["solid"], det["branches"]), a.fillin_gap_near,
+                                      floor=p.floor, ceiling=p.ceiling)
+            plan = plan_fillin(p, boxes, mos=mos) if boxes else None
+            if plan and plan["frames"]:
+                n_edge = len({l for l in plan["labels"] if l.startswith("Steep edge")})
+                n_gap = len({l for l in plan["labels"] if l.startswith("Gap")})
                 print(f"fill-in: {save_plan(p, plan, a.fillin)} ({len(plan['frames'])} frames, "
-                      f"~{plan['seconds'] / 60:.0f} min)")
+                      f"{n_edge} steep-edge and {n_gap} gap areas, ~{plan['seconds'] / 60:.0f} min)")
+            else:
+                print("fill-in: nothing to shoot")
         print(f"done in {time.time() - t0:.0f} s")
 
 
