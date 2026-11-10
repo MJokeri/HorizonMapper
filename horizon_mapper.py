@@ -4345,6 +4345,22 @@ TIPS = {
 
 HELP_TEXT = """HORIZON MAPPER FOR NINA   (the version is shown in the window title)
 
+DISCLAIMER AND SAFETY WARNING – read before use
+   • EXPERIMENTAL SOFTWARE, provided "AS IS" without warranty of any kind (GNU GPL v3 §15).
+     To the maximum extent permitted by applicable law, neither the developer, the copyright
+     holders, the distributors nor any other party who modifies or conveys the software is
+     liable for any damage or loss of any kind – to equipment, property, data, persons
+     (including eye injury) or third parties, direct or indirect – arising from its use or
+     inability to use it (GPL v3 §16–17). You use it entirely at your own risk and
+     responsibility; check every plan and setting and supervise the equipment at all times.
+   • ⚠ THE SUN: pointing a telescope, finder or camera at the Sun – or even slewing across or
+     near it – can instantly cause severe, permanent eye injury or blindness and can destroy
+     cameras, sensors, filters and other equipment by heat (NASA, AAO). Never look through any
+     optics in daylight; cover unused finders and guide scopes. Only certified solar filters
+     fitted securely to the FRONT of the optics are safe (AAS). The Sun check in this software
+     is an aid only, based on estimates, and NO GUARANTEE – stay with the equipment during
+     daytime runs and be ready to stop it (PAUSE / Esc). Full text: README.md.
+
 WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
 1. Plan sequence
    • Enter camera/telescope (or 'Read from a FITS file…'). The field of view is computed.

@@ -8,6 +8,10 @@ measured NINA horizon file (`.hrz`).
 
 Tabs: **1. Plan sequence** → **2. Capture (NINA)** → **3. Build horizon**.
 
+> ⚠ **Experimental software – use entirely at your own risk.** It moves real equipment and
+> may point it near the **Sun**, which can instantly blind and destroy equipment. Read the
+> [Disclaimer and safety warning](#disclaimer-and-safety-warning) before use.
+
 **Hover** over any setting, choice or button for a short explanation of what it does.
 
 On every tab the settings sit in a bar across the top and the picture fills the width below it.
@@ -15,6 +19,86 @@ The bar scrolls sideways (mouse wheel or scrollbar) when the window is too narro
 buttons (and the log on the Build tab) on its right always stay visible. At start the window is made
 wide enough for all groups if the screen allows. Closing the window asks first if the horizon has
 not been saved since it was built or last edited.
+
+## Disclaimer and safety warning
+
+**Please read this before you use the software. By installing, running or distributing Horizon
+Mapper for NINA you accept the terms below.**
+
+### 1. Experimental software – no warranty, no liability
+
+Horizon Mapper for NINA is **experimental software**. It sends movement and exposure commands to
+real equipment (mount, rotator, camera) and may contain errors that cause that equipment to move or
+behave unexpectedly.
+
+- **No warranty.** The software is provided **"AS IS"**, without warranty of any kind, express or
+  implied, including but not limited to the implied warranties of merchantability, fitness for a
+  particular purpose and non-infringement. The entire risk as to the quality, performance and
+  results of the software is with you. Should the software prove defective, you assume the cost of
+  all necessary servicing, repair or correction (GNU GPL v3, section 15).
+- **No liability.** To the maximum extent permitted by applicable law, in no event shall the
+  developer, the copyright holders, the distributors or any other party who modifies and/or conveys
+  the software be liable to you or to any third party for any damages or losses of any kind –
+  including, without limitation, damage to or loss of equipment, property or data, personal injury
+  (including injury to the eyes), or any direct, indirect, special, incidental or consequential
+  damages – arising out of or in connection with the use of, or the inability to use, the software,
+  even if such party has been advised of the possibility of such damages (GNU GPL v3, section 16).
+- **Use at your own risk and responsibility.** You alone are responsible for deciding whether and
+  how to use the software, for checking every setting and plan before running it, for the safe set-up,
+  balance, cabling and limits of your equipment, and for supervising the equipment while it is
+  controlled by the software. Keep people, animals and objects clear of moving equipment and be ready
+  to stop it at any time (the **⏸ PAUSE** button / **Esc**, and the controls of NINA, the mount and its
+  power supply).
+- **Applicable law.** Where applicable law does not allow a limitation or exclusion of liability
+  (for example for intent, gross negligence or injury to life, body or health under mandatory consumer
+  protection law), the limitation applies to the greatest extent that law permits; the remaining
+  provisions stay in effect. As provided in GNU GPL v3, section 17, this disclaimer is to be
+  interpreted in the way that most closely approximates an absolute waiver of all civil liability.
+- This section summarises and supplements the terms of the [GNU General Public License v3](LICENSE),
+  under which the software is licensed. In case of conflict, the licence prevails.
+
+### 2. ⚠ Danger: the Sun
+
+Horizon frames are often taken **in daylight**, so the Sun may be in the sky while the mount moves
+and the camera exposes.
+
+- **Pointing a telescope, finder, guide scope or camera lens at the Sun – or even slewing across or
+  close to it – can instantly cause severe and permanent eye injury or blindness** to anyone looking
+  through the optics, and can **damage or destroy cameras, sensors, filters, mirrors, focusers,
+  guide cameras and other equipment** through concentrated light and heat; it can also create a
+  **risk of fire**. NASA states that looking at even part of the bright Sun through a telescope,
+  binoculars or camera lens that has no purpose-made solar filter fixed over its front end injures
+  the eye severely and at once. The American Academy of Ophthalmology warns that
+  viewing the Sun even briefly can permanently damage the retina, and that concentrated solar rays
+  can melt or damage filters.
+- **Never look through any optics during a daytime capture.** Cover or remove finder scopes and
+  guide scopes that are not needed.
+- **Only properly certified solar filters securely attached to the *front* of the optics** keep
+  the Sun's light and heat out of the instrument (American Astronomical Society). Eyepiece filters,
+  eclipse glasses, sunglasses, ND filters or improvised materials are **not** safe in or behind
+  optics. Unless you deliberately do solar imaging with such filters fitted and checked, the optics
+  must **never** point at or near the Sun.
+- **The Sun avoidance in this software is an aid only and is no guarantee of safety.** The Sun
+  position, frame timing and slew paths are estimates; the real path of a mount (meridian flips,
+  firmware behaviour, axis order, clock, location, time zone or settings errors, communication
+  failures or interrupted commands) can differ, and a mount can pass near the Sun even when no frame
+  is planned there. Keep **Keep away from the Sun** generous, check the Sun overlay and the time and
+  location settings before every run, prefer capturing when the Sun is low, behind an obstruction or
+  below the horizon, and **stay with the equipment and supervise every daytime run**, ready to stop
+  it immediately.
+- If you are unsure, do not capture in daylight. Seek advice from an experienced astronomer before
+  using any solar filter with a camera or telescope.
+
+### Sources
+
+- GNU General Public License v3, sections 15–17 (this repository's [LICENSE](LICENSE));
+  <https://www.gnu.org/licenses/gpl-3.0.html>
+- NASA – Eclipse eye safety: <https://science.nasa.gov/eclipses/safety/> and
+  <https://science.nasa.gov/eclipses/future-eclipses/eclipse-2024/safety/>
+- American Astronomical Society – Solar filters for optics (telescopes, binoculars & cameras):
+  <https://eclipse.aas.org/eye-safety/optics-filters>
+- American Academy of Ophthalmology – Photographing an eclipse without damaging your eyes:
+  <https://www.aao.org/newsroom/news-releases/detail/learn-how-to-photograph-eclipse-without-damaging-y>
 
 ## Debug log
 

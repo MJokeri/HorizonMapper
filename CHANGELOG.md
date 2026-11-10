@@ -3,6 +3,12 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Disclaimer and safety warning** (README, near the top, and at the top of the in-app Help):
+  the software is experimental and provided "AS IS"; no warranty and no liability of the developer,
+  distributors or any other party for damage to equipment, persons or third parties (based on GNU
+  GPL v3 §15–17); use at your own risk. A warning, with references to NASA, the AAS and the AAO,
+  that pointing or even slewing optics near the Sun can instantly cause eye injury and destroy
+  equipment, and that the built-in Sun check is an aid only.
 - **2. Capture (NINA) tab:** shoots the Plan tab plan or the Build tab fill-in frames directly,
   through NINA's **Advanced API** plugin. For each frame: slew (alt/az → J2000 RA/Dec from the mount's
   sidereal time), mechanical rotator move, settle, exposure. NINA saves the FITS with its usual
