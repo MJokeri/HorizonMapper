@@ -22,7 +22,19 @@
 - **Plan tab – Rows bottom to top in both halves:** with the east/west split, the west half can also
   be shot bottom to top (default stays top to bottom, the shortest path). CLI: `plan --bottom-up`.
 
+- **Debug menu → Debug log (all actions):** every click, NINA request (timing and answer), capture
+  step, wait, pause and state change, folder scan and redraw, plus errors from window callbacks and
+  background threads, goes to `%LOCALAPPDATA%\HorizonMapper\logs\`. A watchdog logs whenever the
+  window is blocked for more than a second. The setting is remembered and on by default for now.
+
 ### Fixed
+- **The window could freeze during a capture run, making PAUSE and Stop unresponsive.**
+  - Every event from the run redrew the whole picture, and the handler only gave control back to
+    the window once all queued events were done. With hundreds of frames and previews, redrawing
+    became slower than the events arrived.
+  - Now events are handled for at most ~80 ms at a time, the picture is redrawn at most four times
+    a second, and resized previews are cached.
+  - Background threads no longer read window settings, which on Windows can stall both sides.
 - Files that NINA saves late no longer hold up or pause the run. The app scans NINA's image folder
   every few seconds and matches new FITS files to their frames, by name or by the pointing in the
   header. They are added to the picture and the file list as they arrive, also for 10 minutes
