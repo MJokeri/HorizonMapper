@@ -8,6 +8,8 @@ measured NINA horizon file (`.hrz`).
 
 Tabs: **1. Plan sequence** → **2. Capture (NINA)** → **3. Build horizon**.
 
+**Hover** over any setting, choice or button for a short explanation of what it does.
+
 On every tab the settings sit in a bar across the top and the picture fills the width below it.
 The bar scrolls sideways (mouse wheel or scrollbar) when the window is too narrow; the Plan
 buttons (and the log on the Build tab) on its right always stay visible. At start the window is made
@@ -24,9 +26,25 @@ not been saved since it was built or last edited.
 - folder scans and redraw times;
 - errors, including ones the window would otherwise hide.
 
-A watchdog adds a line whenever the window is blocked for more than a second. **Debug → Open log
+A watchdog adds a line whenever the window is blocked for more than a second.
+**Debug → Show log windows** shows or hides the log panes. The Capture log sits beside the
+picture, and you can drag the divider to make it wider or narrower. **Debug → Open log
 folder** opens the folder. The setting is remembered; it is on by default during development.
 Please attach the log when reporting a problem.
+
+## Development notes
+
+- Every new setting, choice or button needs a hover text: add an entry to `TIPS` in
+  `horizon_mapper.py` (key = the text shown in the window). The debug log lists controls without
+  one ("controls without hover text").
+- Update the README, the in-app Help and `CHANGELOG.md` with every change.
+
+### Release checklist
+
+1. Set `DEV_MODE = False` in `horizon_mapper.py`. This switches the development defaults off: the
+   debug log and the log windows. Users can still turn both on in the Debug menu.
+2. Set `APP_VERSION` and finish the `CHANGELOG.md` entry.
+3. Tag the release (`vX.Y.Z`); the GitHub Actions build attaches the exe to the release.
 
 ## Install (Windows)
 
@@ -85,7 +103,8 @@ the Plan tab and running it in NINA still works as before.)
 settings (default port 1888), and set NINA to save **FITS** files. Connect the mount, camera and
 rotator in NINA as usual. Don't run a NINA sequence at the same time.
 
-1. **Test connection** checks the plugin, shows which devices are connected, starts the live device
+1. **Host** / **Port**: where NINA runs (default for testing: 192.168.1.55, port 1888).
+   **Test connection** checks the plugin, shows which devices are connected, starts the live device
    line (mount alt/az, pier side, rotator, camera) and fills in NINA's image folder.
 2. **Frames to shoot:** the plan from the Plan tab, the fill-in frames generated on the Build tab,
    or a **saved sequence file** (a plan or fill-in sequence saved for NINA; **Browse…**). Exposure,
@@ -110,9 +129,11 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
 5. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°) or below **Never
    below altitude** (default 10°) are skipped, never slewed to. **Unpark at start** / **Park when
    finished**.
-6. **▶ Start** asks for confirmation and switches tracking on. If the mount driver refuses, a note
-   goes to the log and the run continues; every slew is checked against the mount's RA/Dec. Then,
-   for every frame: slew (alt/az converted to J2000 RA/Dec
+6. **▶ Start** asks for confirmation. Tracking is left as it is: the exposures are very short and
+   every slew is aimed at the current sky position, so it isn't needed. If the mount isn't tracking,
+   the log says so once. Only if a slew is refused while the mount isn't tracking does the app
+   switch tracking on and try that slew once more. Every slew is checked against the mount's
+   RA/Dec. Then, for every frame: slew (alt/az converted to J2000 RA/Dec
    with the mount's own sidereal time) → rotator to its mechanical angle → settle → expose. NINA saves
    the FITS with its usual headers, and Horizon Mapper finds the file in NINA's image folder.
 
@@ -123,8 +144,8 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
   While paused, **Skip frame** skips it.
 - **Any error or timeout pauses the run automatically** (with a beep and the reason in the log).
   Examples: NINA not answering, a failed slew, the mount ending up somewhere else, or a stuck
-  rotator. Nothing is skipped silently. Fix the cause and **Resume**, or **■ Stop run**.
-- **■ Stop run** ends the run and keeps the frames taken so far. **Start** again shoots only the
+  rotator. Nothing is skipped silently. Fix the cause and **Resume**, or **■ End run**.
+- **■ End run** ends the run and keeps the frames taken so far. **Start** again shoots only the
   frames still missing in the range. Closing the window during a run asks first and stops
   everything.
 

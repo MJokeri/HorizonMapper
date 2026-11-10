@@ -9,7 +9,7 @@
   headers; the files are found in NINA's image folder (read from the profile). The file list is added
   to the Build tab, which now accepts such list files like folders.
 - **Pause:** a large red **⏸ PAUSE** button and **Esc** stop slew, rotator and exposure immediately and
-  hold; **Resume** repeats the interrupted frame, **Skip frame** skips it, **Stop run** ends the run
+  hold; **Resume** repeats the interrupted frame, **Skip frame** skips it, **End run** ends the run
   (a later Start can continue). Errors and timeouts pause the run automatically.
 - **Safety limits:** Sun avoidance (default 30°) and a minimum altitude (default 10°); frames outside
   them are skipped, never slewed to. Confirmation before starting and when closing during a run.
@@ -32,6 +32,13 @@
   leaving out frames already taken unless **Re-shoot frames already taken** is ticked. A stopped or
   loaded capture is resumed simply by pressing Start.
 - Choosing a frame source shows its frames at once; a fresh Start uses the source as it is then.
+- **Hover explanations** for every setting, choice and button on all tabs. New controls get theirs
+  from the `TIPS` table; the debug log lists any control without one.
+- **Debug → Show log windows** (on during development): shows or hides the Capture and Build logs.
+  The Capture log sits in its own pane; drag the divider to resize it.
+- `DEV_MODE` switch for the development defaults (debug log and log windows on), plus a release
+  checklist in the README.
+- Capture tab: default host 192.168.1.55 (for testing).
 - Capture tab: the log runs down the right side at full height, with a scrollbar.
 - **Debug menu → Debug log (all actions):** every click, NINA request (timing and answer), capture
   step, wait, pause and state change, folder scan and redraw, plus errors from window callbacks and
@@ -77,6 +84,12 @@
 - Error messages from NINA that carry no error text now say that NINA reported a failure.
 
 ### Changed
+- **Stop run** is now **End run**.
+- **Tracking is no longer switched on at the start of a capture.** The exposures are very short and
+  every slew is aimed at the current sky position, so tracking isn't needed. This avoids a confusing
+  "failed" reply from drivers such as the ZWO ASI Mount, which answer the tracking command that way
+  even when it works. If a slew is refused while the mount isn't tracking, tracking is switched on
+  and that slew is tried once more. A non-tracking mount gets one plain information line in the log.
 - Tabs renumbered: 1. Plan sequence, 2. Capture (NINA), 3. Build horizon.
 
 ## 1.0.1 – 2026-11-09
