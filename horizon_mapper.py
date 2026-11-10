@@ -403,37 +403,60 @@ def fillin_boxes(det, extra_below=8.0, extra_above=6.0, floor=0.0, ceiling=85.0,
     return boxes
 
 
-def widen_fillin_boxes(boxes, az, alt, frame_w, edge_frames=1.0, edge_slope=3.0,
-                       floor=0.0, ceiling=85.0, look=2.0):
-    """Widen fill-in boxes whose side lies at a steep rise or drop of the measured horizon.
+def steep_edge_boxes(az, lines, frame_w, edge_frames=1.0, edge_slope=3.0, min_jump=2.0,
+                     margin=1.0, floor=0.0, ceiling=85.0):
+    """Fill-in areas around the steep rises and drops of the measured horizon line(s).
 
-    `az`/`alt` is the measured horizon line, `frame_w` the frame width in degrees on the sky.
-    Within `look` degrees of a box side, if the horizon changes faster than `edge_slope`
-    (deg altitude per deg azimuth), that side is pushed out by `edge_frames` frame widths
-    (scaled by 1/cos(alt)). The altitude range stays the same: the main run has already imaged
-    the rest of the jump, and stretching every area to the full jump height multiplies the frames.
+    For every run of the line steeper than `edge_slope` (deg altitude per deg azimuth) whose
+    total jump is at least `min_jump` degrees, an area is made that spans the jump in altitude
+    (plus `margin`) and reaches `edge_frames` frame widths (scaled by 1/cos(alt)) to both sides.
+    Areas from the different lines that overlap are merged. Returns (az0, az1, alt0, alt1, label).
     """
-    if edge_frames <= 0 or not boxes:
-        return boxes
-    az = np.asarray(az, float); alt = np.asarray(alt, float)
-    step = float(np.median(np.diff(az))) if len(az) > 1 else 0.5
-    slope = np.abs(np.roll(alt, -1) - alt) / step
-    out = []
-    for a0, a1, h0, h1, label in boxes:
-        added = False
-        for side in (a0, a1):
-            d = (az - side + 180) % 360 - 180
-            win = np.abs(d) <= look
-            if not win.any() or slope[win].max() < edge_slope:
-                continue
-            w = edge_frames * frame_w / max(math.cos(math.radians(min(h1, 80.0))), 0.17)
-            if side == a0:
-                a0 = a0 - w
-            else:
-                a1 = a1 + w
-            added = True
-        out.append((a0, a1, h0, h1, label + (" + steep edge" if added else "")))
-    return out
+    if edge_frames <= 0:
+        return []
+    az = np.asarray(az, float); n = len(az)
+    step = float(np.median(np.diff(az))) if n > 1 else 0.5
+    raw = []
+    for v in lines:
+        v = np.asarray(v, float)
+        steep = np.abs(np.roll(v, -1) - v) / step >= edge_slope           # segment i -> i+1
+        i = 0
+        while i < n:
+            if not steep[i]:
+                i += 1; continue
+            j = i
+            while j + 1 < n and steep[j + 1] and np.sign(v[(j + 2) % n] - v[j + 1]) == np.sign(v[(i + 1) % n] - v[i]):
+                j += 1                                          # same direction: one rise or one drop
+            seg = v[np.arange(i, j + 2) % n]
+            bot, top = float(seg.min()), float(seg.max())
+            if top - bot >= min_jump:
+                w = edge_frames * frame_w / max(math.cos(math.radians(min(top + margin, 80.0))), 0.17)
+                raw.append([az[i] - w, az[(j + 1) % n] + (360 if j + 1 >= n else 0) + w,
+                            max(floor, bot - margin), min(ceiling, top + margin)])
+            i = j + 2
+    raw.sort(key=lambda r: r[0])
+    merged = []      # only identical edges (seen on both lines) are merged; frames shared by
+    for r in raw:    # neighbouring areas are planned once by plan_fillin
+        m = merged[-1] if merged else None
+        if m and abs(r[0] - m[0]) < 1.0 and abs(r[1] - m[1]) < 1.0:
+            m[0] = min(m[0], r[0]); m[1] = max(m[1], r[1]); m[2] = min(m[2], r[2]); m[3] = max(m[3], r[3])
+        else:
+            merged.append(list(r))
+    return [(a0, a1, h0, h1, f"Steep edge Az {a0 % 360:.0f}-{a1 % 360:.0f} ({h0:.0f}-{h1:.0f}°)")
+            for a0, a1, h0, h1 in merged if h1 > h0]
+
+
+def frame_coverage(mos, alt, az, half_w, half_h):
+    """Fraction of a frame footprint (alt/az box) that the mosaic already has data for."""
+    M = mos["M"]; res = mos["res"]; a0 = mos["alt0"]
+    NH, NA = M.shape
+    hs = np.linspace(alt - half_h, alt + half_h, 9); zs = np.linspace(az - half_w, az + half_w, 13)
+    r = np.floor((hs - a0) / res).astype(int); c = np.floor((zs % 360) / 360 * NA).astype(int) % NA
+    ok = (r >= 0) & (r < NH)
+    if not ok.any():
+        return 0.0
+    sub = M[np.ix_(r[ok], c)]
+    return float(np.isfinite(sub).sum()) / (len(hs) * len(zs))
 
 
 def order_color(t):
@@ -487,8 +510,12 @@ def draw_order(canvas, plan, X, Y, tag="order", numbers="rows", flip=True, width
                 break
 
 
-def plan_fillin(p, boxes):
-    """Plan frames covering the given boxes (az0, az1, alt0, alt1, label)."""
+def plan_fillin(p, boxes, mos=None, max_cover=0.97):
+    """Plan frames covering the given boxes (az0, az1, alt0, alt1, label).
+
+    With `mos`, frames of 'Steep edge' areas whose footprint the mosaic already covers
+    (more than `max_cover`) are left out, so only the gaps near the horizon line are shot.
+    """
     w, h = p.fov
     fw, fh = _effective_fov(w, h, p.rot_tolerance) if p.rotator else (w, h)
     ov = p.overlap
@@ -516,6 +543,9 @@ def plan_fillin(p, boxes):
             n = 1 if span_a <= cov else math.ceil((span_a - cov) / (cov * (1 - ov))) + 1
             azs = [(a0 + a1) / 2] if n == 1 else [a0 + cov / 2 + k * (span_a - cov) / (n - 1) for k in range(n)]
             azs = [z % 360 for z in azs if not covered(alt, z % 360)]   # overlapping areas: shoot once
+            if mos is not None and label.startswith("Steep edge"):
+                hw = fw / max(math.cos(math.radians(alt)), 1e-3) / 2
+                azs = [z for z in azs if frame_coverage(mos, alt, z, hw, fh / 2) <= max_cover]
             if not azs:
                 continue
             if ri % 2:
@@ -1634,8 +1664,13 @@ def run_gui():
         except ValueError:
             raise ValueError("Check the fill-in steep-edge values.")
         az_, s_, b_ = final_lines()
-        boxes = widen_fillin_boxes(boxes, az_, np.maximum(s_, b_), max(p.fov), ef, es, p.floor, p.ceiling)
-        return p, boxes, (plan_fillin(p, boxes) if boxes else None)
+        boxes = boxes + steep_edge_boxes(az_, (s_, b_), max(p.fov), ef, es, floor=p.floor, ceiling=p.ceiling)
+        if not boxes:
+            return p, boxes, None
+        plan = plan_fillin(p, boxes, mos=result.get("mos"))
+        used = {lab for lab in plan["labels"]}
+        boxes = [b for b in boxes if b[4] in used]        # drop steep-edge areas that are fully imaged
+        return p, boxes, (plan if boxes else None)
 
     def draw_fill():
         cv.delete("fill")
@@ -1689,12 +1724,15 @@ def run_gui():
     ttk.Button(bb, text="Re-detect (new thresholds)", command=redetect).grid(row=0, column=1, padx=2, pady=2, sticky="ew")
     ttk.Button(bb, text="Plan fill-in frames…", command=plan_fill).grid(row=1, column=0, padx=2, pady=2, sticky="ew")
     fe = ttk.Frame(bb); fe.grid(row=2, column=0, columnspan=2, padx=2, pady=2, sticky="w")
-    fill_edge = tk.StringVar(value="1"); fill_slope = tk.StringVar(value="3")
+    # Start from the Plan tab's values and follow them whenever they change there.
+    fill_edge = tk.StringVar(value=V["edge_frames"].get()); fill_slope = tk.StringVar(value=V["edge_slope"].get())
+    V["edge_frames"].trace_add("write", lambda *a: fill_edge.set(V["edge_frames"].get()))
+    V["edge_slope"].trace_add("write", lambda *a: fill_slope.set(V["edge_slope"].get()))
     ttk.Label(fe, text="Fill-in: extra frames at steep edges").pack(side="left")
     ttk.Spinbox(fe, textvariable=fill_edge, from_=0, to=5, increment=0.5, width=4).pack(side="left", padx=(2, 8))
     ttk.Label(fe, text="steep = more than").pack(side="left")
     ttk.Spinbox(fe, textvariable=fill_slope, from_=0.5, to=20, increment=0.5, width=4).pack(side="left", padx=2)
-    ttk.Label(fe, text="°/°  (0 = off)", foreground="#666").pack(side="left")
+    ttk.Label(fe, text="°/°  (0 = off; copied from the Plan tab)", foreground="#666").pack(side="left")
     for _v in (fill_edge, fill_slope):
         _v.trace_add("write", lambda *a: draw_fill())
     sv = ttk.Frame(bb); sv.grid(row=1, column=1, padx=2, pady=2, sticky="ew")
@@ -1767,10 +1805,11 @@ WORKFLOW
      imaged area – shoot a few extra frames there for a precise value.
    • 'Plan fill-in frames…' turns those areas into a short NINA sequence (camera, rotator and
      exposure settings come from the Plan tab). Shoot it, add its folder and build again.
-     'Fill-in: extra frames at steep edges' (below the button): where a fill-in area ends at a
-     steep rise or drop of the measured horizon, that side is extended by this many frame
-     widths ("+ steep edge" in the list). 0 = off. Frames shared by overlapping areas are
-     shot only once.
+     'Fill-in: extra frames at steep edges' (below the button): around every steep rise or
+     drop of the new horizon line, an area ('Steep edge …') spanning the jump and this many
+     frame widths to each side is checked; only frames over gaps in the mosaic are shot.
+     0 = off. The values are copied from the Plan tab and follow changes made there; you can
+     still change them here. Frames shared by overlapping areas are shot only once.
    • 'Show fill-in frames' (toolbar above the image) draws the fill-in areas (dashed magenta),
      their frames (orange) and the shooting order (green = first → magenta = last, numbers =
      first frame of each row; every frame is numbered at zoom 20). It follows your edits and
@@ -1904,20 +1943,24 @@ def main():
         render_mosaic(mos, lines).save(a.outbase + "_mosaic.png")
         print(f"usable sky: solid {sky_area_sqdeg(det['az'], det['solid']):.0f} sq.deg, "
               f"branches {sky_area_sqdeg(det['az'], det['branches']):.0f} sq.deg")
-        if det["uncertain"]:
-            boxes = fillin_boxes(det, floor=a.fillin_floor)
+        boxes = fillin_boxes(det, floor=a.fillin_floor) if det["uncertain"] else []
+        if boxes:
             print(f"{len(det['uncertain'])} uncertain azimuth samples in {len(boxes)} areas:",
                   "; ".join(b[4] for b in boxes))
-            if a.fillin and boxes:
-                p = PlanParams(sensor_w_px=int(a.sensor[0]), sensor_h_px=int(a.sensor[1]), pixel_um=a.sensor[2],
-                               focal_mm=a.focal, lat=lat, rot_offset=a.rot_offset, exposure=a.fillin_exposure,
-                               floor=a.fillin_floor)
-                boxes = widen_fillin_boxes(boxes, det["az"], np.maximum(det["solid"], det["branches"]),
-                                           max(p.fov), a.fillin_edge_frames, a.fillin_edge_slope,
-                                           p.floor, p.ceiling)
-                plan = plan_fillin(p, boxes)
+        if a.fillin:
+            p = PlanParams(sensor_w_px=int(a.sensor[0]), sensor_h_px=int(a.sensor[1]), pixel_um=a.sensor[2],
+                           focal_mm=a.focal, lat=lat, rot_offset=a.rot_offset, exposure=a.fillin_exposure,
+                           floor=a.fillin_floor)
+            boxes = boxes + steep_edge_boxes(det["az"], (det["solid"], det["branches"]), max(p.fov),
+                                             a.fillin_edge_frames, a.fillin_edge_slope,
+                                             floor=p.floor, ceiling=p.ceiling)
+            plan = plan_fillin(p, boxes, mos=mos) if boxes else None
+            if plan and plan["frames"]:
+                n_edge = len({l for l in plan["labels"] if l.startswith("Steep edge")})
                 print(f"fill-in: {save_plan(p, plan, a.fillin)} ({len(plan['frames'])} frames, "
-                      f"~{plan['seconds'] / 60:.0f} min)")
+                      f"{n_edge} steep-edge areas with gaps, ~{plan['seconds'] / 60:.0f} min)")
+            else:
+                print("fill-in: nothing to shoot")
         print(f"done in {time.time() - t0:.0f} s")
 
 
