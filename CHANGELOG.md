@@ -32,6 +32,15 @@
   leaving out frames already taken unless **Re-shoot frames already taken** is ticked. A stopped or
   loaded capture is resumed simply by pressing Start.
 - Choosing a frame source shows its frames at once; a fresh Start uses the source as it is then.
+- **Sun safety, beyond single frames:**
+  - **Plan preview:** shows the Sun's track from the chosen start time to the plan's estimated end,
+    with the keep-away zone. Frames that would be too close when their turn comes are red; slews
+    passing near the Sun get a red ×.
+  - **Capture Start:** times the frames through the run and lists any frames or slews that would
+    come too close. Choose to shoot as planned or leave those frames out of this run.
+  - **During the run:** each slew's path from the mount's actual position is checked; one that
+    would pass near the Sun goes via a safe intermediate position, or the frame is skipped.
+  - **Capture picture:** shows the Sun now, its track and the keep-away zone.
 - **Build tab – Import from Capture…:** takes the capture on the Capture tab, or a saved
   `.hmcap.json`, and does three things, then offers to build right away:
   - adds its file list to the folders;
