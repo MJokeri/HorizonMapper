@@ -4,10 +4,10 @@
 
 ### Added
 - **Plan tab – Extra frames at steep edges:** where the current horizon rises or drops steeply
-  (threshold **Steep = more than**, default 3° altitude per degree of azimuth), the planned strip is
-  widened sideways by the chosen number of frame widths (default 1, 0 = off) and spans the full
+  (threshold **Steep = more than**, default 2° altitude per degree of azimuth), the planned strip is
+  widened sideways by the chosen number of frame widths (default 0.5, 0 = off) and spans the full
   height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With the Tikankuja horizon,
-  0 / 0.5 / 1 / 2 extra frames give 569 / 611 / 650 / 739 frames.
+  0 / 0.5 / 1 / 2 extra frames give 569 / 638 / 713 / 873 frames (steep = 2°/°).
 - **Plan tab – fewer frames:** each row now places its frames only over the stretches where the
   strip enters that row's altitude zone, as few as the overlap allows. Before, frames sat on a fixed
   grid and every grid frame that touched the strip was kept, so a narrow strip (for example with
@@ -38,6 +38,11 @@
   sideways when the window is too narrow; the action buttons (and the Build tab's log) on its right
   stay visible. Long groups were split into short columns; the default window is 1600×900.
 
+- **Exit check:** closing the window asks for confirmation if the horizon has not been saved since
+  it was built or last edited.
+- **Window size:** at start the window is made wide enough for all settings groups, as far as the
+  screen allows.
+
 ### Fixed
 - Plan preview: a frame lying across 0°/360° was drawn as a box across the whole preview.
 - Fill-in areas are checked against the solid and branches lines (with edits). Before, the detector's
@@ -48,6 +53,10 @@
 - Fill-in frames shared by overlapping areas are now shot only once.
 
 ### Changed
+- Defaults: **Extra frames at steep edges** 0.5 (was 1) and **Steep = more than** 2°/° (was 3), on the
+  Plan tab, for fill-in and in the CLI; the Build toolbar's side-margin steepness is also 2.
+- **Build tab:** the **Build** group (Build mosaic & horizon, Re-detect, progress) sits in the settings
+  bar between **Current horizon** and **Fill-in frames**; only the log stays fixed on the right.
 - **Build tab:** **Save horizon file…** and its solid / with branches choice moved below the fill-in
   buttons, so the order follows the workflow: build, fill in, save.
 - **Side margin at steep edges:** the setting and its steepness threshold moved from the Build tab's

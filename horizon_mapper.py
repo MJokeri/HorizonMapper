@@ -163,8 +163,8 @@ class PlanParams:
         self.horizon_files = []       # 1 or 2 files for mode "horizon"
         self.margin_below = 4.0; self.margin_above = 4.0
         self.floor = 20.0; self.ceiling = 85.0
-        self.edge_frames = 1.0        # extra frame widths beside steep horizon edges (0 = off)
-        self.edge_slope = 3.0         # "steep" = more than this many deg altitude per deg azimuth
+        self.edge_frames = 0.5        # extra frame widths beside steep horizon edges (0 = off)
+        self.edge_slope = 2.0         # "steep" = more than this many deg altitude per deg azimuth
         self.overlap = 0.10
         # rotator
         self.rotator = True; self.rot_offset = -58.04; self.rot_sign = 1; self.rot_tolerance = 3.0
@@ -1074,7 +1074,7 @@ def detect_horizon(mos, solid_frac=0.6, thin_frac=0.85, step=0.5, max_branch_gap
     return dict(az=az, solid=solid_f, branches=branches, details=out, uncertain=unsure, measured=measured)
 
 
-def widen_steep_edges(az, alt, side_deg=0.0, steep_slope=3.0):
+def widen_steep_edges(az, alt, side_deg=0.0, steep_slope=2.0):
     """Extend the horizon sideways at steep edges.
 
     Where the horizon rises or falls faster than `steep_slope` degrees of altitude per degree of
@@ -1183,6 +1183,7 @@ def run_gui():
     root.geometry("1600x900")
     nb = ttk.Notebook(root); nb.pack(fill="both", expand=True)
     scroll_panels = []          # (holder frame, canvas, scrollbar) of the settings bars
+    bars = []                   # (groups frame, fixed frame) of each settings bar
 
     def topbar(parent):
         """Settings bar across the top of a tab. Returns (bar, fixed): `bar` holds the setting groups
@@ -1209,7 +1210,7 @@ def run_gui():
                     sb.pack_forget()
                 c.xview_moveto(0)
         inner.bind("<Configure>", update); c.bind("<Configure>", update); fixed.bind("<Configure>", update)
-        scroll_panels.append((holder, c, sb))
+        scroll_panels.append((holder, c, sb)); bars.append((inner, fixed))
         ttk.Separator(parent, orient="horizontal").pack(side="top", fill="x", padx=6)
         return inner, fixed
 
@@ -1541,7 +1542,7 @@ def run_gui():
     labeled(box, 0, "Solid: darker than", pvar("solid", "0.60"), width=6, col=3, tip="× sky")
     labeled(box, 1, "Branches: darker than", pvar("thin", "0.85"), width=6, col=3, tip="× sky")
     labeled(box, 2, "Bias level (blank = auto)", pvar("bias", ""), width=6, col=3)
-    pvar("side", "0"); pvar("steep", "3")   # shown in the toolbar above the image
+    pvar("side", "0"); pvar("steep", "2")   # shown in the toolbar above the image
     pv["cache"] = tk.BooleanVar(value=True)
     ttk.Checkbutton(box, text="Cache reduced frames", variable=pv["cache"]).grid(row=3, column=3, columnspan=2, sticky="w", padx=4)
     ttk.Button(box, text="Clear cache", command=lambda: messagebox.showinfo(
@@ -1551,9 +1552,9 @@ def run_gui():
     ttk.Entry(box, textvariable=old_var, width=34).pack(side="top", anchor="w", padx=4, pady=2)
     ttk.Button(box, text="Browse…", command=lambda: old_var.set(filedialog.askopenfilename(
         filetypes=[("Horizon", "*.hrz *.txt"), ("All", "*.*")]) or old_var.get())).pack(side="top", anchor="w", padx=4)
+    run_box = group(pl, "Build")
     fill_box = group(pl, "Fill-in frames")
     hz_box = group(pl, "Horizon file")
-    run_box = ttk.LabelFrame(build_fixed, text="Build"); run_box.pack(side="left", fill="y", pady=2)
     bb = ttk.Frame(run_box); bb.pack(side="top", fill="x", padx=4, pady=2)
     pb = ttk.Progressbar(run_box, length=200, maximum=1.0); pb.pack(side="top", fill="x", padx=4, pady=4)
     status = ttk.Label(run_box, text="Idle", wraplength=220); status.pack(side="top", anchor="w", padx=4)
@@ -1869,6 +1870,13 @@ def run_gui():
         else:
             log("No uncertain areas – every azimuth has sky and obstruction inside the imaged area.")
 
+    def lines_fingerprint():
+        """Identifies the horizon as it would be saved now (lines with edits and side margin)."""
+        if E.get("solid") is None:
+            return None
+        az, s_, b_ = final_lines()
+        return hash((np.round(s_, 3).tobytes(), np.round(b_, 3).tobytes()))
+
     def save_outputs():
         if E["solid"] is None:
             messagebox.showerror(APP_NAME, "Build the horizon first."); return
@@ -1881,6 +1889,7 @@ def run_gui():
         if not f:
             return
         write_hrz(f, az, vals)
+        E["saved_fp"] = lines_fingerprint()
         messagebox.showinfo(APP_NAME, f"Saved the {which} horizon:\n{f}\n\n"
                                       "In NINA: Options → General → Astrometry → Horizon.")
 
@@ -2037,6 +2046,25 @@ def run_gui():
     help_tab = ttk.Frame(nb); nb.add(help_tab, text="Help")
     t = tk.Text(help_tab, wrap="word"); t.pack(fill="both", expand=True)
     t.insert("1.0", HELP_TEXT); t.config(state="disabled")
+
+    def on_close():
+        fp = lines_fingerprint()
+        if fp is not None and fp != E.get("saved_fp"):
+            if not messagebox.askyesno(APP_NAME, "The horizon has not been saved since it was built or "
+                                                 "last edited.\n\nExit without saving it?", icon="warning"):
+                nb.select(proc); return
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", on_close)
+
+    # Start wide enough for every settings group (and the fixed boxes), if the screen allows it.
+    try:
+        root.update_idletasks()
+        need = max(inner.winfo_reqwidth() + fixed.winfo_reqwidth() for inner, fixed in bars) + 40
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w = min(max(need, 1280), sw - 20); h = min(900, sh - 80)
+        root.geometry(f"{w}x{h}+{max((sw - w) // 2, 0)}+{max((sh - h) // 2 - 20, 0)}")
+    except Exception:
+        pass
     root.mainloop()
 
 
@@ -2049,9 +2077,9 @@ WORKFLOW
      (optionally plus a second estimate, e.g. from an all-sky camera); the strip spans both,
      plus margins. The current horizon is also filled in on the Build tab for comparison.
    • 'Extra frames at steep edges' (horizon mode): where the current horizon rises or drops
-     more steeply than 'Steep = more than' (altitude ° per azimuth °, 3 ≈ 72°), the strip is
+     more steeply than 'Steep = more than' (altitude ° per azimuth °, 2 ≈ 63°), the strip is
      widened sideways by this many frame widths and covers the whole height of the jump, so
-     the sides of trees and roofs are imaged. 1 is a good default; 0 = off.
+     the sides of trees and roofs are imaged. Default 0.5; 0 = off.
      Fractions work: 0.5 usually gives two frames per row at a narrow edge.
    • Each row gets frames only where the strip enters it, as few as the overlap allows.
    • 'Lowest altitude' keeps frames (and the sun) out of the low sky.
@@ -2061,7 +2089,9 @@ WORKFLOW
      Mouse wheel zooms around the pointer, drag moves the view, double-click shows the whole sky.
    • The settings sit in a bar across the top, with the picture below using the full width.
      The bar scrolls sideways (wheel or scrollbar) when the window is too narrow; the buttons
-     on its right ('Plan' here, 'Build' and the log on the Build tab) always stay visible.
+     on its right ('Plan' here, the log on the Build tab) always stay visible. At start the window
+     is made wide enough for all groups if the screen allows.
+   • Closing the window asks first if the horizon has not been saved since it was built or edited.
    • Rotator: keeps every frame level with the horizon, so overlap can be ~10 %.
      Offset = sky position angle − mechanical angle (from NINA's rotator panel after a
      plate solve). A wrong 180° doesn't matter here.
@@ -2104,7 +2134,7 @@ WORKFLOW
      tree, the end of a roof), the higher value is extended that many degrees sideways, so a
      target just beside the obstruction isn't scheduled too early. Gentle slopes are not
      changed. 'Steep' means more than the given degrees of altitude per degree of azimuth
-     (3 ≈ a 72° slope). 1-2° is a sensible margin; 0 switches it off. The lines on screen and
+     (2 ≈ a 63° slope; default 2). 1-2° is a sensible margin; 0 switches it off. The lines on screen and
      the saved files include the margin; your edits are made on the unwidened line.
    • The two lines are edited independently – the branches line may be drawn below the solid
      line (e.g. where the "solid" part is really a thin, see-through tree top).
@@ -2147,9 +2177,9 @@ def main():
     pp.add_argument("--hrz", nargs="+", help="1-2 horizon files")
     pp.add_argument("--below", type=float, default=4); pp.add_argument("--above", type=float, default=4)
     pp.add_argument("--floor", type=float, default=20)
-    pp.add_argument("--edge-frames", type=float, default=1.0,
+    pp.add_argument("--edge-frames", type=float, default=0.5,
                     help="extra frame widths beside steep edges of the horizon file(s) (0 = off)")
-    pp.add_argument("--edge-slope", type=float, default=3.0,
+    pp.add_argument("--edge-slope", type=float, default=2.0,
                     help="an edge is steep above this many degrees altitude per degree azimuth")
     pp.add_argument("--az", nargs=2, type=float, default=[0, 360])
     pp.add_argument("--overlap", type=float, default=0.10)
@@ -2171,18 +2201,18 @@ def main():
     bp.add_argument("--old", help="old .hrz for comparison")
     bp.add_argument("--side-margin", type=float, default=0.0,
                     help="extend the higher side of steep horizon edges this many degrees sideways")
-    bp.add_argument("--steep-slope", type=float, default=3.0,
+    bp.add_argument("--steep-slope", type=float, default=2.0,
                     help="an edge is steep above this many degrees altitude per degree azimuth")
     bp.add_argument("--no-cache", action="store_true", help="don't use/create the frame cache")
     bp.add_argument("--fillin", metavar="FILE.json", help="also write a NINA fill-in sequence for uncertain areas")
     bp.add_argument("--fillin-exposure", type=float, default=0.008)
     bp.add_argument("--fillin-floor", type=float, default=15.0)
-    bp.add_argument("--fillin-edge-frames", type=float, default=1.0,
+    bp.add_argument("--fillin-edge-frames", type=float, default=0.5,
                     help="for --fillin: extra frame widths beside steep horizon edges (0 = off)")
     bp.add_argument("--fillin-gap-near", type=float, default=1.0,
                     help="for --fillin: also cover places where a horizon line is within this many degrees "
                          "of a spot without pictures (0 = off)")
-    bp.add_argument("--fillin-edge-slope", type=float, default=3.0,
+    bp.add_argument("--fillin-edge-slope", type=float, default=2.0,
                     help="for --fillin: steep = more than this many deg altitude per deg azimuth")
     bp.add_argument("--sensor", nargs=3, type=float, metavar=("WPX", "HPX", "UM"), default=[6248, 4176, 3.76],
                     help="for --fillin: unbinned sensor size and pixel size")
