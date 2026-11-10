@@ -32,13 +32,20 @@
   leaving out frames already taken unless **Re-shoot frames already taken** is ticked. A stopped or
   loaded capture is resumed simply by pressing Start.
 - Choosing a frame source shows its frames at once; a fresh Start uses the source as it is then.
+- **Build tab – Import from Capture…:** takes the capture on the Capture tab, or a saved
+  `.hmcap.json`, and does three things, then offers to build right away:
+  - adds its file list to the folders;
+  - sets the rotator offset from the Plan tab;
+  - sets the current horizon from the capture.
+- Capture tab: the progress bar shows the percentage of the run in its centre. **Test connection**
+  moved into the NINA group. **Save / Load Capture** is a group of its own, right of **Run**.
 - **Hover explanations** for every setting, choice and button on all tabs. New controls get theirs
   from the `TIPS` table; the debug log lists any control without one.
 - **Debug → Show log windows** (on during development): shows or hides the Capture and Build logs.
   The Capture log sits in its own pane; drag the divider to resize it.
 - `DEV_MODE` switch for the development defaults (debug log and log windows on), plus a release
   checklist in the README.
-- Capture tab: default host 192.168.1.55 (for testing).
+- Capture tab: default host 192.168.1.55 while `DEV_MODE` is on (test rig), otherwise `localhost`.
 - Capture tab: the log runs down the right side at full height, with a scrollbar.
 - **Debug menu → Debug log (all actions):** every click, NINA request (timing and answer), capture
   step, wait, pause and state change, folder scan and redraw, plus errors from window callbacks and
