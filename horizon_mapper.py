@@ -1886,9 +1886,15 @@ def render_mosaic(mos, lines=(), scale=2, legend=True):
 #  GUI
 # =============================================================================
 
-def run_gui():
-    import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
+def run_gui(selftest=False):
+    import types
+    import tkinter as _tk_mod
+    from tkinter import ttk as _ttk_mod, filedialog, messagebox
+    # Private copies of the tkinter / ttk namespaces: the hover and click-logging wrappers below
+    # replace classes here only. Never patch the tkinter modules themselves – ttk builds Combobox
+    # and Spinbox on ttk.Entry internally, and a patched Entry breaks them.
+    tk = types.SimpleNamespace(**{k: getattr(_tk_mod, k) for k in dir(_tk_mod) if not k.startswith("__")})
+    ttk = types.SimpleNamespace(**{k: getattr(_ttk_mod, k) for k in dir(_ttk_mod) if not k.startswith("__")})
     try:
         from PIL import ImageTk
     except ImportError:
@@ -1897,9 +1903,12 @@ def run_gui():
     debug_enable(load_settings().get("debug_log", DEV_MODE))   # default: on during development
 
     # hover explanations: shown after a short pause over any setting, choice or button
+    _selftest_hovers = []
+
     class Hover:
         def __init__(self, w, text):
             self.w, self.text, self.tw, self.job = w, text, None, None
+            _selftest_hovers.append(self)
             for ev, fn in (("<Enter>", self.sched), ("<Leave>", self.hide), ("<ButtonPress>", self.hide)):
                 try:
                     w.bind(ev, fn, add="+")
@@ -1995,6 +2004,8 @@ def run_gui():
         """Errors inside window callbacks: log them (the windowed exe has no console) and show them."""
         msg = "".join(traceback.format_exception(exc, val, tb))
         dlog(f"EXCEPTION in a window callback:\n{msg}")
+        if selftest:                                      # CI: fail instead of showing a dialog
+            print(msg, file=sys.stderr); os._exit(1)
         try:
             messagebox.showerror(APP_NAME, f"Unexpected error: {val}\n\nDetails are in the debug log.")
         except Exception:
@@ -3806,6 +3817,21 @@ def run_gui():
         root.geometry(f"{w}x{h}+{max((sw - w) // 2, 0)}+{max((sh - h) // 2 - 20, 0)}")
     except Exception:
         pass
+    if selftest:
+        # build the real window, show a hover, switch through the tabs, then close (used by CI)
+        def _selftest():
+            try:
+                for t_ in nb.tabs():
+                    nb.select(t_); root.update()
+                hov = next((o for o in _selftest_hovers if o.w.winfo_exists()), None)
+                if hov:
+                    hov.show(); root.update(); hov.hide()
+                print(f"GUI self-test OK: {len(nb.tabs())} tabs, {len(_selftest_hovers)} hover texts, "
+                      f"{len(no_tip)} controls without one")
+            except Exception:
+                traceback.print_exc(); os._exit(1)
+            root.destroy()
+        root.after(1500, _selftest)
     root.mainloop()
 
 
@@ -4064,6 +4090,8 @@ def main():
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w")
     ap = argparse.ArgumentParser(description=APP_NAME)
+    ap.add_argument("--selftest-gui", action="store_true",
+                    help="open the window, show a hover, switch through the tabs and close (for CI)")
     sub = ap.add_subparsers(dest="cmd")
     pp = sub.add_parser("plan", help="generate a NINA sequence")
     pp.add_argument("--fov", nargs=2, type=float, metavar=("W", "H"))
@@ -4120,7 +4148,7 @@ def main():
     a = ap.parse_args()
 
     if a.cmd is None:
-        run_gui(); return
+        run_gui(selftest=a.selftest_gui); return
     if a.cmd == "plan":
         p = PlanParams(sensor_w_px=int(a.sensor[0]), sensor_h_px=int(a.sensor[1]), pixel_um=a.sensor[2],
                        focal_mm=a.focal, lat=a.lat, floor=a.floor, az_start=a.az[0], az_end=a.az[1],
