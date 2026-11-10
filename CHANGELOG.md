@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0 – 2026-11-10
+
+### Added
+- **2. Capture (NINA) tab:** shoots the Plan tab plan or the Build tab fill-in frames directly,
+  through NINA's **Advanced API** plugin. For each frame: slew (alt/az → J2000 RA/Dec from the mount's
+  sidereal time), mechanical rotator move, settle, exposure. NINA saves the FITS with its usual
+  headers; the files are found in NINA's image folder (read from the profile). The file list is added
+  to the Build tab, which now accepts such list files like folders.
+- **Pause:** a large red **⏸ PAUSE** button and **Esc** stop slew, rotator and exposure immediately and
+  hold; **Resume** repeats the interrupted frame, **Skip frame** skips it, **Stop run** ends the run
+  (a later Start can continue). Errors and timeouts pause the run automatically.
+- **Safety limits:** Sun avoidance (default 30°) and a minimum altitude (default 10°); frames outside
+  them are skipped, never slewed to. Confirmation before starting and when closing during a run.
+- Live device line (mount position, pier side, rotator, camera state) and per-frame status picture.
+
+### Changed
+- Tabs renumbered: 1. Plan sequence, 2. Capture (NINA), 3. Build horizon.
+
 ## 1.0.1 – 2026-11-09
 
 ### Added
