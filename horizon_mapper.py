@@ -23,6 +23,9 @@ except ImportError:  # GUI will complain later
 
 APP_NAME = "Horizon Mapper for NINA"
 APP_VERSION = "1.1.0"
+# DEVELOPMENT DEFAULTS: debug log and log windows on. Set DEV_MODE = False before a release
+# (README → "Release checklist"). Users can still switch both in the Debug menu.
+DEV_MODE = True
 
 # =============================================================================
 #  Small numeric helpers (no scipy needed)
@@ -1001,14 +1004,11 @@ class CaptureRunner:
             self.emit("log", msg="Unparking the mount…")
             self.api.get("/equipment/mount/unpark", timeout=120)
             self._wait_until(lambda: not self.api.mount().get("AtPark"), 120, "unpark")
-        if not m.get("TrackingEnabled", True):
-            try:
-                self.api.get("/equipment/mount/tracking", mode=0)          # sidereal
-            except NinaApiError as e:
-                self.emit("log", msg=f"Note: {e}")
-            if not self.api.mount().get("TrackingEnabled", False):
-                self.emit("log", msg="Note: tracking could not be switched on through NINA – continuing "
-                                     "(each slew is checked; switch tracking on in NINA if slews fail).")
+        # Tracking is not needed: exposures are milliseconds long and every slew is aimed at where
+        # the target is at that moment. So the tracking command (which some drivers, e.g. the ZWO
+        # ASI Mount, answer with "failed") is only used if a slew is refused (see _slew).
+        dlog(f"tracking at start: {m.get('TrackingEnabled')}")
+        self._tracking_info_shown = False
         if not self.api.camera().get("Connected"):
             raise NinaApiError("the camera is not connected in NINA")
         if any(r is not None for r in self.rot) and not self.api.rotator().get("Connected"):
@@ -1040,6 +1040,22 @@ class CaptureRunner:
                 box["r"] = self.api.get("/equipment/mount/slew", ra=round(ra, 5), dec=round(dec, 5),
                                         waitForResult=True, timeout=self.slew_timeout + 15)
             except NinaApiError as e:
+                # some drivers only slew while tracking: switch it on (its answer may say "failed"
+                # even when it works) and try the slew once more
+                try:
+                    if not self.api.mount().get("TrackingEnabled", True) and not self._stop.is_set() \
+                            and not self._pause.is_set():
+                        dlog(f"slew refused ({e}) while not tracking: switching tracking on, retrying once")
+                        try:
+                            self.api.get("/equipment/mount/tracking", mode=0)
+                        except NinaApiError as e2:
+                            dlog(f"tracking command answered: {e2}")
+                        time.sleep(1.0)
+                        box["r"] = self.api.get("/equipment/mount/slew", ra=round(ra, 5), dec=round(dec, 5),
+                                                waitForResult=True, timeout=self.slew_timeout + 15)
+                        return
+                except NinaApiError as e3:
+                    e = e3
                 box["e"] = e
         th = threading.Thread(target=do_slew, daemon=True); th.start()
         self._wait_until(lambda: not th.is_alive(), self.slew_timeout + 20, "the slew")
@@ -1079,6 +1095,10 @@ class CaptureRunner:
             where = f"alt {m.get('Altitude')}°, az {m.get('Azimuth')}° instead of {alt:.1f}°, {az:.1f}°"
         if err > 2.0:
             raise NinaApiError(f"after the slew the mount is at {where} – slew stopped or limits hit?")
+        if not m.get("TrackingEnabled") and not getattr(self, "_tracking_info_shown", False):
+            self._tracking_info_shown = True
+            self.emit("log", msg="The mount is not tracking – that is fine here: the exposures are very short "
+                                 "and every slew is aimed at the current sky position.")
         # 2 – rotator
         tgt = self.rot[i]
         if tgt is not None:
@@ -1874,7 +1894,80 @@ def run_gui():
     except ImportError:
         ImageTk = None
 
-    debug_enable(load_settings().get("debug_log", True))      # on by default during development
+    debug_enable(load_settings().get("debug_log", DEV_MODE))   # default: on during development
+
+    # hover explanations: shown after a short pause over any setting, choice or button
+    class Hover:
+        def __init__(self, w, text):
+            self.w, self.text, self.tw, self.job = w, text, None, None
+            for ev, fn in (("<Enter>", self.sched), ("<Leave>", self.hide), ("<ButtonPress>", self.hide)):
+                try:
+                    w.bind(ev, fn, add="+")
+                except Exception:
+                    pass
+
+        def sched(self, e=None):
+            self.hide(); self.job = self.w.after(600, self.show)
+
+        def show(self):
+            try:
+                x, y = self.w.winfo_pointerx() + 14, self.w.winfo_pointery() + 18
+                self.tw = tk.Toplevel(self.w); self.tw.wm_overrideredirect(True); self.tw.wm_geometry(f"+{x}+{y}")
+                tk.Label(self.tw, text=self.text, background="#ffffe8", relief="solid", borderwidth=1,
+                         wraplength=360, justify="left", padx=6, pady=3).pack()
+            except Exception:
+                self.tw = None
+
+        def hide(self, e=None):
+            if self.job:
+                try:
+                    self.w.after_cancel(self.job)
+                except Exception:
+                    pass
+                self.job = None
+            if self.tw is not None:
+                try:
+                    self.tw.destroy()
+                except Exception:
+                    pass
+                self.tw = None
+    no_tip = set()
+    last_label = {}                       # parent → hover text of the last label made in it
+
+    def tip_for(text):
+        t = TIPS.get(text) or TIPS.get(str(text).strip())
+        return t
+
+    def attach_tip(w, text, kind):
+        t = tip_for(text) if text else None
+        if t:
+            Hover(w, t); return t
+        if text and kind != "label":
+            no_tip.add(f"{kind}: {str(text).strip()}")
+        return None
+
+    def _hovered(cls, kind):
+        class H(cls):
+            def __init__(self, *a, hover=None, **kw):
+                super().__init__(*a, **kw)
+                parent = a[0] if a else kw.get("master")
+                if kind == "label":
+                    t = attach_tip(self, kw.get("text"), kind)
+                    last_label[str(parent)] = t
+                elif kind in ("entry", "spinbox", "combobox", "listbox"):
+                    t = hover or last_label.get(str(parent))  # an input takes its label's explanation
+                    if t:
+                        Hover(self, t)
+                    else:
+                        no_tip.add(f"{kind} in {parent}")
+                else:
+                    if hover:
+                        Hover(self, hover)
+                    else:
+                        attach_tip(self, kw.get("text"), kind)
+        return H
+    ttk.Label = _hovered(ttk.Label, "label"); ttk.Entry = _hovered(ttk.Entry, "entry")
+    ttk.Spinbox = _hovered(ttk.Spinbox, "spinbox"); ttk.Combobox = _hovered(ttk.Combobox, "combobox")
 
     # every button / check box / radio button click goes to the debug log
     def _logged(cls, kind):
@@ -1890,8 +1983,10 @@ def run_gui():
                     kw["command"] = wrapped
                 super().__init__(*a, **kw)
         return Logged
-    ttk.Button = _logged(ttk.Button, "button"); ttk.Checkbutton = _logged(ttk.Checkbutton, "check")
-    ttk.Radiobutton = _logged(ttk.Radiobutton, "radio"); tk.Button = _logged(tk.Button, "button")
+    ttk.Button = _hovered(_logged(ttk.Button, "button"), "button")
+    ttk.Checkbutton = _hovered(_logged(ttk.Checkbutton, "check"), "check")
+    ttk.Radiobutton = _hovered(_logged(ttk.Radiobutton, "radio"), "radio")
+    tk.Button = _hovered(_logged(tk.Button, "button"), "button")
 
     root = tk.Tk()
     root.title(f"{APP_NAME}  v{APP_VERSION}")
@@ -1925,6 +2020,9 @@ def run_gui():
         except Exception:
             messagebox.showinfo(APP_NAME, d)
     dbg_menu.add_checkbutton(label="Debug log (all actions)", variable=dbg_var, command=toggle_debug)
+    logs_var = tk.BooleanVar(value=load_settings().get("show_logs", DEV_MODE))   # default: DEV_MODE
+    dbg_menu.add_checkbutton(label="Show log windows", variable=logs_var)
+    dbg_menu.add_separator()
     dbg_menu.add_command(label="Open log folder", command=open_log_folder)
     dbg_menu.add_command(label="Show current log file", command=lambda: messagebox.showinfo(
         APP_NAME, _DBG["path"] or "The debug log is off."))
@@ -2050,6 +2148,7 @@ def run_gui():
     labeled(box, 3, "Band: alt max (°)", var("alt_max", P.alt_max))
     hzf = group(left, "Current horizon (.hrz)")
     hz_list = tk.Listbox(hzf, height=2, width=40); hz_list.pack(anchor="w", padx=4)
+    Hover(hz_list, "Your current horizon file(s). The first one is also used on the Build tab.")
 
     def sync_current():
         files = list(hz_list.get(0, "end"))
@@ -2294,6 +2393,7 @@ def run_gui():
     pr = ttk.Frame(proc); pr.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     box = group(pl, "FITS folders (searched recursively)")
     folders = tk.Listbox(box, height=5, width=44); folders.pack(fill="x", padx=4, pady=2)
+    Hover(folders, "Folders (and capture lists) with the FITS frames to build the horizon from.")
     fb = ttk.Frame(box); fb.pack(fill="x")
     ttk.Button(fb, text="Add folder…", command=lambda: (lambda d: d and folders.insert("end", d))(
         filedialog.askdirectory())).pack(side="left", padx=3)
@@ -2318,7 +2418,8 @@ def run_gui():
         APP_NAME, f"Removed {clear_cache(default_cache_dir())} cached frames.")).grid(row=4, column=3, sticky="w", padx=4)
     box = group(pl, "Current horizon (compare / fill gaps)")
     old_var = current_hz   # filled automatically from the Plan tab
-    ttk.Entry(box, textvariable=old_var, width=34).pack(side="top", anchor="w", padx=4, pady=2)
+    ttk.Entry(box, textvariable=old_var, width=34,
+              hover=TIPS["Current horizon (compare / fill gaps)"]).pack(side="top", anchor="w", padx=4, pady=2)
     ttk.Button(box, text="Browse…", command=lambda: old_var.set(filedialog.askopenfilename(
         filetypes=[("Horizon", "*.hrz *.txt"), ("All", "*.*")]) or old_var.get())).pack(side="top", anchor="w", padx=4)
     run_box = group(pl, "Build")
@@ -2773,7 +2874,7 @@ def run_gui():
     fill_edge = tk.StringVar(value=V["edge_frames"].get()); fill_slope = tk.StringVar(value=V["edge_slope"].get())
     V["edge_frames"].trace_add("write", lambda *a: fill_edge.set(V["edge_frames"].get()))
     V["edge_slope"].trace_add("write", lambda *a: fill_slope.set(V["edge_slope"].get()))
-    ttk.Label(fe, text="Extra frames at steep edges").pack(side="left")
+    ttk.Label(fe, text="Extra frames at steep edges ").pack(side="left")
     ttk.Spinbox(fe, textvariable=fill_edge, from_=0, to=5, increment=0.5, width=4).pack(side="left", padx=(2, 8))
     ttk.Label(fe, text="steep = more than").pack(side="left")
     ttk.Spinbox(fe, textvariable=fill_slope, from_=0.5, to=20, increment=0.5, width=4).pack(side="left", padx=2)
@@ -2789,6 +2890,7 @@ def run_gui():
         _v.trace_add("write", lambda *a: refresh_fill())
     save_which = tk.StringVar(value="solid")
     ttk.Combobox(hz_box, textvariable=save_which, values=["solid", "with branches"], width=14,
+                 hover="Which line to save: 'solid' (buildings, trunks, dense trees) or 'with branches' (also thin branches).",
                  state="readonly").pack(side="top", anchor="w", padx=4, pady=2)
     ttk.Button(hz_box, text="Save horizon file…", command=save_outputs).pack(side="top", fill="x", padx=4, pady=2)
 
@@ -2813,12 +2915,15 @@ def run_gui():
 
 
     # ------------------------------------------------------------------ CAPTURE (NINA Advanced API)
-    clog_box = ttk.LabelFrame(cap_tab, text="Log"); clog_box.pack(side="right", fill="y", padx=(0, 6), pady=6)
+    # picture + settings on the left, the log on the right; drag the divider to resize the log
+    cap_pane = ttk.PanedWindow(cap_tab, orient="horizontal"); cap_pane.pack(fill="both", expand=True)
+    cmain = ttk.Frame(cap_pane)
+    clog_box = ttk.LabelFrame(cap_pane, text="Log")
     clog_sb = ttk.Scrollbar(clog_box, orient="vertical")
     clog = tk.Text(clog_box, width=52, wrap="word", yscrollcommand=clog_sb.set)
     clog_sb.config(command=clog.yview)
     clog_sb.pack(side="right", fill="y"); clog.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
-    cmain = ttk.Frame(cap_tab); cmain.pack(side="left", fill="both", expand=True)
+    cap_pane.add(cmain, weight=1); cap_pane.add(clog_box, weight=0)
     cbar, cfixed = topbar(cmain)
     C = {"runner": None, "frames": [], "source": "", "api": None, "polling": False, "q": queue.Queue(),
          "view": (0.0, 360.0, 0.0, 90.0), "box": (50, 20, 900, 400), "cur": None,
@@ -2829,7 +2934,7 @@ def run_gui():
         cv_[n] = kind(value=v); return cv_[n]
 
     g = group(cbar, "NINA – Advanced API plugin")
-    labeled(g, 0, "Host", cvar("host", "localhost"), width=12)
+    labeled(g, 0, "Host", cvar("host", "192.168.0.10"), width=12)
     labeled(g, 1, "Port", cvar("port", "1888"), width=12)
     conn_lbl = ttk.Label(g, text="Not connected", foreground="#666", wraplength=260, justify="left")
     conn_lbl.grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
@@ -2861,7 +2966,7 @@ def run_gui():
     labeled(g, 0, "Keep away from the Sun (°)", cvar("sun", "30"), width=6)
     labeled(g, 1, "Never below altitude (°)", cvar("floor", "10"), width=6)
     cvar("unpark", True, tk.BooleanVar); cvar("park", V["park"].get(), tk.BooleanVar)
-    ttk.Checkbutton(g, text="Unpark at start", variable=cv_["unpark"]).grid(row=2, column=0, sticky="w", padx=4)
+    ttk.Checkbutton(g, text="Unpark at start ", variable=cv_["unpark"]).grid(row=2, column=0, sticky="w", padx=4)
     ttk.Checkbutton(g, text="Park when finished", variable=cv_["park"]).grid(row=3, column=0, sticky="w", padx=4)
     g = group(cbar, "Range")
     labeled(g, 0, "From frame", cvar("first", "1"), width=6)
@@ -2873,7 +2978,7 @@ def run_gui():
     g = group(cbar, "Files")
     labeled(g, 0, "Target name", cvar("target", "Horizon mapping"), width=18)
     ttk.Label(g, text="NINA image folder (found automatically)").grid(row=1, column=0, columnspan=3, sticky="w", padx=4)
-    ttk.Entry(g, textvariable=cvar("folder", ""), width=30).grid(row=2, column=0, columnspan=2, sticky="w", padx=4)
+    ttk.Entry(g, textvariable=cvar("folder", ""), width=30, hover=TIPS["NINA image folder (found automatically)"]).grid(row=2, column=0, columnspan=2, sticky="w", padx=4)
     cvar("thumbs", True, tk.BooleanVar); cvar("flip", False, tk.BooleanVar)
 
     def folder_changed(*a):
@@ -2887,7 +2992,7 @@ def run_gui():
                     command=lambda: draw_cap()).grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
     ttk.Checkbutton(g, text="Turn previews 180°", variable=cv_["flip"],
                     command=lambda: cap_rethumb()).grid(row=4, column=0, columnspan=3, sticky="w", padx=4)
-    ttk.Button(g, text="…", width=3, command=lambda: cv_["folder"].set(
+    ttk.Button(g, text="…", width=3, hover="Choose NINA's image folder.", command=lambda: cv_["folder"].set(
         filedialog.askdirectory() or cv_["folder"].get())).grid(row=2, column=2, sticky="w")
 
     # fixed on the right: run controls (Pause always visible) and the log
@@ -2900,7 +3005,7 @@ def run_gui():
     start_btn = ttk.Button(rb, text="▶ Start", command=lambda: cap_start()); start_btn.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
     resume_btn = ttk.Button(rb, text="▶ Resume", state="disabled", command=lambda: cap_resume()); resume_btn.grid(row=0, column=1, sticky="ew", padx=1, pady=1)
     skip_btn = ttk.Button(rb, text="Skip frame", state="disabled", command=lambda: cap_skip()); skip_btn.grid(row=1, column=0, sticky="ew", padx=1, pady=1)
-    stop_btn = ttk.Button(rb, text="■ Stop run", state="disabled", command=lambda: cap_stop()); stop_btn.grid(row=1, column=1, sticky="ew", padx=1, pady=1)
+    stop_btn = ttk.Button(rb, text="■ End run", state="disabled", command=lambda: cap_stop()); stop_btn.grid(row=1, column=1, sticky="ew", padx=1, pady=1)
     ttk.Button(rb, text="Test connection", command=lambda: cap_connect()).grid(row=2, column=0, columnspan=2, sticky="ew", padx=1, pady=1)
     save_cap_btn = ttk.Button(rb, text="Save current capture…", command=lambda: cap_save())
     save_cap_btn.grid(row=3, column=0, sticky="ew", padx=1, pady=1)
@@ -3332,8 +3437,8 @@ def run_gui():
     def cap_stop():
         r = C["runner"]
         if r and r.state in ("running", "paused"):
-            if messagebox.askyesno(APP_NAME, "Stop the run? Frames taken so far are kept.\n"
-                                             "(Use PAUSE instead if you want to continue later.)"):
+            if messagebox.askyesno(APP_NAME, "End the run? Frames taken so far are kept, and Start later "
+                                             "shoots what is still missing.\n(PAUSE holds the run instead.)"):
                 threading.Thread(target=r.stop, daemon=True).start()
 
     root.bind_all("<Escape>", lambda e: (dlog("UI key: Esc"), cap_pause("Esc pressed")), add="+")
@@ -3656,6 +3761,27 @@ def run_gui():
     t = tk.Text(help_tab, wrap="word"); t.pack(fill="both", expand=True)
     t.insert("1.0", HELP_TEXT); t.config(state="disabled")
 
+    def show_logs(on):
+        """Debug → Show log windows: the Capture log pane and the Build tab log."""
+        try:
+            panes = [str(p_) for p_ in (cap_pane.panes() or ())]
+            if on and str(clog_box) not in panes:
+                cap_pane.add(clog_box, weight=0)
+            elif not on and str(clog_box) in panes:
+                cap_pane.forget(clog_box)
+            if on and not log_box.winfo_ismapped():
+                log_box.pack(side="left", fill="y", padx=(6, 0), pady=2)
+            elif not on:
+                log_box.pack_forget()
+        except Exception:
+            dlog_exc("show_logs")
+        dlog(f"log windows {'shown' if on else 'hidden'}")
+    logs_var.trace_add("write", lambda *a: (save_settings(show_logs=logs_var.get()), show_logs(logs_var.get())))
+    show_logs(logs_var.get())
+
+    if no_tip:
+        dlog(f"controls without hover text ({len(no_tip)}): {sorted(no_tip)}")
+
     def on_close():
         r = C.get("runner")
         if r and r.state in ("running", "paused"):
@@ -3681,6 +3807,118 @@ def run_gui():
     except Exception:
         pass
     root.mainloop()
+
+
+# Hover explanations for every setting, choice and button (key = the text shown in the window).
+# Add an entry for every new control – the debug log lists controls that still have none.
+TIPS = {
+    # ---- Plan tab: camera & telescope
+    "Sensor width (px)": "Width of the camera sensor in pixels (ASI2600MC Pro: 6248).",
+    "Sensor height (px)": "Height of the camera sensor in pixels (ASI2600MC Pro: 4176).",
+    "Pixel size (µm)": "Size of one sensor pixel in micrometres (ASI2600MC Pro: 3.76).",
+    "Focal length (mm)": "Focal length of the telescope (Askar SQA85: 408 mm). With the sensor size it gives the field of view.",
+    "Orientation": "How the camera is turned: landscape, portrait, or auto (whichever needs fewer frames).",
+    "Read from a FITS file…": "Fill in sensor size, pixel size and focal length from the header of one of your FITS files.",
+    # ---- Plan tab: site & area
+    "Latitude (°)": "Your site's latitude in degrees (north positive). Needed for the rotator and the Sun check.",
+    "Fixed altitude band": "Image a band of constant altitude all the way round (set the two band limits).",
+    "Around current horizon": "Image a strip that follows your current horizon file(s), with the margins below and above it.",
+    "Band: alt min (°)": "Lowest altitude of the band to image (fixed-band mode).",
+    "Band: alt max (°)": "Highest altitude of the band to image (fixed-band mode).",
+    "Add current horizon…": "Add a NINA .hrz horizon file. The first one is your current horizon; a second one (e.g. an all-sky estimate) widens the strip.",
+    "Clear": "Remove the horizon files from the list.",
+    "Margin below (°)": "How far below the current horizon the strip starts.",
+    "Margin above (°)": "How far above the current horizon the strip ends.",
+    "Lowest altitude (°)": "No frames are planned below this altitude.",
+    "Overlap (0-1)": "Fraction by which neighbouring frames overlap (0.1 = 10 %). More overlap = more frames, better stitching.",
+    "Extra frames at steep edges": "Where the horizon rises or drops steeply, widen the strip sideways by this many frame widths (0 = off).",
+    "Steep = more than (°/°)": "A horizon edge counts as steep above this many degrees of altitude per degree of azimuth (2 ≈ 63°).",
+    "Azimuth start (°)": "Azimuth where the planned area starts (0 = north, 90 = east).",
+    "Azimuth end (°)": "Azimuth where the planned area ends. Same as start = all the way round.",
+    # ---- Plan tab: rotator
+    "Keep frames level with rotator": "Turn the rotator for every row so that each frame stays level with the horizon.",
+    "Offset (sky - mech, °)": "Rotator offset: sky angle minus mechanical angle (measured for your setup: -58.04°).",
+    "Direction (+1/-1)": "Whether the sky angle grows (+1) or shrinks (-1) when the mechanical angle grows.",
+    "Skip moves below (°)": "Rotator moves smaller than this are skipped to save time (the frames then tilt slightly).",
+    # ---- Plan tab: exposure & sequence
+    "Exposure (s)": "Exposure time of each frame in seconds (daylight: a few milliseconds).",
+    "Gain (-1 = default)": "Camera gain for each frame; -1 uses the camera's default in NINA.",
+    "Offset (-1 = default)": "Camera offset for each frame; -1 uses the camera's default in NINA.",
+    "Binning": "Pixel binning (2 = 2×2). Binning shortens downloads and is plenty for horizon mapping.",
+    "Seconds per frame": "Time estimate per frame (slew, settle, exposure, download) – only used for the run-time estimate.",
+    "Seconds per rotator move": "Time estimate per rotator move – only used for the run-time estimate.",
+    "East half first, then west (one meridian flip)": "Shoot all frames east of the meridian first, then the west half, so the mount flips only once.",
+    "Rows bottom to top in both halves": "Also shoot the west half from the bottom up (default: west half top to bottom, the shorter path).",
+    "Unpark at start": "Unpark the mount before the first frame.",
+    "Park at end": "Park the mount when the sequence has finished.",
+    "Save as template (else full sequence)": "Save a NINA template (drag into a sequence) instead of a complete sequence file.",
+    "Rows collapsed (use Load sequence)": "Save the rows collapsed in NINA's sequencer (shown collapsed only with Load sequence).",
+    "Preview plan": "Work out the plan with the current settings and draw it.",
+    "Save NINA sequence…": "Save the plan as a NINA Advanced Sequencer file.",
+    "Show shooting order": "Draw the order in which the frames are taken (green = first → magenta = last).",
+    "Sun check": "Show where the Sun is at the given time and whether any frame is too close to it.",
+    "Longitude (°E)": "Your site's longitude in degrees east – used for the Sun check.",
+    # ---- Capture tab
+    "Host": "Address of the computer running NINA (e.g. 192.168.0.10, or localhost on this computer).",
+    "Port": "Port of NINA's Advanced API plugin (default 1888).",
+    "Test connection": "Check that NINA's Advanced API answers, show the devices and find NINA's image folder.",
+    "Plan from the Plan tab": "Shoot the plan made with the Plan tab's settings.",
+    "Fill-in frames from the Build tab": "Shoot the fill-in frames generated on the Build tab.",
+    "Saved sequence file": "Shoot the frames of a sequence saved for NINA (plan or fill-in).",
+    "Browse…": "Choose a file.",
+    "Gain (-1 = NINA default)": "Camera gain for the frames; -1 keeps NINA's current camera setting.",
+    "Settle after moves (s)": "Wait this long after each slew or rotator move before exposing.",
+    "Keep away from the Sun (°)": "Frames closer to the Sun than this are skipped and never slewed to.",
+    "Never below altitude (°)": "Frames below this altitude are skipped and never slewed to.",
+    "Unpark at start ": "Unpark the mount before the first frame.",
+    "Park when finished": "Park the mount when the run has finished (not after End run).",
+    "From frame": "First frame to shoot (frame numbers follow the shooting order shown in the picture).",
+    "To frame (blank = last)": "Last frame to shoot; leave blank for the last frame of the plan.",
+    "Re-shoot frames already taken": "Also shoot frames in the range that are already taken (normally they are left out).",
+    "Target name": "Target name NINA uses for the files (and their folder, depending on NINA's file pattern).",
+    "NINA image folder (found automatically)": "Folder where NINA saves the images. Filled in by Test connection; can be changed at any time.",
+    "Show finished frames in the picture": "Draw each taken frame's picture in its slot.",
+    "Turn previews 180°": "Turn the frame pictures upside down if they appear the wrong way round.",
+    "⏸  PAUSE  (Esc)": "Stop slew, rotator and exposure at once and hold. Esc does the same from anywhere in the app.",
+    "▶ Start": "Shoot the frames in the range that are not taken yet (asks for confirmation first).",
+    "▶ Resume": "Continue a paused run; the interrupted frame is shot again from its start.",
+    "Skip frame": "While paused: leave out the current frame and continue with the next one on Resume.",
+    "■ End run": "End the run. Frames taken so far are kept; Start later shoots what is still missing.",
+    "Save current capture…": "Save the frames, the progress and the file paths, so the capture can be resumed later.",
+    "Load saved capture…": "Load a saved capture: its progress, settings and the pictures of the frames already taken.",
+    # ---- Build tab
+    "Add folder…": "Add a folder with FITS frames (searched recursively). A capture list (.txt) works too.",
+    "Remove": "Remove the selected folder from the list.",
+    "Rotator offset guess (°)": "Starting value for the rotator offset; the calibration refines it.",
+    "Calibrate rotation from overlaps": "Measure the rotator offset from how neighbouring frames overlap.",
+    "Full 360° search (offset unknown)": "Search all rotator offsets (slower) – use when the offset is unknown.",
+    "Latitude (°, blank = FITS)": "Site latitude; leave blank to read it from the FITS headers.",
+    "Mosaic resolution (°)": "Size of one mosaic pixel in degrees (0.03 is fine; smaller = sharper but slower).",
+    "Solid: darker than": "A pixel counts as solid obstruction when darker than this fraction of the sky brightness.",
+    "Branches: darker than": "A pixel counts as branches when darker than this fraction of the sky brightness.",
+    "Bias level (blank = auto)": "Camera bias (black level) subtracted from the frames; blank = estimated automatically.",
+    "Cache reduced frames": "Keep reduced copies of the frames, so building again is much faster.",
+    "Clear cache": "Delete the cached reduced frames.",
+    "Build mosaic & horizon": "Read the frames, stitch the mosaic and detect the horizon lines.",
+    "Re-detect (new thresholds)": "Detect the horizon again with new thresholds, without rebuilding the mosaic.",
+    "Extra frames at steep edges ": "Fill-in: how many frame widths to add beside steep rises and drops of the new horizon (0 = off).",
+    "steep = more than": "An edge counts as steep above this many degrees of altitude per degree of azimuth.",
+    "Horizon line near gaps within (°)": "Fill-in: also cover places where the horizon line is this close to a spot without pictures (0 = off).",
+    "Generate fill-in frames": "Plan extra frames where the horizon is uncertain, near gaps or at steep edges, and show them.",
+    "Save fill-in sequence…": "Save the fill-in frames as a NINA sequence (or shoot them on the Capture tab).",
+    "Save horizon file…": "Save the selected horizon line as a NINA .hrz file.",
+    "Edit:": "Which line a left-drag on the image redraws.",
+    "off": "No editing: dragging on the image does nothing.",
+    "solid line": "Redraw the solid-horizon line by left-dragging on the image.",
+    "branches line": "Redraw the branches line by left-dragging on the image.",
+    "brush width (°)": "Width in azimuth of each brush stroke when redrawing a line.",
+    "zoom (px/°)": "Image scale in pixels per degree (the mouse wheel zooms too).",
+    "Undo": "Undo the last line edit (Ctrl+Z).",
+    "Reset edits": "Remove all line edits and go back to the detected lines.",
+    "Side margin at steep edges (°)": "Saved horizon: widen it sideways by this many degrees at steep edges (0 = off).",
+    "Show fill-in frames": "Draw the fill-in areas, frames and their order on the image.",
+    "Current horizon (compare / fill gaps)": "Your current horizon: drawn for comparison and used for azimuths without data.",
+}
 
 
 HELP_TEXT = """HORIZON MAPPER FOR NINA   (the version is shown in the window title)
@@ -3739,7 +3977,7 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
      (default 10°) are skipped and never slewed to. Unpark at start / park when finished.
    • 'Start' asks first. Per frame: slew → rotator → settle → expose; NINA saves the FITS.
    • ⏸ PAUSE (red button) or Esc anywhere: stops slew, rotator and exposure at once and holds.
-     'Resume' repeats the interrupted frame; 'Skip frame' skips it; 'Stop run' ends the run.
+     'Resume' repeats the interrupted frame; 'Skip frame' skips it; 'End run' ends the run.
    • Any error or timeout pauses the run automatically – nothing is skipped silently.
    • The NINA image folder can be changed during a run – file look-ups always use the current
      value.
@@ -3752,10 +3990,14 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
    • At the end the list of files is added to the Build tab ('Start' again can continue a
      stopped run).
 
+HOVER over any setting, choice or button for a short explanation.
+
 DEBUG MENU
    • 'Debug log (all actions)' writes every click, NINA request (with timing and answer), capture
      step, pause, error and window stall to %LOCALAPPDATA%\\HorizonMapper\\logs. On by default
      for now. 'Open log folder' opens it – please attach the log when reporting a problem.
+   • 'Show log windows' shows or hides the log panes (the Capture log can be made wider or
+     narrower by dragging its divider).
 
 3. Build horizon
    • Add the folder(s) with the frames. NINA's headers provide pointing (CENTALT/CENTAZ),
