@@ -1,15 +1,142 @@
 # Horizon Mapper for NINA
 
-The version is shown in the window title (currently 1.0.1).
+The version is shown in the window title (currently 1.1.0).
 
-Plans a NINA Advanced Sequencer run that photographs the sky around your horizon, then turns the
-FITS frames into a measured NINA horizon file (`.hrz`).
+Plans the frames that photograph the sky around your horizon, shoots them (through NINA's Advanced
+API plugin, or by saving a NINA Advanced Sequencer sequence), then turns the FITS frames into a
+measured NINA horizon file (`.hrz`).
 
-On both tabs the settings sit in a bar across the top and the picture fills the width below it.
+Tabs: **1. Plan sequence** → **2. Capture (NINA)** → **3. Build horizon**.
+
+> ⚠ **Experimental software – use entirely at your own risk.** It moves real equipment and
+> may point it near the **Sun**, which can instantly blind and destroy equipment. Read the
+> [Disclaimer and safety warning](#disclaimer-and-safety-warning) before use.
+
+**Hover** over any setting, choice or button for a short explanation of what it does.
+
+On every tab the settings sit in a bar across the top and the picture fills the width below it.
 The bar scrolls sideways (mouse wheel or scrollbar) when the window is too narrow; the Plan
 buttons (and the log on the Build tab) on its right always stay visible. At start the window is made
 wide enough for all groups if the screen allows. Closing the window asks first if the horizon has
 not been saved since it was built or last edited.
+
+## Disclaimer and safety warning
+
+**Please read this before you use the software. By installing, running or distributing Horizon
+Mapper for NINA you accept the terms below.**
+
+### 1. Experimental software – no warranty, no liability
+
+Horizon Mapper for NINA is **experimental software**. It sends movement and exposure commands to
+real equipment (mount, rotator, camera) and may contain errors that cause that equipment to move or
+behave unexpectedly.
+
+- **No warranty.** The software is provided **"AS IS"**, without warranty of any kind, express or
+  implied, including but not limited to the implied warranties of merchantability, fitness for a
+  particular purpose and non-infringement. The entire risk as to the quality, performance and
+  results of the software is with you. Should the software prove defective, you assume the cost of
+  all necessary servicing, repair or correction (GNU GPL v3, section 15).
+- **No liability.** To the maximum extent permitted by applicable law, in no event shall the
+  developer, the copyright holders, the distributors or any other party who modifies and/or conveys
+  the software be liable to you or to any third party for any damages or losses of any kind –
+  including, without limitation, damage to or loss of equipment, property or data, personal injury
+  (including injury to the eyes), or any direct, indirect, special, incidental or consequential
+  damages – arising out of or in connection with the use of, or the inability to use, the software,
+  even if such party has been advised of the possibility of such damages (GNU GPL v3, section 16).
+- **Use at your own risk and responsibility.** You alone are responsible for deciding whether and
+  how to use the software, for checking every setting and plan before running it, for the safe set-up,
+  balance, cabling and limits of your equipment, and for supervising the equipment while it is
+  controlled by the software. Keep people, animals and objects clear of moving equipment and be ready
+  to stop it at any time (the **⏸ PAUSE** button / **Esc**, and the controls of NINA, the mount and its
+  power supply).
+- **Applicable law.** Where applicable law does not allow a limitation or exclusion of liability
+  (for example for intent, gross negligence or injury to life, body or health under mandatory consumer
+  protection law), the limitation applies to the greatest extent that law permits; the remaining
+  provisions stay in effect. As provided in GNU GPL v3, section 17, this disclaimer is to be
+  interpreted in the way that most closely approximates an absolute waiver of all civil liability.
+- This section summarises and supplements the terms of the [GNU General Public License v3](LICENSE),
+  under which the software is licensed. In case of conflict, the licence prevails.
+
+### 2. ⚠ Danger: the Sun
+
+Horizon frames are often taken **in daylight**, so the Sun may be in the sky while the mount moves
+and the camera exposes.
+
+- **Pointing a telescope, finder, guide scope or camera lens at the Sun – or even slewing across or
+  close to it – can instantly cause severe and permanent eye injury or blindness** to anyone looking
+  through the optics, and can **damage or destroy cameras, sensors, filters, mirrors, focusers,
+  guide cameras and other equipment** through concentrated light and heat; it can also create a
+  **risk of fire**. NASA states that looking at even part of the bright Sun through a telescope,
+  binoculars or camera lens that has no purpose-made solar filter fixed over its front end injures
+  the eye severely and at once. The American Academy of Ophthalmology warns that
+  viewing the Sun even briefly can permanently damage the retina, and that concentrated solar rays
+  can melt or damage filters.
+- **Never look through any optics during a daytime capture.** Cover or remove finder scopes and
+  guide scopes that are not needed.
+- **Only properly certified solar filters securely attached to the *front* of the optics** keep
+  the Sun's light and heat out of the instrument (American Astronomical Society). Eyepiece filters,
+  eclipse glasses, sunglasses, ND filters or improvised materials are **not** safe in or behind
+  optics. Unless you deliberately do solar imaging with such filters fitted and checked, the optics
+  must **never** point at or near the Sun.
+- **The Sun avoidance in this software is an aid only and is no guarantee of safety.** The Sun
+  position, frame timing and slew paths are estimates; the real path of a mount (meridian flips,
+  firmware behaviour, axis order, clock, location, time zone or settings errors, communication
+  failures or interrupted commands) can differ, and a mount can pass near the Sun even when no frame
+  is planned there. Keep **Keep away from the Sun** generous, check the Sun overlay and the time and
+  location settings before every run, prefer capturing when the Sun is low, behind an obstruction or
+  below the horizon, and **stay with the equipment and supervise every daytime run**, ready to stop
+  it immediately.
+- If you are unsure, do not capture in daylight. Seek advice from an experienced astronomer before
+  using any solar filter with a camera or telescope.
+
+### Sources
+
+- GNU General Public License v3, sections 15–17 (this repository's [LICENSE](LICENSE));
+  <https://www.gnu.org/licenses/gpl-3.0.html>
+- NASA – Eclipse eye safety: <https://science.nasa.gov/eclipses/safety/> and
+  <https://science.nasa.gov/eclipses/future-eclipses/eclipse-2024/safety/>
+- American Astronomical Society – Solar filters for optics (telescopes, binoculars & cameras):
+  <https://eclipse.aas.org/eye-safety/optics-filters>
+- American Academy of Ophthalmology – Photographing an eclipse without damaging your eyes:
+  <https://www.aao.org/newsroom/news-releases/detail/learn-how-to-photograph-eclipse-without-damaging-y>
+
+## Debug log
+
+**Debug → Debug log (all actions)** writes everything the app does to a log file in
+`%LOCALAPPDATA%\HorizonMapper\logs\`, with millisecond times and the thread that did it:
+- every click and Esc press;
+- every NINA request with its timing and answer;
+- every step, wait, pause and state change of a capture run;
+- folder scans and redraw times;
+- errors, including ones the window would otherwise hide.
+
+A watchdog adds a line whenever the window is blocked for more than a second.
+**Debug → Show log windows** shows or hides the log panes. The Capture log sits beside the
+picture, and you can drag the divider to make it wider or narrower. **Debug → Open log
+folder** opens the folder. The setting is remembered; it is on by default during development.
+Please attach the log when reporting a problem.
+
+## Development notes
+
+- Every new setting, choice or button needs a hover text: add an entry to `TIPS` in
+  `horizon_mapper.py` (key = the text shown in the window). The debug log lists controls without
+  one ("controls without hover text").
+- Update the README, the in-app Help and `CHANGELOG.md` with every change.
+- `python horizon_mapper.py --selftest-gui` opens the real window, switches through the tabs, shows a
+  hover and closes. The Windows build runs it for the script and for the exe.
+- Never patch the `tkinter` / `ttk` modules themselves: the wrappers in `run_gui` work on private
+  copies of their names, because ttk builds some widgets on others internally.
+
+### Release checklist
+
+1. Set `DEV_MODE = False` in `horizon_mapper.py`. This switches the development defaults off:
+   - the debug log;
+   - the log windows;
+   - the test-rig capture host 192.168.0.10, which goes back to `localhost`.
+
+   Users can still change all three.
+2. Set `APP_VERSION` and finish the `CHANGELOG.md` entry.
+3. Tag the release (`vX.Y.Z`); the GitHub Actions build attaches the exe to the release.
 
 ## Install (Windows)
 
@@ -39,8 +166,22 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
     Each extra frame width costs roughly 10–15% more frames with a typical tree line.
   - Frames are placed per row only over the stretches where the strip enters that row, using as
     few frames as the overlap allows. Every point of the strip is still covered.
-  - **Lowest altitude** sets a floor for the strip. Keep it well above the sun when you shoot by day
-    (use **Sun check**).
+  - **Lowest altitude** sets a floor for the strip. Keep it well above the sun when you shoot by day.
+- **The Sun in the preview:** enter **Start date** and **Start time (HH:MM)**, plus **Sun distance
+  (°)** (default 30), under the Plan buttons. The date can be `2026-11-12`, `12.11.2026` or
+  `12.11.` (this year); blank means today, and a blank time means the current time of day; the longitude is the one next to **Sun check**. The preview
+  then draws:
+  - the Sun at the start (filled) and at the plan's estimated end (ring), with its track between;
+  - the keep-away zone around both;
+  - **frames that would be too close to the Sun when their turn comes, in red** (each frame's time
+    comes from the shooting order and the time estimates);
+  - a **red ×** on frames whose slew from the previous frame would pass near the Sun.
+
+  A line at the top sums it up. Try different start times or azimuth ranges until nothing is red.
+- **Order** (Sequence group): **East half first, then west** gives a single meridian flip. The east
+  half is shot bottom to top and, by default, the west half top to bottom (the shortest path). Tick
+  **Rows bottom to top in both halves** to start the west half at the bottom too.
+  CLI: `plan --bottom-up`.
 - **Rotator:** keeps every frame level, so 10% overlap is enough.
   - Offset = sky angle − mechanical angle, as shown in NINA's rotator panel after a plate solve.
   - Being off by 180° doesn't matter.
@@ -54,7 +195,108 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
 - **Conditions:** even overcast daylight gives the sharpest silhouettes. Take one test frame first;
   open sky should read about 10,000–30,000 ADU.
 
-## 2. Build horizon
+## 2. Capture (NINA)
+
+Shoots the frames directly from Horizon Mapper. NINA still talks to the equipment; Horizon Mapper
+tells it what to do through the **Advanced API** plugin, one frame at a time. (Saving a sequence on
+the Plan tab and running it in NINA still works as before.)
+
+**Setup (once):** in NINA install **Advanced API** (Plugins tab), enable its server in the plugin
+settings (default port 1888), and set NINA to save **FITS** files. Connect the mount, camera and
+rotator in NINA as usual. Don't run a NINA sequence at the same time.
+
+1. **Host** / **Port**: where NINA runs (port 1888 by default). The host is `localhost`, or
+   192.168.0.10 while `DEV_MODE` is on. **Test connection** (in the same group) checks the plugin, shows which devices are connected, starts the live device
+   line (mount alt/az, pier side, rotator, camera) and fills in NINA's image folder.
+2. **Frames to shoot:** the plan from the Plan tab, the fill-in frames generated on the Build tab,
+   or a **saved sequence file** (a plan or fill-in sequence saved for NINA; **Browse…**). Exposure,
+   gain and binning are taken from the file. Choosing a source shows its frames straight away
+   (prepared in the background). If frames have already been taken, it asks first, because their
+   progress is replaced. A fresh **Start** always takes the frames from the source as it is at that
+   moment, so later changes on the Plan tab are used.
+   - The picture looks like the Plan preview: the strip to image, the current horizon, the lowest
+     altitude, the frames and the shooting order (**Show shooting order**).
+   - Each frame's outline shows its state: blue = to do, yellow (thick) = in progress, green = done,
+     orange = skipped, red = error.
+   - **When a frame is finished, its picture is drawn in its slot.** It is projected with the same
+     maths as the mosaic, using the rotator offset (the Build tab's calibrated value if there is
+     one). If the previews come out upside down, tick **Turn previews 180°**. **Show finished
+     frames in the picture** turns them off.
+   - Wheel zooms, drag moves, double-click shows the whole sky.
+3. **Capture** (exposure, gain, binning) follows the Plan tab; offset is NINA's camera setting.
+   **Settle** waits after each move.
+4. **Range:** **From frame** and **To frame** (blank = the last frame) limit the run to those frames,
+   numbered in shooting order (the numbers in the picture). Frames already taken are left out
+   unless **Re-shoot frames already taken** is ticked. The line below says how many will be shot.
+5. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°) or below **Never
+   below altitude** (default 10°) are skipped, never slewed to. **Unpark at start** / **Park when
+   finished**.
+   - **Slew paths are checked too.** Before each slew the app estimates the mount's path from where
+     it actually is (both axes moving together). If the path would pass closer to the Sun than the
+     limit, it first slews to a safe intermediate position (one axis first, or via the meridian high
+     in the sky). If there is no safe route, the frame is skipped.
+   - **Sun check at Start:** the frames to shoot are timed through the run. If any would be too
+     close to the Sun when its turn comes, or its slew would pass near it, Start lists them. Then
+     choose: **Yes** = shoot as planned (the protections above apply), **No** = leave those frames
+     out of this run (they stay "to do"), **Cancel**.
+   - The Capture picture shows the Sun now, its track over the rest of the run and the keep-away
+     zone, with risky frames in red.
+6. **▶ Start** asks for confirmation. Tracking is left as it is: the exposures are very short and
+   every slew is aimed at the current sky position, so it isn't needed. If the mount isn't tracking,
+   the log says so once. Only if a slew is refused while the mount isn't tracking does the app
+   switch tracking on and try that slew once more. Every slew is checked against the mount's
+   RA/Dec. Then, for every frame: slew (alt/az converted to J2000 RA/Dec
+   with the mount's own sidereal time) → rotator to its mechanical angle → settle → expose. NINA saves
+   the FITS with its usual headers, and Horizon Mapper finds the file in NINA's image folder.
+
+**Pause and errors**
+
+- The big red **⏸ PAUSE** button, or **Esc** anywhere in the app, immediately stops the slew, the
+  rotator and the exposure, and holds. **▶ Resume** repeats the interrupted frame from its start.
+  While paused, **Skip frame** skips it.
+- **Any error or timeout pauses the run automatically** (with a beep and the reason in the log).
+  Examples: NINA not answering, a failed slew, the mount ending up somewhere else, or a stuck
+  rotator. Nothing is skipped silently. Fix the cause and **Resume**, or **■ End run**.
+- **■ End run** ends the run and keeps the frames taken so far. **Start** again shoots only the
+  frames still missing in the range. Closing the window during a run asks first and stops
+  everything.
+
+The **Run** group's progress bar shows the percentage of the current run in its centre (frames done
+or skipped out of the frames this run shoots). Without a run, it shows frames taken out of all.
+
+**Saving and resuming a capture** (group **Save / Load Capture**, right of **Run**)
+
+- **Save current capture…** writes a `.hmcap.json` file with all the frames, each frame's state
+  (taken, skipped, to do), the file path and NINA file name of every frame taken, and the capture,
+  safety, range and file settings. It works at any time, also during a run.
+- **Load saved capture…** restores all of that: frames, progress, settings and the current horizon
+  lines.
+  - Frames already taken get their pictures back from the original file paths.
+  - A frame whose file no longer exists is set back to "to do", and the log lists those frames.
+  - **Start** then shoots only what is still missing in the chosen range.
+- The progress is also **saved automatically** after every frame to
+  `%LOCALAPPDATA%\HorizonMapper\captures\last_capture.hmcap.json`. After a crash or a closed window,
+  load that file to continue.
+
+A preview is only made once its FITS file is complete: its size covers the header and all the
+image data. NINA writes files in the background, so a file can be there but still empty or short.
+Incomplete files, and previews that fail, are tried again every 3 seconds for up to 3 minutes.
+
+The **NINA image folder** can be changed at any time, also during a run. File look-ups and the
+folder scan always use the current value. The Capture log runs down the right side of the tab,
+over the full height, with a scrollbar.
+
+NINA saves files in the background, and they can take a while to appear in its image folder. The
+app doesn't wait for them: it scans the folder every few seconds and matches each new FITS file to
+its frame, by the name NINA reported or else by the pointing in the file header. The picture shows
+these frames in light green until their file arrives. Scanning continues for 10 minutes after the
+run, and late files are added to the picture and the file list.
+
+When the run ends, the list of captured files is written to
+`%LOCALAPPDATA%\HorizonMapper\captures\` and added to the Build tab's folder list. The Build tab
+accepts such a list like a folder.
+
+## 3. Build horizon
 
 - Add the folder(s) with the frames. Subfolders are searched too.
 - Leave **Calibrate rotation from overlaps** on. If you don't know the rotator offset at all, also tick
@@ -87,6 +329,11 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
     a spot without pictures, or comes within this many degrees of one, a **Gap** area is added there,
     whether or not the horizon is steep. Only frames over the gap are shot. Default 1°, 0 = off.
     CLI: `--fillin-gap-near D`.
+- **Import from Capture…** (FITS folders group) brings a capture to this tab: the capture on the
+  Capture tab, or a saved `.hmcap.json`. It does three things, then offers to build right away:
+  - adds the list of the capture's files to the folder list;
+  - takes the rotator offset from the Plan tab;
+  - takes the current horizon from the capture.
 - **Show fill-in frames** (toolbar above the image) draws the fill-in areas (dashed magenta), their
   frames (orange) and the shooting order: a path from green (first) to magenta (last), with the first
   frame of each row numbered (every frame at zoom 20). After you edit the lines or change the

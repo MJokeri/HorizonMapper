@@ -29,6 +29,10 @@ jobs:
           python horizon_mapper.py plan --band 20 45 --template -o smoke_tpl.json
           python -c "import json; k=chr(36)+'values'; d=json.load(open('smoke.json')); assert d['Items'][k][1]['Items'][k], 'empty plan'"
 
+      - name: GUI self-test (real window)
+        timeout-minutes: 3
+        run: python horizon_mapper.py --selftest-gui
+
       - name: Build exe
         run: pyinstaller --noconfirm --onefile --windowed --name HorizonMapper horizon_mapper.py
 
@@ -38,6 +42,8 @@ jobs:
           $p = Start-Process -FilePath dist\HorizonMapper.exe -ArgumentList 'plan','--band','20','45','-o','exe_smoke.json' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "exe exited with $($p.ExitCode)" }
           if (-not (Test-Path exe_smoke.json)) { throw "exe did not write the plan" }
+          $g = Start-Process -FilePath dist\HorizonMapper.exe -ArgumentList '--selftest-gui' -Wait -PassThru
+          if ($g.ExitCode -ne 0) { throw "exe GUI self-test failed (exit code $($g.ExitCode))" }
 
       - name: Package
         shell: pwsh

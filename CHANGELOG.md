@@ -1,5 +1,131 @@
 # Changelog
 
+## 1.1.0 – 2026-11-10
+
+### Added
+- **Disclaimer and safety warning** (README, near the top, and at the top of the in-app Help):
+  the software is experimental and provided "AS IS"; no warranty and no liability of the developer,
+  distributors or any other party for damage to equipment, persons or third parties (based on GNU
+  GPL v3 §15–17); use at your own risk. A warning, with references to NASA, the AAS and the AAO,
+  that pointing or even slewing optics near the Sun can instantly cause eye injury and destroy
+  equipment, and that the built-in Sun check is an aid only.
+- **2. Capture (NINA) tab:** shoots the Plan tab plan or the Build tab fill-in frames directly,
+  through NINA's **Advanced API** plugin. For each frame: slew (alt/az → J2000 RA/Dec from the mount's
+  sidereal time), mechanical rotator move, settle, exposure. NINA saves the FITS with its usual
+  headers; the files are found in NINA's image folder (read from the profile). The file list is added
+  to the Build tab, which now accepts such list files like folders.
+- **Pause:** a large red **⏸ PAUSE** button and **Esc** stop slew, rotator and exposure immediately and
+  hold; **Resume** repeats the interrupted frame, **Skip frame** skips it, **End run** ends the run
+  (a later Start can continue). Errors and timeouts pause the run automatically.
+- **Safety limits:** Sun avoidance (default 30°) and a minimum altitude (default 10°); frames outside
+  them are skipped, never slewed to. Confirmation before starting and when closing during a run.
+- Live device line (mount position, pier side, rotator, camera state).
+- **Capture picture like the Plan preview** (strip, current horizon, frames, shooting order) with each
+  frame's state; **finished frames are drawn in their slots**, projected like the mosaic (calibrated
+  rotator offset from the Build tab if available; **Turn previews 180°** option).
+- **Frames from a saved sequence file:** besides the Plan tab plan and the Build tab fill-in, any plan
+  or fill-in sequence saved for NINA can be loaded (exposure, gain and binning are read from it).
+- **Plan tab – Rows bottom to top in both halves:** with the east/west split, the west half can also
+  be shot bottom to top (default stays top to bottom, the shortest path). CLI: `plan --bottom-up`.
+
+- **Save current capture… / Load saved capture…** (Capture tab, replacing Load frames):
+  - A `.hmcap.json` file stores the frames, each frame's state, the file path and NINA file name of
+    every frame taken, and the capture, safety, range and file settings.
+  - Loading restores everything and shows the pictures from the original paths. A frame whose file
+    is gone is set back to "to do".
+  - The progress is also saved automatically after every frame (`captures\last_capture.hmcap.json`).
+- **Range: From frame / To frame** (Capture tab): a run shoots only those frames (in shooting order),
+  leaving out frames already taken unless **Re-shoot frames already taken** is ticked. A stopped or
+  loaded capture is resumed simply by pressing Start.
+- Choosing a frame source shows its frames at once; a fresh Start uses the source as it is then.
+- **Sun safety, beyond single frames:**
+  - **Plan preview:** shows the Sun's track from the chosen start date and time to the plan's
+    estimated end,
+    with the keep-away zone. Frames that would be too close when their turn comes are red; slews
+    passing near the Sun get a red ×.
+  - **Capture Start:** times the frames through the run and lists any frames or slews that would
+    come too close. Choose to shoot as planned or leave those frames out of this run.
+  - **During the run:** each slew's path from the mount's actual position is checked; one that
+    would pass near the Sun goes via a safe intermediate position, or the frame is skipped.
+  - **Capture picture:** shows the Sun now, its track and the keep-away zone.
+- **Build tab – Import from Capture…:** takes the capture on the Capture tab, or a saved
+  `.hmcap.json`, and does three things, then offers to build right away:
+  - adds its file list to the folders;
+  - sets the rotator offset from the Plan tab;
+  - sets the current horizon from the capture.
+- Capture tab: the progress bar shows the percentage of the run in its centre. **Test connection**
+  moved into the NINA group. **Save / Load Capture** is a group of its own, right of **Run**.
+- **Hover explanations** for every setting, choice and button on all tabs. New controls get theirs
+  from the `TIPS` table; the debug log lists any control without one.
+- **Debug → Show log windows** (on during development): shows or hides the Capture and Build logs.
+  The Capture log sits in its own pane; drag the divider to resize it.
+- `DEV_MODE` switch for the development defaults (debug log and log windows on), plus a release
+  checklist in the README.
+- Capture tab: default host 192.168.0.10 while `DEV_MODE` is on (test rig), otherwise `localhost`.
+- Capture tab: the log runs down the right side at full height, with a scrollbar.
+- **Debug menu → Debug log (all actions):** every click, NINA request (timing and answer), capture
+  step, wait, pause and state change, folder scan and redraw, plus errors from window callbacks and
+  background threads, goes to `%LOCALAPPDATA%\HorizonMapper\logs\`. A watchdog logs whenever the
+  window is blocked for more than a second. The setting is remembered and on by default for now.
+
+### Fixed
+- **Typing a start date showed "mktime argument out of range".** The preview redrew on every
+  keystroke and read a half-typed date ("01.07.202") as the year 202. Dates are now checked: years
+  1970–2100 and days that exist. The Sun part of the preview can no longer raise an error; it says
+  what to enter instead. The preview redraws once typing pauses.
+- **The app crashed at start** ("super(type, obj): obj must be an instance or subtype of type"). The
+  hover and click-logging wrappers replaced classes inside the tkinter library itself, and ttk
+  builds its Combobox and Spinbox on ttk.Entry internally. The wrappers now live in the app's own
+  copy of the tkinter names, and the library stays untouched.
+- **The Windows build now opens the real window** (`--selftest-gui`), both as a Python script and as
+  the exe. It switches through the tabs, shows a hover and closes, so a start-up crash fails the
+  build instead of reaching users.
+- **The window could freeze during a capture run, making PAUSE and Stop unresponsive.**
+  - Every event from the run redrew the whole picture, and the handler only gave control back to
+    the window once all queued events were done. With hundreds of frames and previews, redrawing
+    became slower than the events arrived.
+  - Now events are handled for at most ~80 ms at a time, the picture is redrawn at most four times
+    a second, and resized previews are cached.
+  - Background threads no longer read window settings, which on Windows can stall both sides.
+- **Load frames during a paused run locked the app.** It recomputed the plan on the window's thread
+  and dropped the paused run, so Resume, Stop and PAUSE had nothing to act on.
+  - Frames are now prepared in the background.
+  - Loading while paused first asks, then ends the paused run properly (its frames are kept and
+    listed for the Build tab).
+  - While a run is in progress, Load frames is disabled.
+- **Some frames never got a preview:** the file was found while NINA was still writing it (empty or
+  short), the preview failed and was not tried again. Now a file is used only when its size covers
+  the header and all the image data. Incomplete files, and failed previews, are retried every 3 s
+  for up to 3 minutes.
+- Loading frames can no longer get stuck: the internal "loading" flag is always cleared, a stale one
+  is reset after 60 s, and every decision is written to the debug log.
+- **Changing the NINA image folder during a run had no effect** (the folder was read once at Start),
+  so no files were found and no pictures appeared. The folder is now read whenever files are looked
+  up, and the debug log shows the folder, whether it exists, and NINA's file names.
+- Files that NINA saves late no longer hold up or pause the run. The app scans NINA's image folder
+  every few seconds and matches new FITS files to their frames, by name or by the pointing in the
+  header. They are added to the picture and the file list as they arrive, also for 10 minutes
+  after the run. Waiting frames are shown in light green.
+- Capture would not start with mounts whose driver reports switching tracking on as failed (seen
+  with the ZWO "ASI Mount": NINA answered "Tracking mode changed" with failure). Tracking is now
+  tried, checked and only noted in the log if it stays off; every slew is still verified.
+- Slews are no longer judged too early: the app now waits for NINA's own slew to finish (the
+  request waits, while PAUSE still works at once), then until the mount stands still, before
+  checking where it is. Before, a mount slow to report "slewing" (ZWO ASI Mount) was taken as
+  arrived at the old position, and the automatic pause then stopped the slew it had just begun.
+- Slew arrival is checked against the mount's RA/Dec (recomputed for the current sidereal time),
+  so it works whether or not the mount tracks.
+- Error messages from NINA that carry no error text now say that NINA reported a failure.
+
+### Changed
+- **Stop run** is now **End run**.
+- **Tracking is no longer switched on at the start of a capture.** The exposures are very short and
+  every slew is aimed at the current sky position, so tracking isn't needed. This avoids a confusing
+  "failed" reply from drivers such as the ZWO ASI Mount, which answer the tracking command that way
+  even when it works. If a slew is refused while the mount isn't tracking, tracking is switched on
+  and that slew is tried once more. A non-tracking mount gets one plain information line in the log.
+- Tabs renumbered: 1. Plan sequence, 2. Capture (NINA), 3. Build horizon.
+
 ## 1.0.1 – 2026-11-09
 
 ### Added
