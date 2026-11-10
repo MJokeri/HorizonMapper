@@ -302,24 +302,59 @@ def _grid(p, fw, fh, lim):
     else:
         lo, hi = amin + fh / 2, amax - fh / 2
         rows = [lo + i * (hi - lo) / (n_rows - 1) for i in range(n_rows)]
+    # Each row is responsible for its own altitude zone (half-way to the neighbouring rows; the
+    # outer rows reach their frame edge). The zones together cover [amin, amax], and every frame
+    # covers its row's whole zone, so a row only needs frames where the strip enters its zone.
+    zones = []
+    for i, alt in enumerate(rows):
+        z0 = alt - fh / 2 if i == 0 else (rows[i - 1] + alt) / 2
+        z1 = alt + fh / 2 if i == len(rows) - 1 else (alt + rows[i + 1]) / 2
+        zones.append((z0, z1))
+    ds = 0.25                                                    # azimuth sampling step
+    ns = int(round(span_az / ds))
+    e_lim = [lim(p.az_start + k * ds) for k in range(ns + 1)]   # cell edges
+    c_lim = [lim(p.az_start + (k + 0.5) * ds) for k in range(ns)]  # cell centres
+    s_lim = [(min(e_lim[k][0], c_lim[k][0], e_lim[k + 1][0]), max(e_lim[k][1], c_lim[k][1], e_lim[k + 1][1]))
+             for k in range(ns)]                                 # strip extent within each cell
     grid = []
-    for alt in rows:
+    for alt, (z0, z1) in zip(rows, zones):
         low_edge = max(alt - fh / 2, 0.0)
-        cov = fw / max(math.cos(math.radians(low_edge)), 1e-3)
+        cov = fw / max(math.cos(math.radians(low_edge)), 1e-3)   # narrowest azimuth width of the frame
         stp = cov * (1 - p.overlap)
-        if full:
-            n = math.ceil(360 / stp); azs = [p.az_start + k * 360 / n for k in range(n)]
-        else:
-            n = 1 if span_az <= cov else math.ceil((span_az - cov) / stp) + 1
-            a0 = p.az_start + cov / 2; a1 = p.az_start + span_az - cov / 2
-            azs = [a0 + k * (a1 - a0) / max(n - 1, 1) for k in range(n)] if n > 1 else [p.az_start + span_az / 2]
-        keep = []
-        for az in azs:
-            los, his = zip(*[lim(az + cov / 2 * k / 4) for k in range(-4, 5)])
-            if alt + fh / 2 >= min(los) and alt - fh / 2 <= max(his):
-                keep.append(az % 360)
-        if keep:
-            grid.append((alt, sorted(keep)))
+        need = [lo_ < z1 and hi_ > z0 for lo_, hi_ in s_lim]
+        if not any(need):
+            continue
+        if all(need) and full:
+            n = math.ceil(360 / stp)
+            grid.append((alt, sorted((p.az_start + k * 360 / n) % 360 for k in range(n)))); continue
+        # contiguous needed stretches [start, end) in degrees from az_start (joined across 0/360)
+        runs = []; k = 0
+        while k < ns:
+            if need[k]:
+                j = k
+                while j < ns and need[j]:
+                    j += 1
+                runs.append([k * ds, j * ds]); k = j
+            else:
+                k += 1
+        if full and len(runs) > 1 and runs[0][0] == 0 and runs[-1][1] >= span_az - 1e-9:
+            last = runs.pop(); runs[0][0] = last[0] - 360
+        count = lambda L: 1 if L <= cov else math.ceil((L - cov) / stp) + 1
+        merged = []
+        for r in runs:      # join neighbouring stretches when that needs no more frames
+            if merged and count(r[1] - merged[-1][0]) <= count(merged[-1][1] - merged[-1][0]) + count(r[1] - r[0]):
+                merged[-1][1] = r[1]
+            else:
+                merged.append(list(r))
+        azs = []
+        for s0, s1 in merged:
+            s0 -= 0.05; s1 += 0.05                               # small safety margin at the ends
+            L = s1 - s0; n = count(L)
+            if n == 1:
+                azs.append(s0 + L / 2)
+            else:
+                azs += [s0 + cov / 2 + i * (L - cov) / (n - 1) for i in range(n)]
+        grid.append((alt, sorted((p.az_start + a) % 360 for a in azs)))
     if p.meridian_split:
         east = [(a, [z for z in zs if z < 180]) for a, zs in grid]
         west = [(a, [z for z in zs if z >= 180]) for a, zs in reversed(grid)]
@@ -1827,6 +1862,8 @@ WORKFLOW
      more steeply than 'Steep = more than' (altitude ° per azimuth °, 3 ≈ 72°), the strip is
      widened sideways by this many frame widths and covers the whole height of the jump, so
      the sides of trees and roofs are imaged. 1 is a good default; 0 = off.
+     Fractions work: 0.5 usually gives two frames per row at a narrow edge.
+   • Each row gets frames only where the strip enters it, as few as the overlap allows.
    • 'Lowest altitude' keeps frames (and the sun) out of the low sky.
    • 'Preview plan' draws the frames; with 'Show shooting order' (on by default) a colour-graded
      path shows the order (green = first → yellow → magenta = last), with the first frame number
