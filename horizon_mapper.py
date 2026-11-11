@@ -985,6 +985,21 @@ class NinaApi:
         if binning:
             self.get("/equipment/camera/set-binning", binning=f"{int(binning)}x{int(binning)}")
 
+    def flat_state(self):
+        """'open', 'closed', 'moving' or 'unknown' (None: no flat panel connected in NINA)."""
+        try:
+            info = self.get("/equipment/flatdevice/info") or {}
+        except NinaApiError:
+            return None
+        if not info.get("Connected", True):
+            return None
+        st = str(info.get("CoverState", "")).lower()
+        return {"open": "open", "closed": "closed", "neitheropennorclosed": "moving"}.get(st, "unknown")
+
+    def flat_cover(self, closed):
+        """Close or open the flat panel's cover (the panel must be connected in NINA)."""
+        self.get("/equipment/flatdevice/set-cover", closed=bool(closed), timeout=90)
+
 
 # =============================================================================
 #  CAPTURE – drive the devices directly through ASCOM Alpaca (no NINA)
@@ -1163,11 +1178,17 @@ def default_capture_dir():
 
 
 def limit_rotator(angle, mode="full", start=0.0):
-    """Keep a mechanical rotator angle inside a half-turn range [start, start+180): the frame is
-    rectangular, so turning it by 180° covers the same sky. 'full' leaves the angle as planned."""
-    if angle is None or mode != "half":
+    """Keep a mechanical rotator angle inside a limited range from `start`: 'half' = 180°, 'quarter' = 90°,
+    'full' leaves the angle as planned. The frame is rectangular, so turning it by 180° covers the same
+    sky: the angle is first folded into [start, start+180). A 90° range cannot reproduce every angle that
+    way, so an angle beyond start+90° goes to the nearer end (start+90° or start); that frame is then
+    tilted by up to 45° against the plan."""
+    if angle is None or mode not in ("half", "quarter"):
         return angle
-    return (start + (angle - start) % 180.0) % 360.0
+    a = (angle - start) % 180.0
+    if mode == "quarter" and a > 90.0:
+        a = 90.0 if a - 90.0 < 180.0 - a else 0.0
+    return (start + a) % 360.0
 
 
 class AlpacaApi:
@@ -1178,10 +1199,11 @@ class AlpacaApi:
     CAMERA_STATES = ("Idle", "Waiting", "Exposing", "Reading", "Download", "Error")
 
     def __init__(self, host="localhost", port=11111, telescope=0, camera=0, rotator=0, timeout=15.0,
-                 focal_mm=None, pixel_um=None):
+                 focal_mm=None, pixel_um=None, flat=None):
         import random
         self.root = f"http://{host}:{int(port)}"
-        self.dev = {"telescope": telescope, "camera": camera, "rotator": rotator}   # rotator None: not used
+        self.dev = {"telescope": telescope, "camera": camera, "rotator": rotator,
+                    "covercalibrator": flat}   # rotator, flat panel None: not used
         self.timeout = timeout
         self.focal_mm, self.pixel_um = focal_mm, pixel_um
         self.cid = random.randint(1, 65535); self.tid = 0
@@ -1291,19 +1313,19 @@ class AlpacaApi:
     def connect(self):
         """Connect the chosen devices (the server connects their drivers). Returns notes for the log."""
         notes = []
-        for dev in ("telescope", "camera", "rotator"):
+        for dev in ("telescope", "camera", "rotator", "covercalibrator"):
             if self.dev.get(dev) is None:
                 continue
+            nm = {"telescope": "mount", "covercalibrator": "flat panel"}.get(dev, dev)
             try:
                 if not self.get(dev, "connected"):
                     self.put(dev, "connected", timeout=60, Connected=True)
                     end = time.time() + 30
                     while not self.get(dev, "connected") and time.time() < end:
                         time.sleep(0.5)
-                notes.append(f"{'mount' if dev == 'telescope' else dev} "
-                             f"{'connected' if self.get(dev, 'connected') else 'NOT connected'}")
+                notes.append(f"{nm} {'connected' if self.get(dev, 'connected') else 'NOT connected'}")
             except AlpacaError as e:
-                notes.append(f"{'mount' if dev == 'telescope' else dev} ? ({e})")
+                notes.append(f"{nm} ? ({e})")
         return notes
 
     # ---------------------------------------------------------------- state (NINA-style keys)
@@ -1422,6 +1444,29 @@ class AlpacaApi:
             st[self.rot_key] = self.rot_mode
             save_settings(alpaca_rotmode=st)
             dlog(f"rotator move method '{self.rot_mode}' remembered for {self.rot_key}")
+
+    COVER_STATES = {0: "none", 1: "closed", 2: "moving", 3: "open", 4: "unknown", 5: "error"}
+
+    def flat_state(self):
+        """'open', 'closed', 'moving', 'unknown' or 'error' (None: no flat panel selected / connected)."""
+        d = "covercalibrator"
+        if self.dev.get(d) is None:
+            return None
+        try:
+            if not self.get(d, "connected"):
+                return None
+            return self.COVER_STATES.get(self.get(d, "coverstate"), "unknown")
+        except AlpacaError:
+            return None
+
+    def flat_cover(self, closed):
+        """Close or open the flat panel's cover (ASCOM CoverCalibrator)."""
+        d = "covercalibrator"
+        if self.dev.get(d) is None:
+            raise AlpacaError("no flat panel (cover calibrator) selected")
+        if not self.get(d, "connected"):
+            self.put(d, "connected", timeout=60, Connected=True)
+        self.put(d, "closecover" if closed else "opencover", timeout=30)
 
     def stop_all(self):
         """Stop every movement and exposure at once; errors are collected, not raised."""
@@ -1670,6 +1715,9 @@ class CaptureRunner:
                     os.makedirs(self.image_folder or default_capture_dir(), exist_ok=True)
                 except OSError as e:
                     raise NinaApiError(f"the folder for the images cannot be created ({e})")
+        if self.api.flat_state() == "closed":
+            self.emit("log", msg="Warning: the flat panel cover is closed – it blocks the sky. "
+                                 "Use 'Open flat panel' (under Safety and Peripherals) if the frames come out dark.")
         m = self.api.mount()
         if not m.get("Connected"):
             raise NinaApiError(f"the mount is not connected {via}")
@@ -3915,10 +3963,11 @@ def run_gui(selftest=False):
     ttk.Button(alp_box, text="Find", width=5, command=lambda: cap_discover()).grid(row=0, column=2, sticky="w")
     labeled(alp_box, 1, "Alpaca port", cvar("aport", str(_st.get("alpaca_port") or "11111")), width=14)
     alp_combo = {}
-    for r_, (key_, lab_) in enumerate((("atel", "Mount"), ("acam", "Camera"), ("arot", "Rotator")), start=2):
+    for r_, (key_, lab_) in enumerate((("atel", "Mount"), ("acam", "Camera"), ("arot", "Rotator"),
+                                       ("aflat", "Flat panel")), start=2):
         ttk.Label(alp_box, text=lab_).grid(row=r_, column=0, sticky="w", padx=4, pady=1)
-        alp_combo[key_] = ttk.Combobox(alp_box, textvariable=cvar(key_, str(_st.get("alpaca_" + key_, "0"))), width=22,
-                                       values=["0"] + (["none"] if key_ == "arot" else []))
+        alp_combo[key_] = ttk.Combobox(alp_box, textvariable=cvar(key_, str(_st.get("alpaca_" + key_, "none" if key_ == "aflat" else "0"))), width=22,
+                                       values=["0"] + (["none"] if key_ in ("arot", "aflat") else []))
         alp_combo[key_].grid(row=r_, column=1, columnspan=2, sticky="w", padx=4, pady=1)
     ttk.Button(g, text="Test connection", command=lambda: cap_connect()).grid(row=2, column=0, columnspan=2,
                                                                           sticky="w", padx=4, pady=2)
@@ -3948,15 +3997,20 @@ def run_gui(selftest=False):
     labeled(g, 3, "Settle after moves (s)", cvar("settle", "1.0"), width=7)
     for k in ("exposure", "gain", "binning"):          # follow the Plan tab
         V[k].trace_add("write", lambda *a, k=k: cv_[k].set(V[k].get()))
-    g = group(cbar, "Safety")
+    g = group(cbar, "Safety and Peripherals")
     labeled(g, 0, "Keep away from the Sun (°)", cvar("sun", "30"), width=6)
     labeled(g, 1, "Never below altitude (°)", cvar("floor", "10"), width=6)
     labeled(g, 2, "Never above altitude (°)", cvar("ceil", "90"), width=6)
     cvar("unpark", True, tk.BooleanVar); cvar("park", V["park"].get(), tk.BooleanVar)
     ttk.Checkbutton(g, text="Unpark at start ", variable=cv_["unpark"]).grid(row=3, column=0, sticky="w", padx=4)
     ttk.Checkbutton(g, text="Park when finished", variable=cv_["park"]).grid(row=4, column=0, sticky="w", padx=4)
+    fp = ttk.Frame(g); fp.grid(row=5, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 0))
+    ttk.Button(fp, text="Open flat panel", command=lambda: flat_cover(False)).pack(side="left")
+    ttk.Button(fp, text="Close flat panel", command=lambda: flat_cover(True)).pack(side="left", padx=4)
+    flat_lbl = ttk.Label(g, text="", foreground="#666", wraplength=230, justify="left")
+    flat_lbl.grid(row=6, column=0, columnspan=3, sticky="w", padx=4)
     g = group(cbar, "Rotator limit")
-    ROT_RANGES = ("Full turn (360°)", "Half turn (180°)")
+    ROT_RANGES = ("Half turn (180°)", "Quarter turn (90°)", "Full turn (360°)")
     ttk.Label(g, text="Rotator range").grid(row=0, column=0, sticky="w", padx=4, pady=2)
     ttk.Combobox(g, textvariable=cvar("rot_range", ROT_RANGES[0]), values=ROT_RANGES, width=16,
                  state="readonly").grid(row=0, column=1, sticky="w", padx=4, pady=2)
@@ -3964,12 +4018,20 @@ def run_gui(selftest=False):
     rot_lbl = ttk.Label(g, text="", foreground="#666", wraplength=230, justify="left")
     rot_lbl.grid(row=2, column=0, columnspan=3, sticky="w", padx=4)
 
+    def rot_span():
+        """Rotator range chosen: 180 or 90 (degrees), 0 = full turn."""
+        t = cv_["rot_range"].get()
+        return 180 if t.startswith("Half") else 90 if t.startswith("Quarter") else 0
+
     def rot_note(*a):
         try:
-            if cv_["rot_range"].get().startswith("Half"):
+            span = rot_span()
+            if span:
                 a0 = float(cv_["rot_start"].get()) % 360
-                rot_lbl.config(text=f"The rotator stays within {a0:g}°–{(a0 + 180) % 360:g}° (mechanical); "
-                                    "angles outside are shot turned by 180°, which covers the same sky.")
+                rot_lbl.config(text=f"The rotator stays within {a0:g}°–{(a0 + span) % 360:g}° (mechanical); "
+                                    + ("angles outside are shot turned by 180°, which covers the same sky." if span == 180 else
+                                       "angles that 180° turns cannot bring inside go to the nearer end, so some frames are "
+                                       "tilted by up to 45° and the coverage can have gaps."))
             else:
                 rot_lbl.config(text="The rotator goes to the planned angles.")
         except ValueError:
@@ -4118,8 +4180,35 @@ def run_gui(selftest=False):
         except ValueError:
             raise ValueError("The Alpaca port must be a number (ASCOM Remote uses 11111).")
         return AlpacaApi(cv_["ahost"].get().strip() or "localhost", port, telescope=num("atel", "mount"),
-                         camera=num("acam", "camera"), rotator=num("arot", "rotator", True), timeout=15,
+                         camera=num("acam", "camera"), rotator=num("arot", "rotator", True), flat=num("aflat", "flat panel", True), timeout=15,
                          focal_mm=fl("focal_mm"), pixel_um=fl("pixel_um"))
+
+    def flat_cover(closed):
+        """Close or open the flat panel (in the background; the result goes to the label under the buttons)."""
+        try:
+            api = api_now()
+        except ValueError as e:
+            messagebox.showerror(APP_NAME, str(e)); return
+        if closed and not messagebox.askyesno(
+                APP_NAME, "Close the flat panel cover? Make sure nothing is in its way. A closed cover blocks the sky."):
+            return
+        word = "Closing" if closed else "Opening"
+        flat_lbl.config(text=f"{word} the flat panel…")
+
+        def job():
+            try:
+                api.flat_cover(closed)
+                want = "closed" if closed else "open"
+                end = time.time() + 90; st = api.flat_state()
+                while st not in (want, None) and st != "error" and time.time() < end:
+                    time.sleep(1.0); st = api.flat_state()
+                if st == want or st is None:
+                    C["q"].put(("flat", f"Flat panel cover {want}." if st else f"Flat panel {'closing' if closed else 'opening'} command sent."))
+                else:
+                    C["q"].put(("flat", f"Flat panel cover: {st} (wanted {want})."))
+            except NinaApiError as e:
+                C["q"].put(("flat", f"Flat panel: {e}"))
+        threading.Thread(target=job, daemon=True, name="flat-panel").start()
 
     def cap_discover():
         """Look for Alpaca servers on the local network (in the background)."""
@@ -4149,7 +4238,7 @@ def run_gui(selftest=False):
                     for d_ in devs:
                         by.setdefault(str(d_.get("DeviceType", "")).lower(), []).append(d_)
                     # connect only when it is clear which devices are meant
-                    clear = listed or all(len(by.get(t_, [])) <= 1 for t_ in ("telescope", "camera", "rotator"))
+                    clear = listed or all(len(by.get(t_, [])) <= 1 for t_ in ("telescope", "camera", "rotator", "covercalibrator"))
                     parts = api.connect() if clear else []
                     C["q"].put(("connected_alpaca", (api.root, ver, devs, parts, clear)))
                 except NinaApiError as e:
@@ -4364,7 +4453,7 @@ def run_gui(selftest=False):
         cv_[_k].trace_add("write", update_range_label)
 
     def capture_settings():
-        keys = ("method", "host", "port", "ahost", "aport", "atel", "acam", "arot", "exposure", "gain", "binning",
+        keys = ("method", "host", "port", "ahost", "aport", "atel", "acam", "arot", "aflat", "exposure", "gain", "binning",
                 "settle", "sun", "floor", "ceil", "rot_range", "rot_start", "unpark", "park",
                 "target", "folder", "afolder", "first", "last", "reshoot", "src", "file")
         return {k: cv_[k].get() for k in keys}
@@ -4542,7 +4631,7 @@ def run_gui(selftest=False):
             ex = float(cv_["exposure"].get()); gain = int(float(cv_["gain"].get()))
             binning = int(float(cv_["binning"].get())); settle = float(cv_["settle"].get())
             sun = float(cv_["sun"].get()); floor_ = float(cv_["floor"].get()); ceil_ = float(cv_["ceil"].get())
-            rot_half = cv_["rot_range"].get().startswith("Half"); rot_start = float(cv_["rot_start"].get() or 0)
+            rot_mode = {180: "half", 90: "quarter", 0: "full"}[rot_span()]; rot_start = float(cv_["rot_start"].get() or 0)
             first, last = range_values()
         except ValueError as e:
             messagebox.showerror(APP_NAME, f"Check the capture, safety, rotator and range values. {e}"); return
@@ -4562,7 +4651,8 @@ def run_gui(selftest=False):
                 messagebox.showerror(APP_NAME, f"The folder for the images cannot be used:\n{image_folder()}\n{e}"); return
             save_settings(cap_method="alpaca", alpaca_host=cv_["ahost"].get(), alpaca_port=cv_["aport"].get(),
                           alpaca_folder=cv_["afolder"].get(), alpaca_atel=cv_["atel"].get(),
-                          alpaca_acam=cv_["acam"].get(), alpaca_arot=cv_["arot"].get())
+                          alpaca_acam=cv_["acam"].get(), alpaca_arot=cv_["arot"].get(),
+                          alpaca_aflat=cv_["aflat"].get())
         else:
             save_settings(cap_method="nina")
         status, paths, names = progress_lists()
@@ -4617,11 +4707,11 @@ def run_gui(selftest=False):
                                target=cv_["target"].get() or "Horizon mapping", settle=settle, sun_min=sun,
                                floor=floor_, unpark=cv_["unpark"].get(), park=cv_["park"].get(),
                                image_folder=image_folder(), order=order, status=status, paths=paths,
-                               names=names, ceiling=ceil_, rot_range="half" if rot_half else "full",
+                               names=names, ceiling=ceil_, rot_range=rot_mode,
                                rot_start=rot_start)
         C["runner"] = runner; C["status"] = list(runner.status); update_progress()
         clog_add(f"Start through {api.label}: {len(order)} frames ({first}–{last}), exposure {ex} s, sun ≥ {sun}°, "
-                 f"altitude {floor_:g}–{ceil_:g}°" + (f", rotator within {rot_start % 360:g}–{(rot_start + 180) % 360:g}°" if rot_half else "") + ".")
+                 f"altitude {floor_:g}–{ceil_:g}°" + (f", rotator within {rot_start % 360:g}–{(rot_start + rot_span()) % 360:g}°" if rot_span() else "") + ".")
         dlog(f"start: order {order[:10]}{' …' if len(order) > 10 else ''}")
         if not C["polling"]:
             C["api"] = api_now(); poll_devices()
@@ -4746,7 +4836,9 @@ def run_gui(selftest=False):
             while time.time() - t0 < 0.08:
                 kind, val = C["q"].get_nowait(); n += 1
                 ui_beat["doing"] = f"capture event {kind}"
-                if kind == "connected":
+                if kind == "flat":
+                    flat_lbl.config(text=val); clog_add(val)
+                elif kind == "connected":
                     ver, folder, ftype, parts = val
                     conn_lbl.config(text=f"Advanced API {ver}: " + ", ".join(parts))
                     if folder and not cv_["folder"].get():
@@ -4758,15 +4850,16 @@ def run_gui(selftest=False):
                 elif kind == "connected_alpaca":
                     root_, ver, devs, parts, clear = val
                     C["alp_listed"] = root_
-                    for key_, typ_ in (("atel", "telescope"), ("acam", "camera"), ("arot", "rotator")):
+                    for key_, typ_ in (("atel", "telescope"), ("acam", "camera"), ("arot", "rotator"),
+                                        ("aflat", "covercalibrator")):
                         vals = [f"{d_.get('DeviceNumber')}: {d_.get('DeviceName')}" for d_ in devs
                                 if str(d_.get("DeviceType", "")).lower() == typ_]
-                        alp_combo[key_].config(values=vals + (["none"] if key_ == "arot" else []))
+                        alp_combo[key_].config(values=vals + (["none"] if key_ in ("arot", "aflat") else []))
                         cur_ = cv_[key_].get().strip().split(":")[0].strip()
                         hit_ = next((v_ for v_ in vals if v_.split(":")[0] == cur_), None)
                         if hit_:
                             cv_[key_].set(hit_)
-                        elif key_ == "arot" and not vals:
+                        elif key_ in ("arot", "aflat") and not vals:
                             cv_[key_].set("none")
                         elif vals and cur_.lower() not in ("none",):
                             cv_[key_].set(vals[0])
@@ -5093,7 +5186,10 @@ def run_gui(selftest=False):
 TIPS = {
     "Save images in (on this computer)": "Folder on this computer where the frames shot through Alpaca are saved as FITS files (in a subfolder per date). Can be changed at any time; the next frame goes to the new folder.",
     "Range starts at (mech °)": "Mechanical rotator angle where the allowed half turn begins; the rotator then stays between this angle and this angle + 180°.",
-    "Rotator range": "Full turn: the rotator goes to the planned angles. Half turn: it stays within 180° from 'Range starts at' – angles outside are shot turned by 180°, which covers the same sky and spares the cables.",
+    "Rotator range": "Half turn (180°, the default): the rotator stays within 180° from 'Range starts at'; angles outside are shot turned by 180°, which covers the same sky and spares the cables. Quarter turn (90°): it stays within 90°; angles that cannot be reached by a 180° turn go to the nearer end, so some frames are tilted by up to 45° and gaps can appear. Full turn: the rotator goes to the planned angles.",
+    "Open flat panel": "Open the flat panel's cover (NINA: the flat device connected in NINA; Alpaca: the 'Flat panel' device). The cover must be open to see the sky.",
+    "Close flat panel": "Close the flat panel's cover (asks first). NINA: the flat device connected in NINA; Alpaca: the 'Flat panel' device.",
+    "Flat panel": "The Alpaca flat panel / cover calibrator, or 'none' (default) if there is none. Choose it to use Open / Close flat panel; the run warns if its cover is closed.",
     "Never above altitude (°)": "Frames above this altitude are skipped and never slewed to (e.g. where the camera would hit the tripod). 90 = no limit.",
     "Gain (-1 = leave as set)": "Camera gain for the frames; -1 leaves the gain as it is set now (in NINA, or in the camera driver with Alpaca).",
     "Rotator": "The Alpaca rotator, or 'none' if there is none (then the plan must not use the rotator).",
@@ -5309,8 +5405,13 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
    • Safety: frames nearer the Sun than the limit (default 30°), below 'Never below altitude'
      (default 10°) or above 'Never above altitude' (default 90 = no limit) are skipped and never
      slewed to. Unpark at start / park when finished.
-     'Rotator limit': 'Half turn (180°)' keeps the rotator between 'Range starts at' and that
-     angle + 180°; angles outside are shot turned by 180° (same sky, spares the cables).
+     'Rotator limit': 'Half turn (180°)' (default) keeps the rotator between 'Range starts at' and
+     that angle + 180°; angles outside are shot turned by 180° (same sky, spares the cables).
+     'Quarter turn (90°)' keeps it within 90°: angles that a 180° turn cannot bring inside go to
+     the nearer end, so some frames are tilted by up to 45° and the coverage can have gaps.
+   • Safety and Peripherals: next to the safety limits, 'Open flat panel' / 'Close flat panel'
+     operate the flat panel cover (NINA: the flat device connected in NINA; Alpaca: choose the
+     'Flat panel' device). A closed cover blocks the sky, so the run warns at the start if it is closed.
      The mount is watched during every slew: if it comes much closer to the Sun than planned, or
      cannot be reached, everything is stopped and the run pauses. The mount's own limits
      (altitude, meridian) stay in charge; a slew they stop is noticed and pauses the run.

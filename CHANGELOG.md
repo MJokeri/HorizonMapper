@@ -3,6 +3,12 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Flat panel open / close** in the Capture tab, for both NINA (Advanced API `set-cover`) and Alpaca
+  (new **Flat panel** device choice, an ASCOM CoverCalibrator, *none* by default). The **Safety** box is
+  now **Safety and Peripherals**. Closing asks first; a run warns at the start if the cover is closed.
+- **Rotator range 90°** (*Quarter turn*). Angles that a 180° turn cannot bring inside the range go to
+  the nearer end (some frames tilted by up to 45°, possible gaps).
+- **Rotator range now defaults to Half turn (180°)** (was Full turn).
 - **Capture without NINA – ASCOM Alpaca.** The Capture tab (now named **2. Capture**) has a
   **Connect through** choice: **NINA** (as before) or **Alpaca (without NINA)**. With Alpaca, Horizon
   Mapper drives the mount, camera and rotator itself through an Alpaca server such as ASCOM Remote

@@ -288,14 +288,20 @@ With **NINA** chosen:
 4. **Range:** **From frame** and **To frame** (blank = the last frame) limit the run to those frames,
    numbered in shooting order (the numbers in the picture). Frames already taken are left out
    unless **Re-shoot frames already taken** is ticked. The line below says how many will be shot.
-5. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°), below **Never
+5. **Safety and Peripherals:** frames closer to the Sun than **Keep away from the Sun** (default 30°), below **Never
    below altitude** (default 10°) or above **Never above altitude** (default 90° = no limit; lower
    it where the camera would hit the tripod) are skipped, never slewed to. **Unpark at start** /
    **Park when finished**.
-   - **Rotator limit:** with **Rotator range** = *Half turn (180°)* the rotator stays between
+   - **Rotator limit:** **Rotator range** defaults to *Half turn (180°)*: the rotator stays between
      **Range starts at** and that angle + 180° (mechanical). A planned angle outside is shot turned
      by 180°, which covers exactly the same sky with a rectangular sensor and spares the cables.
-     *Full turn* goes to the planned angles. (This replaces NINA's own rotator range setting, which
+     *Quarter turn (90°)* keeps it within 90°; an angle that a 180° turn cannot bring inside goes to
+     the nearer end, so some frames are tilted by up to 45° and the coverage can have gaps.
+     *Full turn* goes to the planned angles.
+   - **Flat panel:** **Open flat panel** / **Close flat panel** operate the panel's cover through NINA
+     (the flat device connected in NINA, Advanced API `set-cover`) or Alpaca (choose the **Flat
+     panel** device, an ASCOM CoverCalibrator; it is *none* by default). Closing asks first. A closed
+     cover blocks the sky, so a run warns at the start if the cover is closed. (This replaces NINA's own rotator range setting, which
      does not apply to the mechanical moves used here.)
    - **The mount is watched while it slews.** About once a second its real position is compared
      with the Sun. If it comes much closer than planned (within 60 % of the keep-away distance) –
