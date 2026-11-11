@@ -378,7 +378,10 @@ or skipped out of the frames this run shoots). Without a run, it shows frames ta
 
 - **Save current capture…** writes a `.hmcap.json` file with all the frames, each frame's state
   (taken, skipped, to do), the file path and NINA file name of every frame taken, and the capture,
-  safety, range and file settings. It works at any time, also during a run.
+  safety, range and file settings. It works at any time, also during a run. The suggested file name ends
+  in `_completed` when every frame has been taken and in `_partial` otherwise (frames still to shoot,
+  skipped or with an error), for example `Horizon mapping 2026-11-11 2205_partial.hmcap.json`. You can
+  change the name; the automatic `last_capture.hmcap.json` keeps its fixed name.
 - **Load saved capture…** restores all of that: frames, progress, settings and the current horizon
   lines.
   - Frames already taken get their pictures back from the original file paths.

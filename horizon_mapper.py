@@ -2310,6 +2310,15 @@ def match_late_files(folder, frames, waiting, names=None, since=0.0, seen=None, 
 CAPTURE_FILE_VERSION = 1
 
 
+def capture_file_name(target, status, when=None):
+    """Default name for a saved capture: '<target> <date time>_completed.hmcap.json' when every frame is
+    taken, '..._partial.hmcap.json' otherwise (frames still to shoot, skipped or with an error)."""
+    done = bool(status) and all(x == "done" for x in status)
+    base = (target or "").strip() or "capture"
+    base = re.sub(r'[<>:"/\\|?*]+', "_", base)
+    return f"{base} {time.strftime('%Y-%m-%d %H%M', when or time.localtime())}{'_completed' if done else '_partial'}.hmcap.json"
+
+
 def save_capture_file(path, frames, status, paths, names, fw, fh, source="", settings=None,
                       horizon_files=None):
     """Save a capture's progress (frames, each frame's state, file paths and names, settings) as JSON,
@@ -4757,7 +4766,7 @@ def run_gui(selftest=False):
         d = os.path.join(app_data_dir(), "captures"); os.makedirs(d, exist_ok=True)
         fn = filedialog.asksaveasfilename(
             title="Save current capture", initialdir=d, defaultextension=".hmcap.json",
-            initialfile=time.strftime(f"{cv_['target'].get() or 'capture'} %Y-%m-%d %H%M.hmcap.json"),
+            initialfile=capture_file_name(cv_["target"].get(), progress_lists()[0]),
             filetypes=[("Horizon Mapper capture", "*.hmcap.json"), ("JSON", "*.json")])
         if not fn:
             return
@@ -5599,7 +5608,7 @@ TIPS = {
     "▶ Resume": "Continue a paused run; the interrupted frame is shot again from its start.",
     "Skip frame": "While paused: leave out the current frame and continue with the next one on Resume.",
     "■ End run": "End the run. Frames taken so far are kept; Start later shoots what is still missing.",
-    "Save current capture…": "Save the frames, the progress and the file paths, so the capture can be resumed later.",
+    "Save current capture…": "Save the frames, the progress and the file paths, so the capture can be resumed later. The suggested file name ends in _completed if every frame is taken, otherwise in _partial.",
     "Load saved capture…": "Load a saved capture: its progress, settings and the pictures of the frames already taken.",
     # ---- Build tab
     "Import from Capture…": "Bring a capture's frames (from the Capture tab or a saved capture), the rotator offset and the current horizon here, then build.",
@@ -5731,6 +5740,7 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
      are used from the next frame. A saved sequence file only suggests them the first time it is
      loaded; it never overwrites values you have set, and Start does not reset them.
    • 'Save current capture…' stores frames, progress, file paths and settings (.hmcap.json);
+     the suggested file name ends in _completed when every frame is taken, else in _partial;
      'Load saved capture…' restores them, shows the pictures from the original paths and sets
      frames whose file is gone back to 'to do'. Start then shoots only what is missing.
      Progress is also saved automatically after every frame (captures\\last_capture.hmcap.json).

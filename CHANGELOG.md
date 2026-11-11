@@ -3,6 +3,8 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Saved captures are named `_completed` or `_partial`** by default: `_completed` when every frame is taken,
+  `_partial` otherwise. The automatic `last_capture.hmcap.json` keeps its name.
 - **Camera settings can be changed during a run** (exposure, gain, binning, settle): they are used from
   the next frame and noted in the log.
 - **Open flat panel at start / Close flat panel when finished**: check boxes in Safety and Peripherals
