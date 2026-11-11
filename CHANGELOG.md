@@ -3,6 +3,8 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Camera settings can be changed during a run** (exposure, gain, binning, settle): they are used from
+  the next frame and noted in the log.
 - **Open flat panel at start / Close flat panel when finished**: check boxes in Safety and Peripherals
   (NINA and Alpaca); the buttons stay. The run waits until the cover is open and stops with a message
   if it cannot be opened; the cover is closed after parking when the run finishes (not after End run).
@@ -105,6 +107,8 @@
   window is blocked for more than a second. The setting is remembered and on by default for now.
 
 ### Fixed
+- Loading frames from a saved (fill-in) sequence file – also at Start – set exposure, gain and binning back
+  to the file's values. The file now only suggests them the first time, never over values you have set.
 - **Alpaca: rotators whose "move to mechanical angle" does something else.** The ZWO CAA's ASCOM
   driver moves by the given angle instead of to it, so the run waited for an angle that never came
   (stuck at "rotating"). The rotator's end position is now checked; if it is wrong the log says so

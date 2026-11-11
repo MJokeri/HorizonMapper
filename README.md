@@ -291,7 +291,10 @@ With **NINA** chosen:
      frames in the picture** turns them off.
    - Wheel zooms, drag moves, double-click shows the whole sky.
 3. **Capture** (exposure, gain, binning) follows the Plan tab; offset stays as set in NINA or in
-   the camera driver. **Settle** waits after each move.
+   the camera driver. **Settle** waits after each move. **The values can be changed while a run is
+   going** (also while paused): the new exposure, gain, binning and settle time are used from the next
+   frame, and the log says so. A saved sequence file only suggests its exposure, gain and binning the
+   first time it is loaded; it never overwrites values you have set, and Start no longer resets them.
 4. **Range:** **From frame** and **To frame** (blank = the last frame) limit the run to those frames,
    numbered in shooting order (the numbers in the picture). Frames already taken are left out
    unless **Re-shoot frames already taken** is ticked. If **From frame** (above 1) is a frame that is

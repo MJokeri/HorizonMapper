@@ -1627,6 +1627,7 @@ class CaptureRunner:
                  rot_start=0.0, open_flat=False, close_flat=False):
         self.api, self.emit = api, emit
         self.open_flat, self.close_flat = open_flat, close_flat
+        self._cam_dirty = False
         self.frames = list(frames)
         self.ceiling, self.rot_range, self.rot_start = ceiling, rot_range, rot_start
         # rotator target for every frame (a plan only lists the moves; carry the angle forward),
@@ -1837,6 +1838,23 @@ class CaptureRunner:
         self._check()                                   # a pause stops the slew: not an arrival
         if "e" in box:
             raise box["e"]
+
+    def set_camera(self, exposure=None, gain=None, binning=None, settle=None):
+        """Change the camera settings while the run goes on: used from the next frame (the gain and binning are
+        sent to the camera before it). Returns a list describing what changed."""
+        ch = []
+        if exposure is not None and exposure != self.exposure:
+            ch.append(f"exposure {self.exposure:g} → {exposure:g} s"); self.exposure = exposure
+        if gain != self.gain and not (gain is None and self.gain is None):
+            ch.append(f"gain {'as set' if self.gain is None else self.gain} → {'as set' if gain is None else gain}")
+            self.gain = gain; self._cam_dirty = True
+        if binning is not None and binning != self.binning:
+            ch.append(f"binning {self.binning} → {binning}"); self.binning = binning; self._cam_dirty = True
+        if settle is not None and settle != self.settle:
+            ch.append(f"settle {self.settle:g} → {settle:g} s"); self.settle = settle
+        if ch:
+            dlog("camera settings changed during the run: " + "; ".join(ch))
+        return ch
 
     def _flat_cover(self, closed, must):
         """Open or close the flat panel's cover and wait until it is there. At the start (`must`) a failure
@@ -2064,6 +2082,9 @@ class CaptureRunner:
                     self._wait_until(rot_done, self.rot_timeout, "the rotator")
         self._wait(self.settle)
         # 3 – capture
+        if self._cam_dirty:                                 # gain / binning changed during the run
+            self._cam_dirty = False
+            self.api.prepare_camera(self.binning, self.gain, lambda msg: self.emit("log", msg=msg))
         self.emit("frame", index=i, status="exposing")
         if self.api.kind == "alpaca":
             name, path = self._capture_alpaca(i, lat, lon)
@@ -4212,6 +4233,35 @@ def run_gui(selftest=False):
     labeled(g, 3, "Settle after moves (s)", cvar("settle", "1.0"), width=7)
     for k in ("exposure", "gain", "binning"):          # follow the Plan tab
         V[k].trace_add("write", lambda *a, k=k: cv_[k].set(V[k].get()))
+
+    cam_after = {}
+
+    def cam_apply():
+        """Camera settings changed while a run is on (also paused): the runner uses them from the next frame."""
+        cam_after.pop("id", None)
+        r = C.get("runner")
+        if r is None or r.state not in ("running", "paused"):
+            return
+        try:
+            ex = float(cv_["exposure"].get()); gain = int(float(cv_["gain"].get()))
+            binning = int(float(cv_["binning"].get())); settle = float(cv_["settle"].get())
+            if ex <= 0 or binning < 1 or settle < 0:
+                raise ValueError
+        except ValueError:
+            return                                          # still typing: wait for a valid value
+        ch = r.set_camera(exposure=ex, gain=(gain if gain >= 0 else None), binning=binning, settle=settle)
+        if ch:
+            clog_add("Camera settings changed during the run (" + ", ".join(ch) + ") – used from the next frame.")
+
+    def cam_changed(*a):
+        if C.get("setting_cam"):
+            return
+        C["cam_user"] = True                                # the user's values win over a sequence file's
+        if cam_after.get("id"):
+            root.after_cancel(cam_after["id"])
+        cam_after["id"] = root.after(800, cam_apply)
+    for k in ("exposure", "gain", "binning", "settle"):
+        cv_[k].trace_add("write", cam_changed)
     g = group(cbar, "Safety and Peripherals")
     labeled(g, 0, "Keep away from the Sun (°)", cvar("sun", "30"), width=6)
     labeled(g, 1, "Never below altitude (°)", cvar("floor", "10"), width=6)
@@ -4599,9 +4649,14 @@ def run_gui(selftest=False):
 
     def _cap_loaded(plan, label, p, st, after):
         C["loading"] = False
-        for k in ("exposure", "gain", "binning"):
-            if st.get(k) is not None:
-                cv_[k].set(st[k])
+        if after is None and not C.get("cam_user"):         # the file's camera settings: a suggestion at the first
+            C["setting_cam"] = True                         # load only, never over what the user has set (or at Start)
+            try:
+                for k in ("exposure", "gain", "binning"):
+                    if st.get(k) is not None:
+                        cv_[k].set(st[k])
+            finally:
+                C["setting_cam"] = False
         C["frames"] = list(plan["frames"]); C["plan"] = plan; C["source"] = label; C["params"] = p
         C["status"] = ["pending"] * len(C["frames"]); C["runner"] = None; C["cur"] = None
         n_ = len(C["frames"])
@@ -5672,6 +5727,9 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
      east half first, then west (one meridian flip instead of many), short slews, few rotator moves
      (angles recomputed, within the Plan tab's tolerance). The log shows the estimated saving. The
      numbers of the frames still to shoot change; frames already taken stay. Off = planned order.
+   • Exposure, gain, binning and settle can be changed while a run is going (also paused): they
+     are used from the next frame. A saved sequence file only suggests them the first time it is
+     loaded; it never overwrites values you have set, and Start does not reset them.
    • 'Save current capture…' stores frames, progress, file paths and settings (.hmcap.json);
      'Load saved capture…' restores them, shows the pictures from the original paths and sets
      frames whose file is gone back to 'to do'. Start then shoots only what is missing.
