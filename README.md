@@ -19,6 +19,16 @@ own network or a VPN.
 > may point it near the **Sun**, which can instantly blind and destroy equipment. Read the
 > [Disclaimer and safety warning](#disclaimer-and-safety-warning) before use.
 
+**What is new in 1.1.0** (details in [CHANGELOG.md](CHANGELOG.md)):
+- **Capture tab:** shoots the frames itself, through NINA or through **ASCOM Alpaca without NINA**
+  (also from another computer, images saved on your own computer).
+- **Safety and Peripherals:** rotator range (full, 180°, 90°), sun and altitude limits, and **flat panel**
+  open/close buttons with options to open it at the start of a run and close it at the end.
+- **Run control:** pause/resume, **From/To frame** with a question when frames are already taken,
+  **Optimise route** (fewer meridian crossings, shorter run), camera settings changeable during a run,
+  saved captures named `_completed` or `_partial`.
+- **Build tab:** **Save Stellarium landscape…** next to the NINA horizon file.
+
 **Hover** over any setting, choice or button for a short explanation of what it does.
 
 On every tab the settings sit in a bar across the top and the picture fills the width below it.
@@ -508,6 +518,8 @@ python horizon_mapper.py build "Y:\Photo Import\New Horizons" --old old.hrz -o h
 
 - NINA FITS files with `CENTALT`, `CENTAZ`, `XPIXSZ` and `FOCALLEN` in the header (NINA writes these
   when the mount is connected).
+- Frames shot by Horizon Mapper itself (NINA or Alpaca) already have these headers; Alpaca frames need
+  no NINA at all.
 - `ROTATOR` and `PIERSIDE` are used when present. Colour (Bayer) and mono cameras both work.
 
 ## Changes
