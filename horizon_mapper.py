@@ -1189,7 +1189,7 @@ class AlpacaApi:
         self.cam = {}
         self.rot_key = f"{host}:{int(port)}/{rotator}"
         mode = (load_settings().get("alpaca_rotmode") or {}).get(self.rot_key)
-        self.rot_mode = mode if mode in self.ROT_MODES else "mech"
+        self.rot_mode = mode if mode in self.ROT_MODES else self.ROT_MODES[0]
 
     # ---------------------------------------------------------------- transport
     def _http(self, verb, url, params, timeout, accept=None):
@@ -1380,7 +1380,9 @@ class AlpacaApi:
     # How a rotator is told to go to a mechanical angle. The standard says MoveMechanical, but some
     # drivers do something else with it (the ZWO CAA driver moves by that amount instead), so the run
     # checks where the rotator ended up and switches method when it is wrong (see next_rot_mode).
-    ROT_MODES = ("mech", "abs", "rel")
+    # MoveAbsolute (with the driver's offset corrected) is tried first: every driver implements it and
+    # a wrong guess with it cannot make the rotator turn by the whole angle, as MoveMechanical can.
+    ROT_MODES = ("abs", "mech", "rel")
     ROT_MODE_TEXT = {"mech": "MoveMechanical (absolute mechanical angle)",
                      "abs": "MoveAbsolute (sky angle, corrected by the driver's offset)",
                      "rel": "Move (relative, by the angle still to go)"}
@@ -1406,9 +1408,10 @@ class AlpacaApi:
                 self.rot_mode = "abs"                        # older rotator drivers have no MoveMechanical
         self.put("rotator", "moveabsolute", Position=round((mech + self.rot_offset()) % 360, 3))
 
-    def next_rot_mode(self):
-        """Switch to the next way of moving the rotator; returns its key."""
-        self.rot_mode = self.ROT_MODES[(self.ROT_MODES.index(self.rot_mode) + 1) % len(self.ROT_MODES)]
+    def next_rot_mode(self, tried=()):
+        """Switch to the next way of moving the rotator that has not been tried yet (in ROT_MODES order)."""
+        left = [m for m in self.ROT_MODES if m not in tried and m != self.rot_mode]
+        self.rot_mode = left[0] if left else self.ROT_MODES[(self.ROT_MODES.index(self.rot_mode) + 1) % len(self.ROT_MODES)]
         dlog(f"rotator move method now '{self.rot_mode}'")
         return self.rot_mode
 
@@ -1751,7 +1754,7 @@ class CaptureRunner:
         what the 'move to a mechanical angle' call does, so a wrong end position switches to the next
         method (at most once through each) instead of waiting for an angle that never comes."""
         api = self.api
-        tries = len(api.ROT_MODES)
+        tries = len(api.ROT_MODES); tried = []
         for attempt in range(tries):
             start = api.rotator().get("MechanicalPosition")
             api.rotate(tgt)
@@ -1761,17 +1764,17 @@ class CaptureRunner:
             if abs((pos - tgt + 180) % 360 - 180) <= max(self.rot_tol, 1.0):
                 api.confirm_rotator()
                 return
-            used = api.rot_mode
+            used = api.rot_mode; tried.append(used)
             dlog(f"rotator: asked for {tgt:.2f}° with '{used}' from {start}, ended at {pos:.2f}° "
                  f"(sky position {api.opt('rotator', 'position')}, offset {api.rot_offset():.2f})")
             if attempt + 1 >= tries:
                 raise NinaApiError(
                     f"the rotator ended at {pos:.1f}° instead of {tgt:.1f}° with every move method tried "
                     f"(started at {start}); check the rotator driver and its limits")
-            nxt = api.next_rot_mode()
-            self.emit("log", msg=f"The rotator ended at {pos:.1f}° instead of {tgt:.1f}° with the "
-                                 f"{api.ROT_MODE_TEXT[used].split(' (')[0]} call – its driver does something else with it. "
-                                 f"Trying {api.ROT_MODE_TEXT[nxt].split(' (')[0]}.")
+            nxt = api.next_rot_mode(tried)
+            self.emit("log", msg=f"Rotator: this driver treats the {api.ROT_MODE_TEXT[used].split(' (')[0]} call differently "
+                                 f"(ended at {pos:.1f}° instead of {tgt:.1f}°). Correcting with "
+                                 f"{api.ROT_MODE_TEXT[nxt].split(' (')[0]}; the working method is remembered, so this happens once.")
 
     def _capture_nina(self, i):
         """NINA takes the image and saves the FITS with its usual headers (CENTALT, CENTAZ, ROTATOR, …)."""
@@ -5283,7 +5286,8 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
      Check from the other computer: http://<address>:11111/management/v1/description in a
      browser. Alpaca has no password: use it only in your own network or through a VPN.
    • Alpaca rotators: if the driver does not go to the angle asked for (the ZWO CAA moves BY it),
-     the run notices, logs it, tries the other move methods and remembers the one that works.
+     the run starts with MoveAbsolute, checks the result, tries the other move methods if it is
+     wrong and remembers the one that works.
    • Alpaca on this tab: 'Alpaca host' / 'Alpaca port' ('Find' looks for servers on the network);
      'Test connection' lists the devices for 'Mount', 'Camera', 'Rotator' (or 'none') and connects
      them – with several devices of a kind, choose and press it again. 'Save images in (on this

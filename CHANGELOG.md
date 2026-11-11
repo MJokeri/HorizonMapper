@@ -90,6 +90,9 @@
   (stuck at "rotating"). The rotator's end position is now checked; if it is wrong the log says so
   and the next method is tried (MoveAbsolute with the driver's offset, then a relative Move). The
   method that works is remembered. If none works the run pauses with the numbers.
+  Refined: MoveAbsolute is now tried first (a wrong guess with it cannot turn the rotator by the
+  whole angle, as the CAA's MoveMechanical does), so the one-time wrong move no longer happens on
+  such drivers, and the log message is worded plainly ("this driver treats the … call differently").
 - The live device line refreshes every 5 s while no run is active (2 s during a run).
 - **Alpaca connection problems are now explained.** A Windows "Bad Request" page (ASCOM Remote
   listening on localhost only) and "connection refused" are reported with the likely cause and the
