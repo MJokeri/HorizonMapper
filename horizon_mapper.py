@@ -12,7 +12,7 @@ Requires: Python 3.9+, numpy, Pillow   (pip install numpy pillow)
 Run:      python horizon_mapper.py      (GUI)
           python horizon_mapper.py --help (command line)
 """
-import argparse, hashlib, json, math, os, queue, re, sys, threading, time, traceback
+import argparse, hashlib, json, math, os, queue, re, sys, threading, time, traceback, zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -256,17 +256,55 @@ def hrz_array(pts, az):
     return np.array([hrz_alt(pts, a) for a in az])
 
 
+def hrz_samples(az, alt, step=1.0):
+    """[(azimuth, altitude)] every `step` degrees from 0 to just below 360; each value is the max within
+    +-step/2 (keeps narrow peaks)."""
+    az = np.asarray(az); alt = np.asarray(alt)
+    out = []; a = 0.0
+    while a < 360 - 1e-9:
+        d = (az - a + 180) % 360 - 180
+        m = np.abs(d) <= step / 2
+        out.append((a, float(np.max(alt[m])) if m.any() else float(np.interp(a, az, alt, period=360))))
+        a += step
+    return out
+
+
 def write_hrz(path, az, alt, step=1.0):
     """Write NINA horizon file; each output azimuth uses the max within +-step/2 (keeps narrow peaks)."""
-    az = np.asarray(az); alt = np.asarray(alt)
     with open(path, "w", newline="\r\n") as f:
-        a = 0.0
-        while a < 360 - 1e-9:
-            d = (az - a + 180) % 360 - 180
-            m = np.abs(d) <= step / 2
-            v = float(np.max(alt[m])) if m.any() else float(np.interp(a, az, alt, period=360))
+        for a, v in hrz_samples(az, alt, step):
             f.write(f"{a:06.2f}      {v:5.2f}\n")
-            a += step
+
+
+def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None):
+    """Write a Stellarium polygonal landscape as a ZIP (Stellarium: Sky and viewing options → Landscape →
+    Add/remove landscapes → Install a new landscape from a ZIP archive). The ZIP holds one directory with
+    landscape.ini, horizon.txt (azimuth from true north towards east, altitude, degrees) and readme.txt.
+    Altitudes below 0 are set to 0 (Stellarium wants positive values). Returns the landscape id."""
+    date = date or time.strftime("%Y-%m-%d")
+    lid = re.sub(r"[^a-z0-9_-]+", "_", os.path.splitext(os.path.basename(path))[0].lower()).strip("_") or "horizon_mapper"
+    pts = [(a, max(v, 0.0)) for a, v in hrz_samples(az, alt, step)]
+    pts.append((360.0, pts[0][1]))                      # close the circle
+    txt = (f"# Horizon measured with {APP_NAME} on {date} ({label} line).\n"
+           "# azimuth (degrees from true north towards east), altitude (degrees)\n" +
+           "".join(f"{a:.2f} {v:.2f}\n" for a, v in pts))
+    ini = ("[landscape]\n"
+           f"name = {lid}\n"
+           "type = polygonal\n"
+           f"author = {APP_NAME}\n"
+           f"description = Horizon measured with {APP_NAME} on {date} ({label} line).\n"
+           "polygonal_horizon_list = horizon.txt\n"
+           "polygonal_angle_rotatez = 0\n"
+           "ground_color = .15,.15,.15\n")
+    readme = (f"Stellarium landscape made by {APP_NAME} on {date}: the measured horizon ({label} line) "
+              "of the imaging site.\nInstall: Stellarium → Sky and viewing options (F4) → Landscape → "
+              "Add/remove landscapes → Install a new landscape from a ZIP archive.\n"
+              "Or unzip this folder into Stellarium's 'landscapes' folder "
+              "(Windows: %APPDATA%\\Stellarium\\landscapes). Restart Stellarium if it is not listed.\n")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(f"{lid}/landscape.ini", ini); z.writestr(f"{lid}/horizon.txt", txt)
+        z.writestr(f"{lid}/readme.txt", readme)
+    return lid
 
 
 def sky_area_sqdeg(az_deg, alt_deg):
@@ -3852,6 +3890,23 @@ def run_gui(selftest=False):
         messagebox.showinfo(APP_NAME, f"Saved the {which} horizon:\n{f}\n\n"
                                       "In NINA: Options → General → Astrometry → Horizon.")
 
+    def save_stellarium():
+        if E["solid"] is None:
+            messagebox.showerror(APP_NAME, "Build the horizon first."); return
+        which = save_which.get()
+        az, s_, b_ = final_lines()
+        vals = b_ if which == "with branches" else s_
+        name = time.strftime("horizon_mapper_%Y-%m-%d") + ("_with_branches" if which == "with branches" else "") + ".zip"
+        f = filedialog.asksaveasfilename(title="Save Stellarium landscape", defaultextension=".zip", initialfile=name,
+                                         filetypes=[("Stellarium landscape (ZIP)", "*.zip"), ("All", "*.*")])
+        if not f:
+            return
+        lid = write_stellarium_landscape(f, az, vals, which)
+        dlog(f"stellarium landscape saved: {f} ({lid})")
+        messagebox.showinfo(APP_NAME, f"Saved the {which} horizon as a Stellarium landscape:\n{f}\n\n"
+                                      "In Stellarium: Sky and viewing options (F4) → Landscape → Add/remove "
+                                      "landscapes → Install a new landscape from a ZIP archive.")
+
     def import_capture():
         """Bring a capture to this tab: its file list (as a folder entry), the rotator offset and the
         current horizon; then offer to build. Source: the Capture tab's capture, or a saved one."""
@@ -4028,6 +4083,7 @@ def run_gui(selftest=False):
                  hover="Which line to save: 'solid' (buildings, trunks, dense trees) or 'with branches' (also thin branches).",
                  state="readonly").pack(side="top", anchor="w", padx=4, pady=2)
     ttk.Button(hz_box, text="Save horizon file…", command=save_outputs).pack(side="top", fill="x", padx=4, pady=2)
+    ttk.Button(hz_box, text="Save Stellarium landscape…", command=save_stellarium).pack(side="top", fill="x", padx=4, pady=2)
 
     def poll():
         try:
@@ -5468,6 +5524,7 @@ TIPS = {
     "Horizon line near gaps within (°)": "Fill-in: also cover places where the horizon line is this close to a spot without pictures (0 = off).",
     "Generate fill-in frames": "Plan extra frames where the horizon is uncertain, near gaps or at steep edges, and show them.",
     "Save fill-in sequence…": "Save the fill-in frames as a NINA sequence (or shoot them on the Capture tab).",
+    "Save Stellarium landscape…": "Save the selected horizon line (solid or with branches, edits and side margin included) as a Stellarium polygonal landscape: a ZIP to install in Stellarium (F4 → Landscape → Add/remove landscapes).",
     "Save horizon file…": "Save the selected horizon line as a NINA .hrz file.",
     "Edit:": "Which line a left-drag on the image redraws.",
     "off": "No editing: dragging on the image does nothing.",
@@ -5669,6 +5726,10 @@ DEBUG MENU
    • 'Save horizon file…' (below the fill-in buttons) saves one NINA .hrz file: choose 'solid'
      or 'with branches' next to the button. Edits and the side margin are included.
      In NINA: Options → General → Astrometry → Horizon file.
+   • 'Save Stellarium landscape…' saves the same selected line as a Stellarium landscape (a ZIP with
+     landscape.ini and horizon.txt: azimuth from true north towards east, altitude; negative
+     altitudes become 0). In Stellarium: F4 → Landscape → Add/remove landscapes → Install a new
+     landscape from a ZIP archive. The command line writes ..._stellarium.zip files next to the .hrz.
 
 NOTES
    • Very close objects (observatory walls) appear as smooth blurred shapes; they still
@@ -5781,6 +5842,8 @@ def main():
                                          det["solid"])
         write_hrz(a.outbase + ".hrz", det["az"], det["solid"])
         write_hrz(a.outbase + "_with_branches.hrz", det["az"], det["branches"])
+        write_stellarium_landscape(a.outbase + "_stellarium.zip", det["az"], det["solid"], "solid")
+        write_stellarium_landscape(a.outbase + "_with_branches_stellarium.zip", det["az"], det["branches"], "with branches")
         lines = [("Solid obstructions", det["az"], det["solid"], (230, 40, 30)),
                  ("Incl. thin branches", det["az"], det["branches"], (0, 200, 240))]
         if a.old:

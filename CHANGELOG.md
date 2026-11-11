@@ -3,6 +3,9 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Save Stellarium landscape…** (Build horizon tab): the selected horizon line (solid or with branches,
+  edits and side margin included) as a Stellarium polygonal landscape ZIP (`landscape.ini` + `horizon.txt`,
+  azimuth from true north towards east). The command line writes `_stellarium.zip` files too.
 - **Range:** when **From frame** (above 1) is a frame that is already taken, Start asks whether to shoot
   frames From–To again (those before From stay) or only the ones not taken yet. Before, a restart always
   skipped taken frames, so it seemed to continue from the latest unshot frame.

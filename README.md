@@ -417,6 +417,13 @@ accepts such a list like a folder.
   - **with branches:** also avoids thin bare branches
 
   Edits and the side margin are included. Save twice if you want both files.
+- **Save Stellarium landscape…** saves the same selected line as a **Stellarium** polygonal landscape,
+  so the measured horizon can be used in Stellarium. It is a ZIP with one folder containing
+  `landscape.ini` and `horizon.txt` (azimuth from true north towards east, altitude, in degrees,
+  every 1°; negative altitudes become 0, as Stellarium wants). Install it in Stellarium with
+  **Sky and viewing options (F4) → Landscape → Add/remove landscapes → Install a new landscape from a
+  ZIP archive**, or unzip the folder into `%APPDATA%\Stellarium\landscapes`. The command line writes
+  `<name>_stellarium.zip` and `<name>_with_branches_stellarium.zip` next to the `.hrz` files.
 - **Fill-in frames** cover the places where the solid or branches line (including your edits) reaches
   the edge of the imaged area (**clear to bottom** or **blocked to top**), plus the steep edges below.
   Dark frame edges high in the sky that the lines already rejected are ignored.
