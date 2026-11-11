@@ -3,10 +3,10 @@
 The version is shown in the window title (currently 1.1.0).
 
 Plans the frames that photograph the sky around your horizon, shoots them (through NINA's Advanced
-API plugin, or by saving a NINA Advanced Sequencer sequence), then turns the FITS frames into a
-measured NINA horizon file (`.hrz`).
+API plugin, directly through ASCOM Alpaca without NINA, or by saving a NINA Advanced Sequencer
+sequence), then turns the FITS frames into a measured NINA horizon file (`.hrz`).
 
-Tabs: **1. Plan sequence** → **2. Capture (NINA)** → **3. Build horizon**.
+Tabs: **1. Plan sequence** → **2. Capture** → **3. Build horizon**.
 
 > ⚠ **Experimental software – use entirely at your own risk.** It moves real equipment and
 > may point it near the **Sun**, which can instantly blind and destroy equipment. Read the
@@ -195,15 +195,58 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
 - **Conditions:** even overcast daylight gives the sharpest silhouettes. Take one test frame first;
   open sky should read about 10,000–30,000 ADU.
 
-## 2. Capture (NINA)
+## 2. Capture
 
-Shoots the frames directly from Horizon Mapper. NINA still talks to the equipment; Horizon Mapper
-tells it what to do through the **Advanced API** plugin, one frame at a time. (Saving a sequence on
-the Plan tab and running it in NINA still works as before.)
+Shoots the frames directly from Horizon Mapper, one frame at a time. Choose under **Connect
+through** how the equipment is reached; everything else on the tab works the same for both:
 
-**Setup (once):** in NINA install **Advanced API** (Plugins tab), enable its server in the plugin
-settings (default port 1888), and set NINA to save **FITS** files. Connect the mount, camera and
-rotator in NINA as usual. Don't run a NINA sequence at the same time.
+| | **NINA** | **Alpaca (without NINA)** |
+|---|---|---|
+| Who drives the devices | NINA, told what to do through its **Advanced API** plugin | Horizon Mapper itself, through an **ASCOM Alpaca** server |
+| What must run | NINA with the plugin | An Alpaca server, e.g. **ASCOM Remote** (part of ASCOM Platform 7), or devices that speak Alpaca themselves |
+| Where the images are saved | NINA's image folder, on NINA's computer | **On the computer running Horizon Mapper**, in the folder you choose |
+| Remote use | Horizon Mapper here, NINA on the observatory computer | Horizon Mapper here, ASCOM Remote on the observatory computer |
+
+(Saving a sequence on the Plan tab and running it in NINA still works as before.)
+
+**Setup for NINA (once):** in NINA install **Advanced API** (Plugins tab), enable its server in the
+plugin settings (default port 1888), and set NINA to save **FITS** files. Connect the mount, camera
+and rotator in NINA as usual. Don't run a NINA sequence at the same time.
+
+**Setup for Alpaca (once), on the computer the equipment is connected to:**
+
+1. Install **ASCOM Platform 7** (it includes **ASCOM Remote**) and the ASCOM drivers of your mount,
+   camera and rotator. The camera needs its **ASCOM** driver: ASCOM Remote cannot use the native
+   camera driver NINA may be using.
+2. Start ASCOM Remote, add the mount (Telescope), camera and rotator under its device setup, and
+   enable access from other computers if Horizon Mapper runs elsewhere (default port 11111). Allow
+   it through the Windows firewall.
+3. Close NINA, or at least disconnect the devices there, if the drivers cannot be shared.
+4. Alpaca has **no password and no encryption**: use it only inside your own network, or through a
+   VPN – never open the port to the internet.
+
+In Horizon Mapper, with **Alpaca (without NINA)** chosen:
+
+- **Alpaca host** / **Alpaca port**: where the Alpaca server runs (`localhost` if on this computer;
+  192.168.0.10 while `DEV_MODE` is on). **Find** looks for Alpaca servers on the local network and
+  fills these in.
+- **Test connection** lists the server's devices in **Mount**, **Camera** and **Rotator** (choose
+  `none` if there is no rotator). If the server offers several devices of one kind (e.g. a main and
+  a guide camera), choose the right ones and press **Test connection** again; the chosen devices
+  are then connected and the live device line starts. Start also connects them.
+- **Save images in (on this computer)**: the frames are downloaded from the camera and saved here
+  as FITS files, in a subfolder per date, named
+  `<target>_<date>_<time>_f<frame number>_alt.._az...fits`. The default is
+  `Documents\Horizon Mapper\Captures`. The files carry the headers the Build tab reads, the same
+  ones NINA writes (`CENTALT`, `CENTAZ`, `ROTATOR`, `PIERSIDE`, `XPIXSZ`, `FOCALLEN`, `SITELAT`, …).
+  Pixel size comes from the camera and **focal length from the Plan tab**, so fill it in there.
+  Because the files are written by this program, they are complete the moment a frame is done:
+  the pictures appear at once and nothing has to be looked for afterwards.
+- **Gain**: -1 leaves the camera's gain as it is; otherwise it is set in the camera driver.
+  Binning is set in the camera, and the whole sensor is read.
+- The method, address, devices and folder are remembered for the next time.
+
+With **NINA** chosen:
 
 1. **Host** / **Port**: where NINA runs (port 1888 by default). The host is `localhost`, or
    192.168.0.10 while `DEV_MODE` is on. **Test connection** (in the same group) checks the plugin, shows which devices are connected, starts the live device
@@ -223,14 +266,27 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
      one). If the previews come out upside down, tick **Turn previews 180°**. **Show finished
      frames in the picture** turns them off.
    - Wheel zooms, drag moves, double-click shows the whole sky.
-3. **Capture** (exposure, gain, binning) follows the Plan tab; offset is NINA's camera setting.
-   **Settle** waits after each move.
+3. **Capture** (exposure, gain, binning) follows the Plan tab; offset stays as set in NINA or in
+   the camera driver. **Settle** waits after each move.
 4. **Range:** **From frame** and **To frame** (blank = the last frame) limit the run to those frames,
    numbered in shooting order (the numbers in the picture). Frames already taken are left out
    unless **Re-shoot frames already taken** is ticked. The line below says how many will be shot.
-5. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°) or below **Never
-   below altitude** (default 10°) are skipped, never slewed to. **Unpark at start** / **Park when
-   finished**.
+5. **Safety:** frames closer to the Sun than **Keep away from the Sun** (default 30°), below **Never
+   below altitude** (default 10°) or above **Never above altitude** (default 90° = no limit; lower
+   it where the camera would hit the tripod) are skipped, never slewed to. **Unpark at start** /
+   **Park when finished**.
+   - **Rotator limit:** with **Rotator range** = *Half turn (180°)* the rotator stays between
+     **Range starts at** and that angle + 180° (mechanical). A planned angle outside is shot turned
+     by 180°, which covers exactly the same sky with a rectangular sensor and spares the cables.
+     *Full turn* goes to the planned angles. (This replaces NINA's own rotator range setting, which
+     does not apply to the mechanical moves used here.)
+   - **The mount is watched while it slews.** About once a second its real position is compared
+     with the Sun. If it comes much closer than planned (within 60 % of the keep-away distance) –
+     because the mount took another route than estimated – the movement is stopped and the run
+     pauses. If the mount cannot be reached during a slew, the run pauses as well.
+   - **The mount's own limits stay in charge.** Altitude, meridian and cable limits are set in the
+     mount or its driver; neither NINA nor Alpaca can read them. If a limit stops a slew, the
+     arrival check below notices that the mount is not where it should be and pauses the run.
    - **Slew paths are checked too.** Before each slew the app estimates the mount's path from where
      it actually is (both axes moving together). If the path would pass closer to the Sun than the
      limit, it first slews to a safe intermediate position (one axis first, or via the meridian high
@@ -245,9 +301,15 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
    every slew is aimed at the current sky position, so it isn't needed. If the mount isn't tracking,
    the log says so once. Only if a slew is refused while the mount isn't tracking does the app
    switch tracking on and try that slew once more. Every slew is checked against the mount's
-   RA/Dec. Then, for every frame: slew (alt/az converted to J2000 RA/Dec
-   with the mount's own sidereal time) → rotator to its mechanical angle → settle → expose. NINA saves
-   the FITS with its usual headers, and Horizon Mapper finds the file in NINA's image folder.
+   RA/Dec. Then, for every frame: slew (alt/az converted to RA/Dec with the
+   mount's own sidereal time: J2000 for NINA, the mount's own epoch for Alpaca) → rotator to its
+   mechanical angle → settle → expose.
+   - **NINA** saves the FITS with its usual headers, and Horizon Mapper finds the file in NINA's
+     image folder.
+   - **Alpaca:** Horizon Mapper downloads the image and saves the FITS itself (see above). If
+     tracking had to be switched on for the slews, it is switched off again at the end of the run.
+     Before the first frame the app checks that the mount, camera and (if used) rotator are
+     connected, that the mount reports its site, and that the image folder can be written.
 
 **Pause and errors**
 
@@ -255,8 +317,8 @@ rotator in NINA as usual. Don't run a NINA sequence at the same time.
   rotator and the exposure, and holds. **▶ Resume** repeats the interrupted frame from its start.
   While paused, **Skip frame** skips it.
 - **Any error or timeout pauses the run automatically** (with a beep and the reason in the log).
-  Examples: NINA not answering, a failed slew, the mount ending up somewhere else, or a stuck
-  rotator. Nothing is skipped silently. Fix the cause and **Resume**, or **■ End run**.
+  Examples: NINA or the Alpaca server not answering, a failed slew, the mount ending up somewhere
+  else, a stuck rotator, a camera error, or an image that cannot be saved. Nothing is skipped silently. Fix the cause and **Resume**, or **■ End run**.
 - **■ End run** ends the run and keeps the frames taken so far. **Start** again shoots only the
   frames still missing in the range. Closing the window during a run asks first and stops
   everything.
@@ -282,11 +344,13 @@ A preview is only made once its FITS file is complete: its size covers the heade
 image data. NINA writes files in the background, so a file can be there but still empty or short.
 Incomplete files, and previews that fail, are tried again every 3 seconds for up to 3 minutes.
 
-The **NINA image folder** can be changed at any time, also during a run. File look-ups and the
+The image folder (**NINA image folder**, or **Save images in** for Alpaca) can be changed at any
+time, also during a run. File look-ups and the
 folder scan always use the current value. The Capture log runs down the right side of the tab,
 over the full height, with a scrollbar.
 
-NINA saves files in the background, and they can take a while to appear in its image folder. The
+With the NINA method, NINA saves files in the background, and they can take a while to appear in
+its image folder (which must be reachable from this computer, e.g. as a shared folder). The
 app doesn't wait for them: it scans the folder every few seconds and matches each new FITS file to
 its frame, by the name NINA reported or else by the pointing in the file header. The picture shows
 these frames in light green until their file arrives. Scanning continues for 10 minutes after the

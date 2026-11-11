@@ -3,13 +3,29 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Capture without NINA – ASCOM Alpaca.** The Capture tab (now named **2. Capture**) has a
+  **Connect through** choice: **NINA** (as before) or **Alpaca (without NINA)**. With Alpaca, Horizon
+  Mapper drives the mount, camera and rotator itself through an Alpaca server such as ASCOM Remote
+  (part of ASCOM Platform 7), on this computer or on the observatory computer.
+  - **Find** discovers Alpaca servers on the network; **Test connection** lists the server's
+    devices for the **Mount**, **Camera** and **Rotator** choices and connects them.
+  - Images are downloaded and **saved on the computer running Horizon Mapper** (**Save images in**),
+    as FITS files with the headers the Build tab reads. They are complete at once, so there is no
+    waiting for late files.
+  - Works with mounts that take J2000 or of-date coordinates, older rotator drivers without
+    mechanical moves, and cameras that send images as binary or JSON.
+  - The method, address, devices and folder are remembered; a saved capture stores them too.
+- **More safety, for both methods:** **Never above altitude**; **Rotator limit** (keep the rotator
+  within a half turn – angles outside are shot turned by 180°); the mount is **watched during every
+  slew** and stopped if it comes much closer to the Sun than planned or cannot be reached. With
+  Alpaca, tracking switched on for the slews is switched off again at the end.
 - **Disclaimer and safety warning** (README, near the top, and at the top of the in-app Help):
   the software is experimental and provided "AS IS"; no warranty and no liability of the developer,
   distributors or any other party for damage to equipment, persons or third parties (based on GNU
   GPL v3 §15–17); use at your own risk. A warning, with references to NASA, the AAS and the AAO,
   that pointing or even slewing optics near the Sun can instantly cause eye injury and destroy
   equipment, and that the built-in Sun check is an aid only.
-- **2. Capture (NINA) tab:** shoots the Plan tab plan or the Build tab fill-in frames directly,
+- **2. Capture tab:** shoots the Plan tab plan or the Build tab fill-in frames directly,
   through NINA's **Advanced API** plugin. For each frame: slew (alt/az → J2000 RA/Dec from the mount's
   sidereal time), mechanical rotator move, settle, exposure. NINA saves the FITS with its usual
   headers; the files are found in NINA's image folder (read from the profile). The file list is added
