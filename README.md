@@ -429,7 +429,7 @@ accepts such a list like a folder.
 - **Save Stellarium landscape…** saves the same selected line as a **Stellarium** polygonal landscape,
   so the measured horizon can be used in Stellarium. It is a ZIP with one folder containing
   `landscape.ini` and `horizon.txt` (azimuth from true north towards east, altitude, in degrees,
-  every 1° as distinct points, shifted by 0.01° so no edge lies exactly on azimuth 0°/180°; negative altitudes become 0, as Stellarium wants). If you installed an earlier version of the landscape, remove it in Stellarium and install the new one. Install it in Stellarium with
+  every 1° with whole-degree azimuths 0–359, like Stellarium's own sample landscapes; negative altitudes become 0, as Stellarium wants). If you installed an earlier version of the landscape, remove it in Stellarium and install the new one. Install it in Stellarium with
   **Sky and viewing options (F4) → Landscape → Add/remove landscapes → Install a new landscape from a
   ZIP archive**, or unzip the folder into `%APPDATA%\Stellarium\landscapes`. The command line writes
   `<name>_stellarium.zip` and `<name>_with_branches_stellarium.zip` next to the `.hrz` files.

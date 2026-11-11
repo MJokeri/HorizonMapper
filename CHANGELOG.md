@@ -109,10 +109,10 @@
   window is blocked for more than a second. The setting is remembered and on by default for now.
 
 ### Fixed
-- **Stellarium landscape did not block the sky**: the file repeated the 0°/360° point and had edges exactly on
-  azimuth 0° and 180°, which Stellarium cannot turn into a valid ground polygon. The list now has 360 distinct
-  points shifted by 0.01°, `polygonal_angle_rotatez = 0.00001`, `minimal_brightness` and an orange `horizon_line_color`
-  (as Stellarium's own zero landscape). Re-save the landscape and re-install it.
+- **Stellarium landscape did not draw correctly**: the export now follows the layout of Stellarium's own sample
+  landscape (whole-degree azimuths 0–359 without a 360° point, `polygonal_angle_rotatez = 0.00001`, ground and
+  horizon line colours, `minimal_brightness`); tested to load and draw the ground in Stellarium. Re-save the
+  landscape and install it again.
 - Loading frames from a saved (fill-in) sequence file – also at Start – set exposure, gain and binning back
   to the file's values. The file now only suggests them the first time, never over values you have set.
 - **Alpaca: rotators whose "move to mechanical angle" does something else.** The ZWO CAA's ASCOM

@@ -283,14 +283,13 @@ def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None
     Altitudes below 0 are set to 0 (Stellarium wants positive values). The list is a closed polygon of distinct points (no repeated 360° vertex). Returns the landscape id."""
     date = date or time.strftime("%Y-%m-%d")
     lid = re.sub(r"[^a-z0-9_-]+", "_", os.path.splitext(os.path.basename(path))[0].lower()).strip("_") or "horizon_mapper"
-    # No duplicate closing vertex (360° = 0°) and no azimuth of exactly 0°/180°: Stellarium builds a closed
-    # spherical polygon from the list, and repeated points or edges lying exactly on those meridians make it
-    # invalid, so the ground is not drawn. The whole list is shifted by 0.01° instead (as its own zero landscape).
-    pts = [(a % 360.0, max(v, 0.0)) for a, v in hrz_samples(az, alt, step) if a < 360.0 - 1e-9]
-    pts = [(a + 0.01, v) for a, v in pts]
+    # Same layout as Stellarium's own sample (Geneva): whole-degree azimuths 0..359 (no 360° vertex), tested in
+    # Stellarium. Edges on azimuth 0°/180° are handled by polygonal_angle_rotatez = 0.00001 in landscape.ini.
+    pts = [(float(int(round(a)) % 360), max(v, 0.0)) for a, v in hrz_samples(az, alt, 1.0)]
+    seen = set(); pts = [(a, v) for a, v in sorted(pts) if not (a in seen or seen.add(a))]
     txt = (f"# Horizon measured with {APP_NAME} on {date} ({label} line).\n"
            "# azimuth (degrees from true north towards east), altitude (degrees)\n" +
-           "".join(f"{a:.2f} {v:.2f}\n" for a, v in pts))
+           "".join(f"{int(a)} {v:.1f}\n" for a, v in pts))
     ini = ("[landscape]\n"
            f"name = {lid}\n"
            "type = polygonal\n"
@@ -298,8 +297,8 @@ def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None
            f"description = Horizon measured with {APP_NAME} on {date} ({label} line).\n"
            "polygonal_horizon_list = horizon.txt\n"
            "polygonal_angle_rotatez = 0.00001\n"
-           "ground_color = .15,.15,.15\n"
-           "horizon_line_color = 1.0,0.6,0.1\n"
+           "ground_color = .15,.45,.45\n"
+           "horizon_line_color = .25,.15,.15\n"
            "minimal_brightness = 0.15\n")
     readme = (f"Stellarium landscape made by {APP_NAME} on {date}: the measured horizon ({label} line) "
               "of the imaging site.\nInstall: Stellarium → Sky and viewing options (F4) → Landscape → "
