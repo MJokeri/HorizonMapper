@@ -280,11 +280,14 @@ def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None
     """Write a Stellarium polygonal landscape as a ZIP (Stellarium: Sky and viewing options → Landscape →
     Add/remove landscapes → Install a new landscape from a ZIP archive). The ZIP holds one directory with
     landscape.ini, horizon.txt (azimuth from true north towards east, altitude, degrees) and readme.txt.
-    Altitudes below 0 are set to 0 (Stellarium wants positive values). Returns the landscape id."""
+    Altitudes below 0 are set to 0 (Stellarium wants positive values). The list is a closed polygon of distinct points (no repeated 360° vertex). Returns the landscape id."""
     date = date or time.strftime("%Y-%m-%d")
     lid = re.sub(r"[^a-z0-9_-]+", "_", os.path.splitext(os.path.basename(path))[0].lower()).strip("_") or "horizon_mapper"
-    pts = [(a, max(v, 0.0)) for a, v in hrz_samples(az, alt, step)]
-    pts.append((360.0, pts[0][1]))                      # close the circle
+    # No duplicate closing vertex (360° = 0°) and no azimuth of exactly 0°/180°: Stellarium builds a closed
+    # spherical polygon from the list, and repeated points or edges lying exactly on those meridians make it
+    # invalid, so the ground is not drawn. The whole list is shifted by 0.01° instead (as its own zero landscape).
+    pts = [(a % 360.0, max(v, 0.0)) for a, v in hrz_samples(az, alt, step) if a < 360.0 - 1e-9]
+    pts = [(a + 0.01, v) for a, v in pts]
     txt = (f"# Horizon measured with {APP_NAME} on {date} ({label} line).\n"
            "# azimuth (degrees from true north towards east), altitude (degrees)\n" +
            "".join(f"{a:.2f} {v:.2f}\n" for a, v in pts))
@@ -294,8 +297,10 @@ def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None
            f"author = {APP_NAME}\n"
            f"description = Horizon measured with {APP_NAME} on {date} ({label} line).\n"
            "polygonal_horizon_list = horizon.txt\n"
-           "polygonal_angle_rotatez = 0\n"
-           "ground_color = .15,.15,.15\n")
+           "polygonal_angle_rotatez = 0.00001\n"
+           "ground_color = .15,.15,.15\n"
+           "horizon_line_color = 1.0,0.6,0.1\n"
+           "minimal_brightness = 0.15\n")
     readme = (f"Stellarium landscape made by {APP_NAME} on {date}: the measured horizon ({label} line) "
               "of the imaging site.\nInstall: Stellarium → Sky and viewing options (F4) → Landscape → "
               "Add/remove landscapes → Install a new landscape from a ZIP archive.\n"
@@ -5842,7 +5847,8 @@ DEBUG MENU
    • 'Save Stellarium landscape…' saves the same selected line as a Stellarium landscape (a ZIP with
      landscape.ini and horizon.txt: azimuth from true north towards east, altitude; negative
      altitudes become 0). In Stellarium: F4 → Landscape → Add/remove landscapes → Install a new
-     landscape from a ZIP archive. The command line writes ..._stellarium.zip files next to the .hrz.
+     landscape from a ZIP archive (remove an older version of the landscape first). The command line
+     writes ..._stellarium.zip files next to the .hrz.
 
 NOTES
    • Very close objects (observatory walls) appear as smooth blurred shapes; they still
