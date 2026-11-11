@@ -320,8 +320,11 @@ With **NINA** chosen:
      does not apply to the mechanical moves used here.)
    - **Flat panel:** **Open flat panel** / **Close flat panel** operate the panel's cover through NINA
      (the flat device connected in NINA, Advanced API `set-cover`) or Alpaca (choose the **Flat
-     panel** device, an ASCOM CoverCalibrator; it is *none* by default). Closing asks first. A closed
-     cover blocks the sky, so a run warns at the start if the cover is closed.
+     panel** device, an ASCOM CoverCalibrator; it is *none* by default). Closing asks first. The check
+     boxes **Open flat panel at start** and **Close flat panel when finished** do it automatically around
+     a run: the run waits until the cover is open (and stops with a message if it cannot be opened), and
+     the cover is closed after parking when the run has finished (not after **End run**). Without the
+     automatic opening, a run warns at the start if the cover is closed, because it blocks the sky.
    - **The mount is watched while it slews.** About once a second its real position is compared
      with the Sun. If it comes much closer than planned (within 60 % of the keep-away distance) –
      because the mount took another route than estimated – the movement is stopped and the run

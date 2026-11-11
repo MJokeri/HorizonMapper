@@ -3,6 +3,9 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Open flat panel at start / Close flat panel when finished**: check boxes in Safety and Peripherals
+  (NINA and Alpaca); the buttons stay. The run waits until the cover is open and stops with a message
+  if it cannot be opened; the cover is closed after parking when the run finishes (not after End run).
 - **Save Stellarium landscape…** (Build horizon tab): the selected horizon line (solid or with branches,
   edits and side margin included) as a Stellarium polygonal landscape ZIP (`landscape.ini` + `horizon.txt`,
   azimuth from true north towards east). The command line writes `_stellarium.zip` files too.

@@ -1624,8 +1624,9 @@ class CaptureRunner:
                  settle=1.0, sun_min=30.0, floor=0.0, unpark=True, park=False, image_folder="",
                  slew_timeout=180.0, rot_timeout=120.0, rot_tol=0.5, start_index=0, poll=0.5, save_wait=5.0,
                  order=None, status=None, paths=None, names=None, ceiling=90.0, rot_range="full",
-                 rot_start=0.0):
+                 rot_start=0.0, open_flat=False, close_flat=False):
         self.api, self.emit = api, emit
+        self.open_flat, self.close_flat = open_flat, close_flat
         self.frames = list(frames)
         self.ceiling, self.rot_range, self.rot_start = ceiling, rot_range, rot_start
         # rotator target for every frame (a plan only lists the moves; carry the angle forward),
@@ -1753,7 +1754,9 @@ class CaptureRunner:
                     os.makedirs(self.image_folder or default_capture_dir(), exist_ok=True)
                 except OSError as e:
                     raise NinaApiError(f"the folder for the images cannot be created ({e})")
-        if self.api.flat_state() == "closed":
+        if self.open_flat:
+            self._flat_cover(False, must=True)
+        elif self.api.flat_state() == "closed":
             self.emit("log", msg="Warning: the flat panel cover is closed – it blocks the sky. "
                                  "Use 'Open flat panel' (under Safety and Peripherals) if the frames come out dark.")
         m = self.api.mount()
@@ -1834,6 +1837,36 @@ class CaptureRunner:
         self._check()                                   # a pause stops the slew: not an arrival
         if "e" in box:
             raise box["e"]
+
+    def _flat_cover(self, closed, must):
+        """Open or close the flat panel's cover and wait until it is there. At the start (`must`) a failure
+        stops the run; at the end it is only logged."""
+        want = "closed" if closed else "open"; word = "Closing" if closed else "Opening"
+        st = self.api.flat_state()
+        if st is None:
+            if must:
+                raise NinaApiError(f"cannot {'close' if closed else 'open'} the flat panel: none is connected "
+                                   f"{'in NINA' if self.api.kind == 'nina' else '(choose it as Flat panel)'}")
+            self.emit("log", msg=f"Flat panel not closed: none is connected."); return
+        if st == want:
+            self.emit("log", msg=f"The flat panel cover is already {want}."); return
+        self.emit("log", msg=f"{word} the flat panel…")
+        try:
+            self.api.flat_cover(closed)
+            end = time.time() + 90
+            while st != want and time.time() < end:
+                self._check(); time.sleep(1.0); st = self.api.flat_state()
+        except NinaApiError as e:
+            if must:
+                raise NinaApiError(f"the flat panel cover could not be {want}: {e}")
+            self.emit("log", msg=f"Flat panel cover not closed: {e}"); return
+        if st != want:
+            msg = f"the flat panel cover is {st}, not {want}"
+            if must:
+                raise NinaApiError(msg)
+            self.emit("log", msg=f"Flat panel: {msg}.")
+        else:
+            self.emit("log", msg=f"The flat panel cover is {want}.")
 
     def _rotate_checked(self, tgt):
         """Alpaca rotator: move, wait until it stops, and check where it ended up. Rotator drivers differ in
@@ -2094,6 +2127,11 @@ class CaptureRunner:
                 self.emit("log", msg="Parking the mount…"); self.api.park()
             except NinaApiError as e:
                 self.emit("log", msg=f"Park failed: {e}")
+        if self.close_flat and not stopped:
+            try:
+                self._flat_cover(True, must=False)
+            except Exception as e:
+                self.emit("log", msg=f"Flat panel not closed: {e}")
         elif self._tracking_switched and self.api.kind == "alpaca":
             try:                                        # leave the mount as it was found: not tracking
                 self.api.set_tracking(False)
@@ -4181,11 +4219,14 @@ def run_gui(selftest=False):
     cvar("unpark", True, tk.BooleanVar); cvar("park", V["park"].get(), tk.BooleanVar)
     ttk.Checkbutton(g, text="Unpark at start ", variable=cv_["unpark"]).grid(row=3, column=0, sticky="w", padx=4)
     ttk.Checkbutton(g, text="Park when finished", variable=cv_["park"]).grid(row=4, column=0, sticky="w", padx=4)
-    fp = ttk.Frame(g); fp.grid(row=5, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 0))
+    cvar("flat_open", False, tk.BooleanVar); cvar("flat_close", False, tk.BooleanVar)
+    ttk.Checkbutton(g, text="Open flat panel at start", variable=cv_["flat_open"]).grid(row=5, column=0, sticky="w", padx=4)
+    ttk.Checkbutton(g, text="Close flat panel when finished", variable=cv_["flat_close"]).grid(row=6, column=0, sticky="w", padx=4)
+    fp = ttk.Frame(g); fp.grid(row=7, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 0))
     ttk.Button(fp, text="Open flat panel", command=lambda: flat_cover(False)).pack(side="left")
     ttk.Button(fp, text="Close flat panel", command=lambda: flat_cover(True)).pack(side="left", padx=4)
     flat_lbl = ttk.Label(g, text="", foreground="#666", wraplength=230, justify="left")
-    flat_lbl.grid(row=6, column=0, columnspan=3, sticky="w", padx=4)
+    flat_lbl.grid(row=8, column=0, columnspan=3, sticky="w", padx=4)
     g = group(cbar, "Rotator limit")
     ROT_RANGES = ("Half turn (180°)", "Quarter turn (90°)", "Full turn (360°)")
     ttk.Label(g, text="Rotator range").grid(row=0, column=0, sticky="w", padx=4, pady=2)
@@ -4634,7 +4675,7 @@ def run_gui(selftest=False):
 
     def capture_settings():
         keys = ("method", "host", "port", "ahost", "aport", "atel", "acam", "arot", "aflat", "exposure", "gain", "binning",
-                "settle", "sun", "floor", "ceil", "rot_range", "rot_start", "unpark", "park",
+                "settle", "sun", "floor", "ceil", "rot_range", "rot_start", "unpark", "park", "flat_open", "flat_close",
                 "target", "folder", "afolder", "first", "last", "reshoot", "optimise", "src", "file")
         return {k: cv_[k].get() for k in keys}
 
@@ -4934,7 +4975,7 @@ def run_gui(selftest=False):
                                floor=floor_, unpark=cv_["unpark"].get(), park=cv_["park"].get(),
                                image_folder=image_folder(), order=order, status=status, paths=paths,
                                names=names, ceiling=ceil_, rot_range=rot_mode,
-                               rot_start=rot_start)
+                               rot_start=rot_start, open_flat=cv_["flat_open"].get(), close_flat=cv_["flat_close"].get())
         C["runner"] = runner; C["status"] = list(runner.status); update_progress()
         clog_add(f"Start through {api.label}: {len(order)} frames ({first}–{last}), exposure {ex} s, sun ≥ {sun}°, "
                  f"altitude {floor_:g}–{ceil_:g}°" + (f", rotator within {rot_start % 360:g}–{(rot_start + rot_span()) % 360:g}°" if rot_span() else "") + ".")
@@ -5487,6 +5528,8 @@ TIPS = {
     "Keep away from the Sun (°)": "Frames closer to the Sun than this are skipped and never slewed to.",
     "Never below altitude (°)": "Frames below this altitude are skipped and never slewed to.",
     "Unpark at start ": "Unpark the mount before the first frame.",
+    "Open flat panel at start": "Open the flat panel's cover before the first frame (the run waits until it is open; if it cannot be opened the run stops). Needs a flat panel: connected in NINA, or chosen as 'Flat panel' for Alpaca.",
+    "Close flat panel when finished": "Close the flat panel's cover when the run has finished (after parking; not after End run).",
     "Park when finished": "Park the mount when the run has finished (not after End run).",
     "From frame": "First frame to shoot (frame numbers follow the shooting order shown in the picture).",
     "To frame (blank = last)": "Last frame to shoot; leave blank for the last frame of the plan.",
@@ -5645,7 +5688,9 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
      the nearer end, so some frames are tilted by up to 45° and the coverage can have gaps.
    • Safety and Peripherals: next to the safety limits, 'Open flat panel' / 'Close flat panel'
      operate the flat panel cover (NINA: the flat device connected in NINA; Alpaca: choose the
-     'Flat panel' device). A closed cover blocks the sky, so the run warns at the start if it is closed.
+     'Flat panel' device). 'Open flat panel at start' / 'Close flat panel when finished' do it
+     automatically around a run (close: after parking, not after End run). A closed cover blocks the
+     sky, so a run without the automatic opening warns at the start if the cover is closed.
      The mount is watched during every slew: if it comes much closer to the Sun than planned, or
      cannot be reached, everything is stopped and the run pauses. The mount's own limits
      (altitude, meridian) stay in charge; a slew they stop is noticed and pauses the run.
