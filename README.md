@@ -218,9 +218,18 @@ and rotator in NINA as usual. Don't run a NINA sequence at the same time.
 1. Install **ASCOM Platform 7** (it includes **ASCOM Remote**) and the ASCOM drivers of your mount,
    camera and rotator. The camera needs its **ASCOM** driver: ASCOM Remote cannot use the native
    camera driver NINA may be using.
-2. Start ASCOM Remote, add the mount (Telescope), camera and rotator under its device setup, and
-   enable access from other computers if Horizon Mapper runs elsewhere (default port 11111). Allow
-   it through the Windows firewall.
+2. Start **ASCOM Remote Server**, press **Setup** and add the mount (Telescope), camera and rotator
+   on the device tab.
+   - **Server address:** on the *Server Configuration* tab, ASCOM Remote starts listening on
+     `localhost (127.0.0.1)` only, which other computers cannot reach. Choose this computer's
+     **network address** (or all addresses) from the drop-down list, accept the administrator
+     prompt, and restart it. Without this, Horizon Mapper gets "Bad Request" (Windows' own web
+     service refusing the address) or "connection refused".
+   - **Firewall (Windows, on the observatory computer):** allow inbound **TCP 11111** (the Alpaca
+     port, used for everything) and **UDP 32227** (only for **Find**). The discovery port is UDP,
+     not TCP. If there was no firewall prompt when ASCOM Remote first started, add the rules by hand.
+   - Test from the other computer: open `http://<address>:11111/management/v1/description` in a
+     browser. It should show a short text starting with `{"Value"`.
 3. Close NINA, or at least disconnect the devices there, if the drivers cannot be shared.
 4. Alpaca has **no password and no encryption**: use it only inside your own network, or through a
    VPN – never open the port to the internet.
@@ -229,7 +238,8 @@ In Horizon Mapper, with **Alpaca (without NINA)** chosen:
 
 - **Alpaca host** / **Alpaca port**: where the Alpaca server runs (`localhost` if on this computer;
   192.168.0.10 while `DEV_MODE` is on). **Find** looks for Alpaca servers on the local network and
-  fills these in.
+  fills these in; it can miss a server (it needs UDP 32227 open), so entering the address by hand
+  always works. Problems are explained in the Capture log, and the debug log has the details.
 - **Test connection** lists the server's devices in **Mount**, **Camera** and **Rotator** (choose
   `none` if there is no rotator). If the server offers several devices of one kind (e.g. a main and
   a guide camera), choose the right ones and press **Test connection** again; the chosen devices

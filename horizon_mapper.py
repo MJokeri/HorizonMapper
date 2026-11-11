@@ -12,7 +12,7 @@ Requires: Python 3.9+, numpy, Pillow   (pip install numpy pillow)
 Run:      python horizon_mapper.py      (GUI)
           python horizon_mapper.py --help (command line)
 """
-import argparse, hashlib, json, math, os, queue, sys, threading, time, traceback
+import argparse, hashlib, json, math, os, queue, re, sys, threading, time, traceback
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -1014,32 +1014,66 @@ def precess_j2000(ra, dec, t_utc, to_date=True):
     return math.degrees(math.atan2(w[1], w[0])) % 360, math.degrees(math.asin(max(-1, min(1, w[2]))))
 
 
-def alpaca_discover(timeout=2.0, port=32227):
-    """Find Alpaca servers on the local network (UDP broadcast). Returns [(host, port)]."""
+def local_ipv4s():
+    """IPv4 addresses of this computer's network interfaces (best effort)."""
     import socket
-    found = []
-    sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    out = []
     try:
-        sk.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sk.settimeout(0.3)
-        for addr in ("255.255.255.255", "127.0.0.1"):
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in out and not ip.startswith("127."):
+                out.append(ip)
+    except OSError:
+        pass
+    try:                                              # the interface that reaches the network
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.connect(("192.0.2.1", 9))
+        ip = sk.getsockname()[0]; sk.close()
+        if ip not in out and not ip.startswith("127."):
+            out.append(ip)
+    except OSError:
+        pass
+    return out
+
+
+def alpaca_discover(timeout=2.5, port=32227):
+    """Find Alpaca servers on the local network (UDP broadcast to port 32227, answered by the server's
+    discovery responder). Returns [(host, port)]. The request goes out from every network interface."""
+    import socket
+    found = []; targets = []
+    for ip in local_ipv4s():                          # each interface's /24 broadcast, sent from that interface
+        targets.append((ip, ip.rsplit(".", 1)[0] + ".255"))
+    targets.append(("", "255.255.255.255"))
+    targets.append(("127.0.0.1", "127.0.0.1"))
+    socks = []
+    try:
+        for src, dst in targets:
             try:
-                sk.sendto(b"alpacadiscovery1", (addr, port))
+                sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sk.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sk.bind((src, 0)); sk.settimeout(0.2)
+                sk.sendto(b"alpacadiscovery1", (dst, port))
+                socks.append(sk)
+                dlog(f"Alpaca discovery: asked {dst}:{port} from {src or 'any'}")
             except OSError as e:
-                dlog(f"Alpaca discovery: cannot send to {addr}: {e}")
+                dlog(f"Alpaca discovery: cannot send to {dst} from {src or 'any'}: {e}")
         end = time.time() + timeout
-        while time.time() < end:
-            try:
-                data, (ip, _) = sk.recvfrom(1024)
-                hit = (ip, int(json.loads(data.decode("utf-8", "replace"))["AlpacaPort"]))
-                if hit not in found:
-                    found.append(hit)
-            except socket.timeout:
-                continue
-            except Exception as e:
-                dlog(f"Alpaca discovery: reply not understood: {e}")
+        while time.time() < end and socks:
+            for sk in list(socks):
+                try:
+                    data, (ip, _) = sk.recvfrom(1024)
+                    hit = (ip, int(json.loads(data.decode("utf-8", "replace"))["AlpacaPort"]))
+                    if hit not in found:
+                        found.append(hit)
+                except socket.timeout:
+                    continue
+                except ConnectionResetError:          # Windows: 'port unreachable' from an address with no responder
+                    socks.remove(sk); sk.close()
+                except Exception as e:
+                    dlog(f"Alpaca discovery: reply not understood: {e}")
     finally:
-        sk.close()
+        for sk in socks:
+            sk.close()
     dlog(f"Alpaca discovery found {found}")
     return found
 
@@ -1174,12 +1208,26 @@ class AlpacaApi:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                 return r.read(), r.headers.get("Content-Type", "")
         except urllib.error.HTTPError as e:
-            msg = e.read().decode("utf-8", "replace").strip()[:200] or str(e)
+            raw = e.read().decode("utf-8", "replace")
+            msg = " ".join(re.sub(r"<[^>]*>", " ", raw).split())[:300] or str(e)       # HTML error page -> its text
             dlog(f"Alpaca ✗ {what} after {time.time() - t0:.2f} s: HTTP {e.code} {msg}")
-            raise AlpacaError(f"Alpaca {what}: {msg}") from e
+            if e.code == 400 and "<html" in raw.lower():
+                raise AlpacaError(
+                    f"Alpaca {what}: the server answered 'Bad Request' ({msg}). That is Windows' own web "
+                    "service refusing the address used: ASCOM Remote is most likely set to listen on "
+                    "localhost (127.0.0.1) only. In ASCOM Remote → Setup → Server Configuration choose this "
+                    "computer's network address (or all addresses) as the server IP address, then restart it.") from e
+            raise AlpacaError(f"Alpaca {what}: HTTP {e.code} {msg}") from e
         except Exception as e:                      # connection refused, timeout, …
             dlog(f"Alpaca ✗ {what} after {time.time() - t0:.2f} s: {type(e).__name__}: {e}")
-            raise AlpacaError(f"Alpaca {what}: {e}") from e
+            hint = ""
+            low = str(e).lower()
+            if "refused" in low:
+                hint = (" – nothing is listening at that address and port: start ASCOM Remote (or the "
+                        "Alpaca server) there, check the port, and that its server address is not localhost only")
+            elif "timed out" in low or "unreachable" in low:
+                hint = " – no answer: check the address and the Windows firewall (TCP port 11111) on that computer"
+            raise AlpacaError(f"Alpaca {what}: {e}{hint}") from e
 
     def _call(self, verb, dev, name, timeout=None, **params):
         num = self.dev.get(dev)
@@ -4664,7 +4712,8 @@ def run_gui(selftest=False):
                             + ". Choose the devices, then press Test connection again.")
                 elif kind == "discovered":
                     if not val:
-                        conn_lbl.config(text="No Alpaca server answered on this network – enter its address.")
+                        conn_lbl.config(text="No Alpaca server answered – enter its address and port by hand. (Discovery needs "
+                                             "UDP port 32227 open inbound on the server computer.)")
                     else:
                         local = [h_ for h_ in val if h_[0].startswith("127.")]
                         host_, port_ = (local or val)[0]
@@ -5158,8 +5207,11 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
      NINA save FITS, connect mount, camera and rotator in NINA. No NINA sequence at the same time.
    • Alpaca setup once, on the computer with the equipment: ASCOM Platform 7 with the ASCOM
      drivers of mount, camera (its ASCOM driver, not the native one) and rotator; add them in
-     ASCOM Remote and allow access from other computers (port 11111). Alpaca has no password:
-     use it only in your own network or through a VPN.
+     ASCOM Remote. IMPORTANT: ASCOM Remote listens on localhost only at first – in Setup →
+     Server Configuration choose the computer's network address (or all addresses), then restart
+     it. Windows firewall: allow inbound TCP 11111 (Alpaca) and UDP 32227 (only for 'Find').
+     Check from the other computer: http://<address>:11111/management/v1/description in a
+     browser. Alpaca has no password: use it only in your own network or through a VPN.
    • Alpaca on this tab: 'Alpaca host' / 'Alpaca port' ('Find' looks for servers on the network);
      'Test connection' lists the devices for 'Mount', 'Camera', 'Rotator' (or 'none') and connects
      them – with several devices of a kind, choose and press it again. 'Save images in (on this

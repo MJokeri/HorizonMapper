@@ -85,6 +85,12 @@
   window is blocked for more than a second. The setting is remembered and on by default for now.
 
 ### Fixed
+- **Alpaca connection problems are now explained.** A Windows "Bad Request" page (ASCOM Remote
+  listening on localhost only) and "connection refused" are reported with the likely cause and the
+  fix; the HTML of error pages is no longer shown. **Find** no longer logs a false error on
+  Windows, and asks from every network interface (each one's broadcast address). The setup text
+  now says to choose the server's network address in ASCOM Remote and to open **UDP** 32227
+  (discovery) and TCP 11111 in the firewall.
 - **Typing a start date showed "mktime argument out of range".** The preview redrew on every
   keystroke and read a half-typed date ("01.07.202") as the year 202. Dates are now checked: years
   1970–2100 and days that exist. The Sun part of the preview can no longer raise an error; it says
