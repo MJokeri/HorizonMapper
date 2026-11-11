@@ -101,12 +101,16 @@
   The Capture log sits in its own pane; drag the divider to resize it.
 - `DEV_MODE` switch for the development defaults (debug log and log windows on), plus a release
   checklist in the README.
-- Capture tab: default host 192.168.0.10 while `DEV_MODE` is on (test rig), otherwise `localhost`.
+- Capture tab: default host is `localhost`; the last host used is remembered.
 - Capture tab: the log runs down the right side at full height, with a scrollbar.
 - **Debug menu → Debug log (all actions):** every click, NINA request (timing and answer), capture
   step, wait, pause and state change, folder scan and redraw, plus errors from window callbacks and
   background threads, goes to `%LOCALAPPDATA%\HorizonMapper\logs\`. A watchdog logs whenever the
   window is blocked for more than a second. The setting is remembered and on by default for now.
+
+### Changed
+- Removed personal network and location details from the documentation and the default values (the
+  default site is now a neutral latitude 60°, longitude 25°).
 
 ### Fixed
 - **Stellarium landscape did not draw correctly**: the export now follows the layout of Stellarium's own sample
@@ -193,7 +197,7 @@
 - **Plan tab – Extra frames at steep edges:** where the current horizon rises or drops steeply
   (threshold **Steep = more than**, default 2° altitude per degree of azimuth), the planned strip is
   widened sideways by the chosen number of frame widths (default 0.5, 0 = off) and spans the full
-  height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With the sample site horizon,
+  height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With a sample horizon,
   0 / 0.5 / 1 / 2 extra frames give 569 / 638 / 713 / 873 frames (steep = 2°/°).
 - **Plan tab – fewer frames:** each row now places its frames only over the stretches where the
   strip enters that row's altitude zone, as few as the overlap allows. Before, frames sat on a fixed

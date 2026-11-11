@@ -138,8 +138,7 @@ Please attach the log when reporting a problem.
 
 1. Set `DEV_MODE = False` in `horizon_mapper.py`. This switches the development defaults off:
    - the debug log;
-   - the log windows;
-   - the test-rig capture host 192.168.0.10, which goes back to `localhost`.
+   - the log windows.
 
    Users can still change all three.
 2. Set `APP_VERSION` and finish the `CHANGELOG.md` entry.
@@ -243,8 +242,7 @@ and rotator in NINA as usual. Don't run a NINA sequence at the same time.
 
 In Horizon Mapper, with **Alpaca (without NINA)** chosen:
 
-- **Alpaca host** / **Alpaca port**: where the Alpaca server runs (`localhost` if on this computer;
-  192.168.0.10 while `DEV_MODE` is on). **Find** looks for Alpaca servers on the local network and
+- **Alpaca host** / **Alpaca port**: where the Alpaca server runs (`localhost` if on this computer). **Find** looks for Alpaca servers on the local network and
   fills these in; it can miss a server (it needs UDP 32227 open), so entering the address by hand
   always works. Problems are explained in the Capture log, and the debug log has the details.
 - **Test connection** lists the server's devices in **Mount**, **Camera** and **Rotator** (choose
@@ -272,8 +270,7 @@ In Horizon Mapper, with **Alpaca (without NINA)** chosen:
 
 With **NINA** chosen:
 
-1. **Host** / **Port**: where NINA runs (port 1888 by default). The host is `localhost`, or
-   192.168.0.10 while `DEV_MODE` is on. **Test connection** (in the same group) checks the plugin, shows which devices are connected, starts the live device
+1. **Host** / **Port**: where NINA runs (port 1888 by default). The host is `localhost` or the address of the NINA computer. **Test connection** (in the same group) checks the plugin, shows which devices are connected, starts the live device
    line (mount alt/az, pier side, rotator, camera) and fills in NINA's image folder.
 2. **Frames to shoot:** the plan from the Plan tab, the fill-in frames generated on the Build tab,
    or a **saved sequence file** (a plan or fill-in sequence saved for NINA; **Browse…**). Exposure,

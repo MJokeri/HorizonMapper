@@ -4205,10 +4205,10 @@ def run_gui(selftest=False):
     for w_ in method_widgets:
         w_.pack(side="left", padx=4)
     nina_box = ttk.Frame(g); nina_box.grid(row=1, column=0, columnspan=3, sticky="w")
-    labeled(nina_box, 0, "Host", cvar("host", "192.168.0.10" if DEV_MODE else "localhost"), width=12)   # DEV_MODE: test rig
+    labeled(nina_box, 0, "Host", cvar("host", "localhost"), width=12)
     labeled(nina_box, 1, "Port", cvar("port", "1888"), width=12)
     alp_box = ttk.Frame(g); alp_box.grid(row=1, column=0, columnspan=3, sticky="w")
-    labeled(alp_box, 0, "Alpaca host", cvar("ahost", _st.get("alpaca_host") or ("192.168.0.10" if DEV_MODE else "localhost")), width=14)
+    labeled(alp_box, 0, "Alpaca host", cvar("ahost", _st.get("alpaca_host") or ("localhost")), width=14)
     ttk.Button(alp_box, text="Find", width=5, command=lambda: cap_discover()).grid(row=0, column=2, sticky="w")
     labeled(alp_box, 1, "Alpaca port", cvar("aport", str(_st.get("alpaca_port") or "11111")), width=14)
     alp_combo = {}
