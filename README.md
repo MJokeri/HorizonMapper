@@ -8,6 +8,13 @@ sequence), then turns the FITS frames into a measured NINA horizon file (`.hrz`)
 
 Tabs: **1. Plan sequence** → **2. Capture** → **3. Build horizon**.
 
+**Capture works two ways:** through **NINA** (Advanced API plugin), or through **ASCOM Alpaca without
+NINA** (e.g. ASCOM Remote), also from another computer: Horizon Mapper on your own PC, the devices
+on the observatory PC, and the images saved on your PC. The Alpaca method has been run on real
+equipment (ZWO ASI mount, ASI2600MC, ZWO CAA rotator through ASCOM Remote). See
+[2. Capture](#2-capture) for the setup, and note that Alpaca has no password: use it only on your
+own network or a VPN.
+
 > ⚠ **Experimental software – use entirely at your own risk.** It moves real equipment and
 > may point it near the **Sun**, which can instantly blind and destroy equipment. Read the
 > [Disclaimer and safety warning](#disclaimer-and-safety-warning) before use.
@@ -297,12 +304,12 @@ With **NINA** chosen:
      by 180°, which covers exactly the same sky with a rectangular sensor and spares the cables.
      *Quarter turn (90°)* keeps it within 90°; an angle that a 180° turn cannot bring inside goes to
      the nearer end, so some frames are tilted by up to 45° and the coverage can have gaps.
-     *Full turn* goes to the planned angles.
+     *Full turn* goes to the planned angles. (This replaces NINA's own rotator range setting, which
+     does not apply to the mechanical moves used here.)
    - **Flat panel:** **Open flat panel** / **Close flat panel** operate the panel's cover through NINA
      (the flat device connected in NINA, Advanced API `set-cover`) or Alpaca (choose the **Flat
      panel** device, an ASCOM CoverCalibrator; it is *none* by default). Closing asks first. A closed
-     cover blocks the sky, so a run warns at the start if the cover is closed. (This replaces NINA's own rotator range setting, which
-     does not apply to the mechanical moves used here.)
+     cover blocks the sky, so a run warns at the start if the cover is closed.
    - **The mount is watched while it slews.** About once a second its real position is compared
      with the Sun. If it comes much closer than planned (within 60 % of the keep-away distance) –
      because the mount took another route than estimated – the movement is stopped and the run
