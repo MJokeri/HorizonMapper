@@ -295,6 +295,15 @@ With **NINA** chosen:
 4. **Range:** **From frame** and **To frame** (blank = the last frame) limit the run to those frames,
    numbered in shooting order (the numbers in the picture). Frames already taken are left out
    unless **Re-shoot frames already taken** is ticked. The line below says how many will be shot.
+   **Optimise route** (on by default) puts the frames still to shoot in a shorter order when you press
+   Start: the planned order follows the fill-in areas, which overlap, so the mount zig-zags, crosses
+   the meridian again and again (every flip costs about a minute) and the rotator turns back and forth.
+   The optimiser shoots the east half (azimuth < 180°) first and then the west half – one flip – and
+   shortens the path inside each half, with the rotator angles recomputed for the new order (always within
+   the Plan tab's tolerance of the ideal angle). The log tells the estimated saving. Frames already taken
+   stay where they are; **the numbers of the frames still to shoot change** (also in the saved capture).
+   Switch it off to shoot in the planned order. In a real 553-frame fill-in run it cut the meridian
+   crossings from 11 to 1 and the estimated time by about 13 %.
 5. **Safety and Peripherals:** frames closer to the Sun than **Keep away from the Sun** (default 30°), below **Never
    below altitude** (default 10°) or above **Never above altitude** (default 90° = no limit; lower
    it where the camera would hit the tripod) are skipped, never slewed to. **Unpark at start** /

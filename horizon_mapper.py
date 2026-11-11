@@ -2250,6 +2250,127 @@ def load_capture_file(path):
                 horizon_files=d.get("horizon_files", []), missing=missing, saved=d.get("saved", ""))
 
 
+ROUTE_SEC = dict(per_deg=0.45, rot_move=2.0, rot_per_deg=0.6, flip=60.0, frame=9.4)   # measured on real runs
+
+
+def _sky_sep_matrix(alt, az):
+    a = np.radians(np.asarray(alt, float)); z = np.radians(np.asarray(az, float))
+    c = np.sin(a)[:, None] * np.sin(a)[None, :] + np.cos(a)[:, None] * np.cos(a)[None, :] * np.cos(z[:, None] - z[None, :])
+    return np.degrees(np.arccos(np.clip(c, -1.0, 1.0)))
+
+
+def route_seconds(frames, order, ideal=None, tol=3.0, start=None):
+    """Rough time (s) of shooting `order`: per frame, slew distance, rotator moves (those larger than `tol`
+    from the angle it stands at) and one meridian flip for every crossing of azimuth 180° (the mount turns
+    over). Measured: about 9.4 s per frame, 0.45 s per degree, 60 s per flip. Returns (seconds, slews
+    longer than 10°, flips, rotator moves, total degrees slewed)."""
+    R = ROUTE_SEC; t = 0.0; far = flips = rots = 0; deg = 0.0
+    prev = start; cur = None
+    for i in order:
+        alt, az = frames[i][0], frames[i][1]
+        if prev is not None:
+            d = float(_sky_sep_matrix([prev[0], alt], [prev[1], az])[0, 1]); deg += d; t += R["per_deg"] * d
+            far += d > 10.0
+            if (prev[1] % 360 < 180) != (az % 360 < 180):
+                flips += 1; t += R["flip"]
+        if ideal is not None:
+            a = ideal[i] % 180.0
+            if cur is None or min(abs(a - cur), 180 - abs(a - cur)) > tol:
+                if cur is not None:
+                    t += R["rot_move"] + R["rot_per_deg"] * min(abs(a - cur), 180 - abs(a - cur))
+                rots += 1; cur = a
+        t += R["frame"]; prev = (alt, az)
+    return t, far, flips, rots, deg
+
+
+def optimize_route(frames, order, lat, rot_offset=0.0, rot_sign=1, tol=3.0, start=None, rotator=True):
+    """Shorter order for shooting the frames in `order` (indices into `frames` = [(alt, az, rotator)]).
+
+    Why: the planned order follows the areas, which overlap and interleave, so the mount zig-zags between
+    them, crosses the meridian again and again (each flip costs about a minute) and the rotator is turned
+    back and forth. Here the frames of the east half (azimuth < 180°) are shot first, then the west half
+    (or the other way round, as in the plan): one flip only. Inside a half the path is shortened by a
+    nearest-neighbour walk and 2-opt, with a cost made of slew distance and rotator moves.
+
+    Returns (new_order, new_rot, ideal) where ideal[i] is the ideal angle (mod 180, None if unknown) and new_rot[i] is the rotator angle the frame has to be shot with
+    (None = the rotator stays where it is). The rotator angles are the ideal ones from the frame
+    position, using the Plan tab's offset and direction when they reproduce the angles the planned frames
+    already have (else the planned angles are carried on)."""
+    order = list(order)
+    if len(order) < 3:
+        return order, {i: frames[i][2] for i in order}, None
+    alt = np.array([frames[i][0] for i in order], float); az = np.array([frames[i][1] for i in order], float)
+    # ideal rotator angle (mod 180: a rectangular frame turned by 180° covers the same sky)
+    ideal = None
+    if rotator:
+        ex = [(i, frames[i][2]) for i in range(len(frames)) if frames[i][2] is not None]
+        for extra in (0.0, 90.0):
+            f = lambda i: (rot_sign * (parallactic_angle(frames[i][0], frames[i][1], lat) + extra - rot_offset)) % 180.0
+            if ex and all(abs((r % 180.0 - f(i) + 90.0) % 180.0 - 90.0) < 1.0 for i, r in ex):
+                ideal = np.array([f(i) for i in order]); break
+        if ideal is None:                                  # unknown rule: carry the planned angles on
+            cur = None; carried = {}
+            for i in range(len(frames)):
+                if frames[i][2] is not None:
+                    cur = frames[i][2]
+                carried[i] = cur
+            if all(carried.get(i) is not None for i in order):
+                ideal = np.array([carried[i] % 180.0 for i in order]); tol = tol / 2.0
+    R = ROUTE_SEC
+    D = _sky_sep_matrix(alt, az)
+    C = R["per_deg"] * D
+    if ideal is not None:
+        dr = np.abs(ideal[:, None] - ideal[None, :]); dr = np.minimum(dr, 180.0 - dr)
+        C = C + np.where(dr > tol, R["rot_move"] + R["rot_per_deg"] * dr, 0.0)
+    east = az % 360 < 180
+    first_side = bool(east[0])
+    groups = [np.flatnonzero(east == first_side), np.flatnonzero(east != first_side)]
+    out = []; prev = None
+    for g in groups:
+        if len(g) == 0:
+            continue
+        sub = C[np.ix_(g, g)]
+        if prev is not None:
+            st = int(np.argmin(C[prev, g]))
+        elif start is not None:
+            st = int(np.argmin(_sky_sep_matrix([start[0]] + list(alt[g]), [start[1]] + list(az[g]))[0, 1:]))
+        else:
+            st = 0
+        n = len(g); left = np.ones(n, bool); path = [st]; left[st] = False
+        for _ in range(n - 1):                              # nearest neighbour
+            c = np.where(left, sub[path[-1]], np.inf); j = int(np.argmin(c)); path.append(j); left[j] = False
+        path = np.array(path)
+        for _ in range(60):                                 # 2-opt (open path, start fixed)
+            improved = False
+            for a in range(0, n - 2):
+                pa, pb = path[a], path[a + 1]
+                pc = path[a + 2:]; pd = np.append(path[a + 3:], -1)
+                old = sub[pa, pb] + np.where(pd >= 0, sub[pc, np.maximum(pd, 0)], 0.0)
+                new = sub[pa, pc] + np.where(pd >= 0, sub[pb, np.maximum(pd, 0)], 0.0)
+                gain = old - new
+                k = int(np.argmax(gain))
+                if gain[k] > 1e-6:
+                    b = a + 1; e = a + 2 + k
+                    path[b:e + 1] = path[b:e + 1][::-1]; improved = True
+            if not improved:
+                break
+        out.extend(int(g[j]) for j in path); prev = g[path[-1]]
+    new_order = [order[j] for j in out]
+    # rotator angles for the new order
+    new_rot = {}; cur = None
+    for k, i in enumerate(new_order):
+        if ideal is None or not rotator:
+            new_rot[i] = frames[i][2]; continue
+        a = float(ideal[out[k]])
+        cands = [a, a + 180.0]
+        tgt = min(cands) if cur is None else min(cands, key=lambda c: abs(c - cur))
+        if cur is None or abs(tgt - cur) > tol:
+            new_rot[i] = tgt; cur = tgt
+        else:
+            new_rot[i] = None
+    return new_order, new_rot, (None if ideal is None else {i: float(ideal[k]) for k, i in enumerate(order)})
+
+
 def frames_to_shoot(status, first=1, last=None, reshoot=False):
     """Indices of the frames a run should shoot: within frames first..last (1-based, inclusive),
     skipping those already taken unless `reshoot`."""
@@ -4043,7 +4164,10 @@ def run_gui(selftest=False):
     cvar("reshoot", False, tk.BooleanVar)
     ttk.Checkbutton(g, text="Re-shoot frames already taken", variable=cv_["reshoot"]).grid(
         row=2, column=0, columnspan=3, sticky="w", padx=4)
-    range_lbl = ttk.Label(g, text="", foreground="#666", wraplength=230); range_lbl.grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
+    cvar("optimise", True, tk.BooleanVar)
+    ttk.Checkbutton(g, text="Optimise route", variable=cv_["optimise"]).grid(
+        row=3, column=0, columnspan=3, sticky="w", padx=4)
+    range_lbl = ttk.Label(g, text="", foreground="#666", wraplength=230); range_lbl.grid(row=4, column=0, columnspan=3, sticky="w", padx=4)
     g = group(cbar, "Files")
     labeled(g, 0, "Target name", cvar("target", "Horizon mapping"), width=18)
     nina_files = ttk.Frame(g); nina_files.grid(row=1, column=0, columnspan=3, sticky="w")
@@ -4455,7 +4579,7 @@ def run_gui(selftest=False):
     def capture_settings():
         keys = ("method", "host", "port", "ahost", "aport", "atel", "acam", "arot", "aflat", "exposure", "gain", "binning",
                 "settle", "sun", "floor", "ceil", "rot_range", "rot_start", "unpark", "park",
-                "target", "folder", "afolder", "first", "last", "reshoot", "src", "file")
+                "target", "folder", "afolder", "first", "last", "reshoot", "optimise", "src", "file")
         return {k: cv_[k].get() for k in keys}
 
     def write_capture(path):
@@ -4613,6 +4737,30 @@ def run_gui(selftest=False):
             except Exception:
                 pass
 
+    def optimise_start(order, status, paths, names):
+        """Shorter shooting order: the frames still to shoot swap places among their own slots (the frames
+        already taken stay where they are), so frame numbers, saved files and resuming keep working."""
+        fr = C["frames"]
+        lat_ = (C.get("site") or (float(V["lat"].get()), 0.0))[0]
+        kw = dict(lat=lat_, rot_offset=float(V["rot_offset"].get()), rot_sign=int(float(V["rot_sign"].get())),
+                  tol=float(V["rot_tolerance"].get()), rotator=bool(V["rotator"].get()))
+        new_order, new_rot, ideal = optimize_route(fr, order, start=C.get("mount_pos"), **kw)
+        before = route_seconds(fr, order, ideal, kw["tol"], C.get("mount_pos"))
+        after = route_seconds(fr, new_order, ideal, kw["tol"], C.get("mount_pos"))
+        if after[0] >= before[0] - 20.0:                   # not worth reshuffling
+            return order, "Route: the planned order is already about as short as it gets."
+        slots = sorted(order)
+        nf = list(fr)
+        for slot, src in zip(slots, new_order):
+            nf[slot] = (fr[src][0], fr[src][1], new_rot[src])
+        C["frames"] = nf
+        C["plan"] = dict(C["plan"], frames=nf, grid=rows_of(nf))
+        dlog(f"route optimised: {before[0] / 60:.0f} -> {after[0] / 60:.0f} min, flips {before[2]} -> {after[2]}")
+        return slots, (f"Route optimised: about {max(0, (before[0] - after[0]) / 60):.0f} min shorter "
+                       f"(estimated {before[0] / 60:.0f} → {after[0] / 60:.0f} min; meridian crossings {before[2]} → {after[2]}, "
+                       f"rotator moves {before[3]} → {after[3]}, slews over 10°: {before[1]} → {after[1]}). "
+                       "The frame numbers of the frames still to shoot changed.")
+
     def cap_start():
         if C["runner"] and C["runner"].state in ("running", "paused"):
             return
@@ -4660,6 +4808,17 @@ def run_gui(selftest=False):
         if not order:
             messagebox.showinfo(APP_NAME, f"Frames {first}–{last} are all taken already.\n"
                                           "Tick 'Re-shoot frames already taken' to shoot them again."); return
+        route_note = ""
+        if cv_["optimise"].get() and len(order) > 2:
+            if any(status[i] == "done" for i in order):
+                route_note = "Route not optimised: frames already taken are shot again."
+            else:
+                try:
+                    order, route_note = optimise_start(order, status, paths, names)
+                except Exception:
+                    dlog_exc("optimise route"); route_note = "Route not optimised (error, see the debug log)."
+        if route_note:
+            clog_add(route_note)
         try:
             rk = capture_sun_risk(order)
         except Exception:
@@ -5264,6 +5423,7 @@ TIPS = {
     "Park when finished": "Park the mount when the run has finished (not after End run).",
     "From frame": "First frame to shoot (frame numbers follow the shooting order shown in the picture).",
     "To frame (blank = last)": "Last frame to shoot; leave blank for the last frame of the plan.",
+    "Optimise route": "Before the run, put the frames still to shoot in a shorter order: the east half first and then the west half (one meridian flip instead of many), short slews and few rotator moves. The frame numbers of the frames still to shoot change; frames already taken stay as they are. Off = shoot in the planned order.",
     "Re-shoot frames already taken": "Also shoot frames in the range that are already taken (normally they are left out).",
     "Target name": "Name used for the files: NINA uses it in its file pattern; with Alpaca it starts each file name and is written to the FITS header.",
     "NINA image folder (found automatically)": "Folder where NINA saves the images, as seen from this computer (a shared folder if NINA runs on another computer). Filled in by Test connection; can be changed at any time.",
@@ -5395,6 +5555,10 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
      frames; a fresh Start takes them from the source as it is then.
    • Range: 'From frame' / 'To frame' (numbers in shooting order) limit the run; frames already
      taken are left out unless 'Re-shoot frames already taken' is ticked.
+   • 'Optimise route' (default on): at Start the frames still to shoot are put in a shorter order –
+     east half first, then west (one meridian flip instead of many), short slews, few rotator moves
+     (angles recomputed, within the Plan tab's tolerance). The log shows the estimated saving. The
+     numbers of the frames still to shoot change; frames already taken stay. Off = planned order.
    • 'Save current capture…' stores frames, progress, file paths and settings (.hmcap.json);
      'Load saved capture…' restores them, shows the pictures from the original paths and sets
      frames whose file is gone back to 'to do'. Start then shoots only what is missing.

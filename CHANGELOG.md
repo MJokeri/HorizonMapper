@@ -3,6 +3,11 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Optimise route** (Capture tab, on by default). At Start the frames still to shoot are put in a
+  shorter order: east half then west half (one meridian flip instead of one per crossing, about a minute
+  each), shorter slews and fewer rotator moves, with the rotator angles recomputed for the new order.
+  On a real 553-frame fill-in run (11 meridian crossings, 144 rotator moves) the estimate drops by about
+  13 % and the crossings to 1. The frame numbers of the frames still to shoot change.
 - **Flat panel open / close** in the Capture tab, for both NINA (Advanced API `set-cover`) and Alpaca
   (new **Flat panel** device choice, an ASCOM CoverCalibrator, *none* by default). The **Safety** box is
   now **Safety and Peripherals**. Closing asks first; a run warns at the start if the cover is closed.
