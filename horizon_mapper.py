@@ -4804,7 +4804,18 @@ def run_gui(selftest=False):
         else:
             save_settings(cap_method="nina")
         status, paths, names = progress_lists()
-        order = frames_to_shoot(status, first, last, cv_["reshoot"].get())
+        reshoot = cv_["reshoot"].get()
+        if not reshoot and first > 1 and status[first - 1] == "done":
+            n_taken = sum(1 for i in range(first - 1, last) if status[i] == "done")
+            ans = messagebox.askyesnocancel(
+                APP_NAME, f"Frame {first} (the 'From frame') is already taken, and so are {n_taken} frames of "
+                          f"{first}–{last}.\n\nYes = shoot frames {first}–{last} again, also the ones already taken "
+                          f"(frames before {first} stay as they are)\nNo = shoot only the frames of this range that "
+                          "are not taken yet\nCancel = don't start", icon="question")
+            if ans is None:
+                return
+            reshoot = bool(ans)
+        order = frames_to_shoot(status, first, last, reshoot)
         if not order:
             messagebox.showinfo(APP_NAME, f"Frames {first}–{last} are all taken already.\n"
                                           "Tick 'Re-shoot frames already taken' to shoot them again."); return
@@ -4852,7 +4863,7 @@ def run_gui(selftest=False):
         if not messagebox.askokcancel(APP_NAME,
                 f"Shoot {len(order)} frames through {api.label}?\n"
                 f"Range: frames {first}–{last} of {len(C['frames'])} ({C['source']})"
-                + (f"; {taken_in} already taken are {'shot again' if cv_['reshoot'].get() else 'skipped'}" if taken_in else "")
+                + (f"; {taken_in} already taken are {'shot again' if reshoot else 'skipped'}" if taken_in else "")
                 + "."
                 + (f"\nThe images are saved on this computer in:\n{image_folder()}" if is_alpaca() else "")
                 + "\n\nThe mount, rotator and camera will move on their own.\n"
@@ -5554,7 +5565,9 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
      sequence file (Browse…; exposure, gain and binning come from it). Choosing a source shows its
      frames; a fresh Start takes them from the source as it is then.
    • Range: 'From frame' / 'To frame' (numbers in shooting order) limit the run; frames already
-     taken are left out unless 'Re-shoot frames already taken' is ticked.
+     taken are left out unless 'Re-shoot frames already taken' is ticked. If 'From frame' (above 1)
+     is a frame that is already taken, Start asks: shoot the range again from there (frames before
+     it stay) or only the frames not taken yet.
    • 'Optimise route' (default on): at Start the frames still to shoot are put in a shorter order –
      east half first, then west (one meridian flip instead of many), short slews, few rotator moves
      (angles recomputed, within the Plan tab's tolerance). The log shows the estimated saving. The

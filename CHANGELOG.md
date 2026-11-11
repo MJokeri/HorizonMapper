@@ -3,6 +3,9 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Range:** when **From frame** (above 1) is a frame that is already taken, Start asks whether to shoot
+  frames From–To again (those before From stay) or only the ones not taken yet. Before, a restart always
+  skipped taken frames, so it seemed to continue from the latest unshot frame.
 - **Optimise route** (Capture tab, on by default). At Start the frames still to shoot are put in a
   shorter order: east half then west half (one meridian flip instead of one per crossing, about a minute
   each), shorter slews and fewer rotator moves, with the rotator angles recomputed for the new order.

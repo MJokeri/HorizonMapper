@@ -294,7 +294,10 @@ With **NINA** chosen:
    the camera driver. **Settle** waits after each move.
 4. **Range:** **From frame** and **To frame** (blank = the last frame) limit the run to those frames,
    numbered in shooting order (the numbers in the picture). Frames already taken are left out
-   unless **Re-shoot frames already taken** is ticked. The line below says how many will be shot.
+   unless **Re-shoot frames already taken** is ticked. If **From frame** (above 1) is a frame that is
+   already taken – for example to redo part of a run after pausing and ending it – Start asks whether to
+   shoot the range again from that frame (frames before it stay as they are) or only the frames not
+   taken yet. The line below says how many will be shot.
    **Optimise route** (on by default) puts the frames still to shoot in a shorter order when you press
    Start: the planned order follows the fill-in areas, which overlap, so the mount zig-zags, crosses
    the meridian again and again (every flip costs about a minute) and the rotator turns back and forth.
