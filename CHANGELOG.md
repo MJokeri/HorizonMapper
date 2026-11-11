@@ -85,6 +85,12 @@
   window is blocked for more than a second. The setting is remembered and on by default for now.
 
 ### Fixed
+- **Alpaca: rotators whose "move to mechanical angle" does something else.** The ZWO CAA's ASCOM
+  driver moves by the given angle instead of to it, so the run waited for an angle that never came
+  (stuck at "rotating"). The rotator's end position is now checked; if it is wrong the log says so
+  and the next method is tried (MoveAbsolute with the driver's offset, then a relative Move). The
+  method that works is remembered. If none works the run pauses with the numbers.
+- The live device line refreshes every 5 s while no run is active (2 s during a run).
 - **Alpaca connection problems are now explained.** A Windows "Bad Request" page (ASCOM Remote
   listening on localhost only) and "connection refused" are reported with the likely cause and the
   fix; the HTML of error pages is no longer shown. **Find** no longer logs a false error on

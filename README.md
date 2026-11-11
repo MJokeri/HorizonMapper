@@ -255,6 +255,13 @@ In Horizon Mapper, with **Alpaca (without NINA)** chosen:
 - **Gain**: -1 leaves the camera's gain as it is; otherwise it is set in the camera driver.
   Binning is set in the camera, and the whole sensor is read.
 - The method, address, devices and folder are remembered for the next time.
+- **Rotator drivers differ.** Some do something else with the standard "move to mechanical angle"
+  call (the ZWO CAA driver moves *by* that angle instead). Horizon Mapper checks where the rotator
+  ends up; if it is wrong it says so in the log and tries the next method (MoveAbsolute with the
+  driver's offset, then a relative Move), and remembers the one that works for the next run. If none
+  reaches the angle, the run pauses with the numbers.
+- The live device line refreshes every 2 s during a run and every 5 s otherwise (as long as the tab
+  is connected), so the Alpaca server's own request log keeps filling slowly while the app is open.
 
 With **NINA** chosen:
 
