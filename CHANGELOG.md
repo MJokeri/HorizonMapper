@@ -109,6 +109,7 @@
   window is blocked for more than a second. The setting is remembered and on by default for now.
 
 ### Changed
+- README: new section **Stellarium landscape** (install, update, contents, check) and a mention at the top.
 - Removed personal network and location details from the documentation and the default values (the
   default site is now a neutral latitude 60°, longitude 25°).
 

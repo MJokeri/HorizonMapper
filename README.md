@@ -4,7 +4,7 @@ The version is shown in the window title (currently 1.1.0).
 
 Plans the frames that photograph the sky around your horizon, shoots them (through NINA's Advanced
 API plugin, directly through ASCOM Alpaca without NINA, or by saving a NINA Advanced Sequencer
-sequence), then turns the FITS frames into a measured NINA horizon file (`.hrz`).
+sequence), then turns the FITS frames into a measured NINA horizon file (`.hrz`) and, if you wish, a **Stellarium** landscape.
 
 Tabs: **1. Plan sequence** → **2. Capture** → **3. Build horizon**.
 
@@ -423,13 +423,9 @@ accepts such a list like a folder.
   - **with branches:** also avoids thin bare branches
 
   Edits and the side margin are included. Save twice if you want both files.
-- **Save Stellarium landscape…** saves the same selected line as a **Stellarium** polygonal landscape,
-  so the measured horizon can be used in Stellarium. It is a ZIP with one folder containing
-  `landscape.ini` and `horizon.txt` (azimuth from true north towards east, altitude, in degrees,
-  every 1° with whole-degree azimuths 0–359, like Stellarium's own sample landscapes; negative altitudes become 0, as Stellarium wants). If you installed an earlier version of the landscape, remove it in Stellarium and install the new one. Install it in Stellarium with
-  **Sky and viewing options (F4) → Landscape → Add/remove landscapes → Install a new landscape from a
-  ZIP archive**, or unzip the folder into `%APPDATA%\Stellarium\landscapes`. The command line writes
-  `<name>_stellarium.zip` and `<name>_with_branches_stellarium.zip` next to the `.hrz` files.
+- **Save Stellarium landscape…** saves the same selected line (solid or with branches, edits and side
+  margin included) as a **Stellarium** polygonal landscape, so the measured horizon is drawn in
+  Stellarium and blocks the sky there. See [Stellarium landscape](#stellarium-landscape) below.
 - **Fill-in frames** cover the places where the solid or branches line (including your edits) reaches
   the edge of the imaged area (**clear to bottom** or **blocked to top**), plus the steep edges below.
   Dark frame edges high in the sky that the lines already rejected are ignored.
@@ -478,6 +474,28 @@ accepts such a list like a folder.
 - **Frame cache:** reduced frames are cached in `%LOCALAPPDATA%\HorizonMapper\cache` (about 200 kB per
   frame), so rebuilding takes seconds instead of minutes. **Clear cache** frees the space.
 - Use the result in NINA: Options → General → Astrometry → Horizon.
+- Use the result in Stellarium: see below.
+
+### Stellarium landscape
+
+**Save Stellarium landscape…** (Build tab) writes a ZIP named after the horizon file (for example
+`horizon_2026-11-11.zip`) holding **one folder** with `landscape.ini` and `horizon.txt`. The command
+line writes `<name>_stellarium.zip` and `<name>_with_branches_stellarium.zip` next to the `.hrz` files.
+
+- **Install:** in Stellarium press **F4 → Landscape → Add/remove landscapes… → Install a new landscape
+  from a ZIP archive**, pick the ZIP and select the new landscape in the list. Or unzip the folder into
+  `%APPDATA%\Stellarium\landscapes` and restart Stellarium. One ZIP holds exactly one landscape.
+- **Newer version:** remove the old landscape in Stellarium first (Add/remove landscapes → Remove), then
+  install the new ZIP.
+- **Contents:** `horizon.txt` has one line per degree, `azimuth altitude`, azimuth 0–359 counted from
+  true north towards east (the same convention as Stellarium's own polygonal landscapes), altitude in
+  degrees; negative altitudes become 0. `landscape.ini` is a polygonal landscape in the layout of
+  Stellarium's sample landscapes (`polygonal_angle_rotatez = 0.00001`, ground colour, horizon line
+  colour, `minimal_brightness`). Everything below the line is drawn as ground.
+- **Check:** in Stellarium, with the azimuth grid on, the horizon line should be at the same altitude
+  as in the picture on the Build tab (for example, look east and compare).
+- The **Location from landscape** option is not used: the file has no location, so Stellarium keeps your
+  own location.
 
 ## Command line (optional)
 
