@@ -169,6 +169,12 @@ Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `n
 
 - **Camera & telescope:** use **Read from a FITS file…** with any frame from the setup. It fills
   in sensor, pixel size, focal length and latitude.
+- **Site (latitude and longitude):** the latitude is in **Site & area to image**, the longitude next to
+  **Sun check**. Both are **remembered in `settings.json`** (`site_lat`, `site_lon`) the moment you change
+  them (also when read from a FITS file), and are the defaults the next time the program starts. The
+  command line `plan --lat` uses the saved latitude as its default. `settings.json` is in
+  `%LOCALAPPDATA%\HorizonMapper`. The first time, a neutral default (60°, 25°) is shown and saved: enter
+  your own site once.
 - **Area:**
   - **Fixed altitude band**, or
   - **Around current horizon:** under **Current horizon (.hrz)**, add the horizon file you use now. An

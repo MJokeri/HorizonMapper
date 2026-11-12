@@ -3,6 +3,9 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Site latitude and longitude are saved in `settings.json`** (`site_lat`, `site_lon`) and used as the
+  defaults at start-up; changing them in the Plan tab (or reading them from a FITS file) updates the file.
+  `plan --lat` on the command line defaults to the saved latitude.
 - **Saved captures are named `_completed` or `_partial`** by default: `_completed` when every frame is taken,
   `_partial` otherwise. The automatic `last_capture.hmcap.json` keeps its name.
 - **Camera settings can be changed during a run** (exposure, gain, binning, settle): they are used from

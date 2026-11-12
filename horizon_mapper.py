@@ -3265,6 +3265,11 @@ def run_gui(selftest=False):
     left, plan_fixed = topbar(plan_tab)
     right = ttk.Frame(plan_tab); right.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     P = PlanParams()
+    _site = load_settings()
+    try:
+        P.lat = float(_site["site_lat"])               # saved site (settings.json), default for the whole app
+    except Exception:
+        pass
     V = {}
     current_hz = tk.StringVar(value="")   # shared: Plan tab horizon file -> Build tab comparison
 
@@ -3520,7 +3525,10 @@ def run_gui(selftest=False):
     show_order = tk.BooleanVar(value=True)
     ttk.Checkbutton(btns, text="Show shooting order", variable=show_order,
                     command=lambda: draw_plan()).pack(side="top", anchor="w", padx=4, pady=2)
-    sun_lon = tk.StringVar(value="25.0")
+    try:
+        sun_lon = tk.StringVar(value=str(float(_site["site_lon"])))
+    except Exception:
+        sun_lon = tk.StringVar(value="25.0")
     sb = ttk.Frame(btns); sb.pack(side="top", fill="x", pady=2)
     ttk.Label(sb, text="Longitude (°E)").pack(side="left", padx=4)
     ttk.Entry(sb, textvariable=sun_lon, width=8).pack(side="left")
@@ -3543,6 +3551,30 @@ def run_gui(selftest=False):
         state["sun_job"] = root.after(400, draw_plan)        # wait until typing pauses
     for _v in (sun_start, sun_keep, sun_lon, sun_date):
         _v.trace_add("write", sun_fields_changed)
+
+    def site_changed(*_):
+        """Latitude / longitude edited (or read from a FITS file): remember them in settings.json."""
+        if state.get("site_job"):
+            try:
+                root.after_cancel(state["site_job"])
+            except Exception:
+                pass
+        def store():
+            try:
+                la = float(V["lat"].get()); lo = float(sun_lon.get())
+            except Exception:
+                return                                  # half-typed value: wait for a valid one
+            if -90 <= la <= 90 and -180 <= lo <= 360:
+                st = load_settings()
+                if st.get("site_lat") != la or st.get("site_lon") != lo:
+                    save_settings(site_lat=la, site_lon=lo)
+        state["site_job"] = root.after(600, store)
+    V["lat"].trace_add("write", site_changed); sun_lon.trace_add("write", site_changed)
+    if "site_lat" not in _site or "site_lon" not in _site:
+        try:
+            save_settings(site_lat=float(V["lat"].get()), site_lon=float(sun_lon.get()))
+        except Exception:
+            pass
 
     def plan_start_time():
         """Planned start in local time: 'Start date' (blank = today) at 'Start time' (blank = now)."""
@@ -5543,7 +5575,7 @@ TIPS = {
     "Orientation": "How the camera is turned: landscape, portrait, or auto (whichever needs fewer frames).",
     "Read from a FITS file…": "Fill in sensor size, pixel size and focal length from the header of one of your FITS files.",
     # ---- Plan tab: site & area
-    "Latitude (°)": "Your site's latitude in degrees (north positive). Needed for the rotator and the Sun check.",
+    "Latitude (°)": "Your site's latitude in degrees (north positive). Needed for the rotator and the Sun check. Remembered in settings.json and used as the default next time.",
     "Fixed altitude band": "Image a band of constant altitude all the way round (set the two band limits).",
     "Around current horizon": "Image a strip that follows your current horizon file(s), with the margins below and above it.",
     "Band: alt min (°)": "Lowest altitude of the band to image (fixed-band mode).",
@@ -5580,7 +5612,7 @@ TIPS = {
     "Save NINA sequence…": "Save the plan as a NINA Advanced Sequencer file.",
     "Show shooting order": "Draw the order in which the frames are taken (green = first → magenta = last).",
     "Sun check": "Show where the Sun is at the given time and whether any frame is too close to it.",
-    "Longitude (°E)": "Your site's longitude in degrees east – used for the Sun check.",
+    "Longitude (°E)": "Your site's longitude in degrees east – used for the Sun check. Remembered in settings.json and used as the default next time.",
     "Start date": "Planned start date: 2026-11-12, 12.11.2026 or 12.11. (this year); blank = today. With the start time it sets where the preview draws the Sun.",
     "Start time (HH:MM)": "Planned start time (local; blank = the current time of day). The preview shows the Sun's path from then until the plan's estimated end.",
     "Sun distance (°)": "Keep-away distance from the Sun for the preview: frames inside it are drawn red, slews passing it get a red cross.",
@@ -5672,6 +5704,8 @@ DISCLAIMER AND SAFETY WARNING – read before use
 WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
 1. Plan sequence
    • Enter camera/telescope (or 'Read from a FITS file…'). The field of view is computed.
+   • Enter your site's latitude and longitude once: they are saved in settings.json and used as
+     the defaults next time (changing them in the window updates the file).
    • Choose the area: a fixed altitude band, or a strip around your current horizon file
      (optionally plus a second estimate, e.g. from an all-sky camera); the strip spans both,
      plus margins. The current horizon is also filled in on the Build tab for comparison.
@@ -5874,7 +5908,7 @@ def main():
     pp.add_argument("--fov", nargs=2, type=float, metavar=("W", "H"))
     pp.add_argument("--sensor", nargs=3, type=float, metavar=("WPX", "HPX", "UM"), default=[6248, 4176, 3.76])
     pp.add_argument("--focal", type=float, default=408)
-    pp.add_argument("--lat", type=float, default=60.0)
+    pp.add_argument("--lat", type=float, default=float(load_settings().get("site_lat", 60.0)))
     pp.add_argument("--band", nargs=2, type=float, metavar=("MIN", "MAX"))
     pp.add_argument("--hrz", nargs="+", help="1-2 horizon files")
     pp.add_argument("--below", type=float, default=4); pp.add_argument("--above", type=float, default=4)
