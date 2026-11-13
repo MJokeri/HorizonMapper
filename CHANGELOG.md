@@ -2,14 +2,69 @@
 
 ## 1.1.0 – 2026-11-10
 
+_Tested on the author's real equipment (ASI mount, ASI2600MC, ZWO CAA rotator, flat panel opening/closing, NINA and ASCOM Remote 7.0.1) and the
+Stellarium landscape, including the picture, checked and working in Stellarium (13 Nov 2026)._
+
 ### Added
+- README: note to unzip before running (starting the `.exe` from inside the ZIP made the start about 10 s slower).
+- **Folder version of the Windows build** (`HorizonMapper-windows-folder.zip`): starts faster than the single-file
+  `.exe`, which unpacks itself at every start (the debug log showed about 10 s before the window was created).
+  Start-up timing lines now also cover the imports.
+- Debug log: `startup: N s – …` lines record how long each part of the start-up takes.
+- **Stellarium landscape now includes a picture**: the one ZIP from *Save Stellarium landscape…* also holds
+  `panorama.png` (grey tones of the mosaic below the horizon line, transparent sky above) and becomes a
+  spherical (photo) landscape; the horizon polygon stays in it as the horizon line. Without a mosaic it
+  is the plain polygon landscape. The command line writes the same files.
+- **Site latitude and longitude are saved in `settings.json`** (`site_lat`, `site_lon`) and used as the
+  defaults at start-up; changing them in the Plan tab (or reading them from a FITS file) updates the file.
+  `plan --lat` on the command line defaults to the saved latitude.
+- **Saved captures are named `_completed` or `_partial`** by default: `_completed` when every frame is taken,
+  `_partial` otherwise. The automatic `last_capture.hmcap.json` keeps its name.
+- **Camera settings can be changed during a run** (exposure, gain, binning, settle): they are used from
+  the next frame and noted in the log.
+- **Open flat panel at start / Close flat panel when finished**: check boxes in Safety and Peripherals
+  (NINA and Alpaca); the buttons stay. The run waits until the cover is open and stops with a message
+  if it cannot be opened; the cover is closed after parking when the run finishes (not after End run).
+- **Save Stellarium landscape…** (Build horizon tab): the selected horizon line (solid or with branches,
+  edits and side margin included) as a Stellarium polygonal landscape ZIP (`landscape.ini` + `horizon.txt`,
+  azimuth from true north towards east). The command line writes `_stellarium.zip` files too.
+- **Range:** when **From frame** (above 1) is a frame that is already taken, Start asks whether to shoot
+  frames From–To again (those before From stay) or only the ones not taken yet. Before, a restart always
+  skipped taken frames, so it seemed to continue from the latest unshot frame.
+- **Optimise route** (Capture tab, on by default). At Start the frames still to shoot are put in a
+  shorter order: east half then west half (one meridian flip instead of one per crossing, about a minute
+  each), shorter slews and fewer rotator moves, with the rotator angles recomputed for the new order.
+  On a real 553-frame fill-in run (11 meridian crossings, 144 rotator moves) the estimate drops by about
+  13 % and the crossings to 1. The frame numbers of the frames still to shoot change.
+- **Flat panel open / close** in the Capture tab, for both NINA (Advanced API `set-cover`) and Alpaca
+  (new **Flat panel** device choice, an ASCOM CoverCalibrator, *none* by default). The **Safety** box is
+  now **Safety and Peripherals**. Closing asks first; a run warns at the start if the cover is closed.
+- **Rotator range 90°** (*Quarter turn*). Angles that a 180° turn cannot bring inside the range go to
+  the nearer end (some frames tilted by up to 45°, possible gaps).
+- **Rotator range now defaults to Half turn (180°)** (was Full turn).
+- **Capture without NINA – ASCOM Alpaca.** The Capture tab (now named **2. Capture**) has a
+  **Connect through** choice: **NINA** (as before) or **Alpaca (without NINA)**. With Alpaca, Horizon
+  Mapper drives the mount, camera and rotator itself through an Alpaca server such as ASCOM Remote
+  (part of ASCOM Platform 7), on this computer or on the observatory computer.
+  - **Find** discovers Alpaca servers on the network; **Test connection** lists the server's
+    devices for the **Mount**, **Camera** and **Rotator** choices and connects them.
+  - Images are downloaded and **saved on the computer running Horizon Mapper** (**Save images in**),
+    as FITS files with the headers the Build tab reads. They are complete at once, so there is no
+    waiting for late files.
+  - Works with mounts that take J2000 or of-date coordinates, older rotator drivers without
+    mechanical moves, and cameras that send images as binary or JSON.
+  - The method, address, devices and folder are remembered; a saved capture stores them too.
+- **More safety, for both methods:** **Never above altitude**; **Rotator limit** (keep the rotator
+  within a half turn – angles outside are shot turned by 180°); the mount is **watched during every
+  slew** and stopped if it comes much closer to the Sun than planned or cannot be reached. With
+  Alpaca, tracking switched on for the slews is switched off again at the end.
 - **Disclaimer and safety warning** (README, near the top, and at the top of the in-app Help):
   the software is experimental and provided "AS IS"; no warranty and no liability of the developer,
   distributors or any other party for damage to equipment, persons or third parties (based on GNU
   GPL v3 §15–17); use at your own risk. A warning, with references to NASA, the AAS and the AAO,
   that pointing or even slewing optics near the Sun can instantly cause eye injury and destroy
   equipment, and that the built-in Sun check is an aid only.
-- **2. Capture (NINA) tab:** shoots the Plan tab plan or the Build tab fill-in frames directly,
+- **2. Capture tab:** shoots the Plan tab plan or the Build tab fill-in frames directly,
   through NINA's **Advanced API** plugin. For each frame: slew (alt/az → J2000 RA/Dec from the mount's
   sidereal time), mechanical rotator move, settle, exposure. NINA saves the FITS with its usual
   headers; the files are found in NINA's image folder (read from the profile). The file list is added
@@ -61,14 +116,46 @@
   The Capture log sits in its own pane; drag the divider to resize it.
 - `DEV_MODE` switch for the development defaults (debug log and log windows on), plus a release
   checklist in the README.
-- Capture tab: default host 192.168.0.10 while `DEV_MODE` is on (test rig), otherwise `localhost`.
+- Capture tab: default host is `localhost`; the last host used is remembered.
 - Capture tab: the log runs down the right side at full height, with a scrollbar.
 - **Debug menu → Debug log (all actions):** every click, NINA request (timing and answer), capture
   step, wait, pause and state change, folder scan and redraw, plus errors from window callbacks and
   background threads, goes to `%LOCALAPPDATA%\HorizonMapper\logs\`. A watchdog logs whenever the
   window is blocked for more than a second. The setting is remembered and on by default for now.
 
+### Changed
+- README: "What is new in 1.1.0" summary at the top, note on frames shot by the program itself.
+- README: new section **Stellarium landscape** (install, update, contents, check) and a mention at the top.
+- Removed personal network and location details from the documentation and the default values (the
+  default site is now a neutral latitude 60°, longitude 25°).
+
 ### Fixed
+- **Stellarium picture still faint at night**: the picture uses the same contrast stretch as the preview in the app
+  (greys 45–255, ground 95), is also set as the night illumination texture (`maptex_illum`), and
+  `minimal_brightness` is 0.5.
+- **Stellarium picture was almost black at night**: the panorama is brighter (greys 60–210, ground 70) and
+  `minimal_brightness` is 0.4 in the photo landscape.
+- **Stellarium landscape did not draw correctly**: the export now follows the layout of Stellarium's own sample
+  landscape (whole-degree azimuths 0–359 without a 360° point, `polygonal_angle_rotatez = 0.00001`, ground and
+  horizon line colours, `minimal_brightness`); tested to load and draw the ground in Stellarium. Re-save the
+  landscape and install it again.
+- Loading frames from a saved (fill-in) sequence file – also at Start – set exposure, gain and binning back
+  to the file's values. The file now only suggests them the first time, never over values you have set.
+- **Alpaca: rotators whose "move to mechanical angle" does something else.** The ZWO CAA's ASCOM
+  driver moves by the given angle instead of to it, so the run waited for an angle that never came
+  (stuck at "rotating"). The rotator's end position is now checked; if it is wrong the log says so
+  and the next method is tried (MoveAbsolute with the driver's offset, then a relative Move). The
+  method that works is remembered. If none works the run pauses with the numbers.
+  Refined: MoveAbsolute is now tried first (a wrong guess with it cannot turn the rotator by the
+  whole angle, as the CAA's MoveMechanical does), so the one-time wrong move no longer happens on
+  such drivers, and the log message is worded plainly ("this driver treats the … call differently").
+- The live device line refreshes every 5 s while no run is active (2 s during a run).
+- **Alpaca connection problems are now explained.** A Windows "Bad Request" page (ASCOM Remote
+  listening on localhost only) and "connection refused" are reported with the likely cause and the
+  fix; the HTML of error pages is no longer shown. **Find** no longer logs a false error on
+  Windows, and asks from every network interface (each one's broadcast address). The setup text
+  now says to choose the server's network address in ASCOM Remote and to open **UDP** 32227
+  (discovery) and TCP 11111 in the firewall.
 - **Typing a start date showed "mktime argument out of range".** The preview redrew on every
   keystroke and read a half-typed date ("01.07.202") as the year 202. Dates are now checked: years
   1970–2100 and days that exist. The Sun part of the preview can no longer raise an error; it says
@@ -132,7 +219,7 @@
 - **Plan tab – Extra frames at steep edges:** where the current horizon rises or drops steeply
   (threshold **Steep = more than**, default 2° altitude per degree of azimuth), the planned strip is
   widened sideways by the chosen number of frame widths (default 0.5, 0 = off) and spans the full
-  height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With the sample site horizon,
+  height of the jump. CLI: `plan --edge-frames N --edge-slope S`. With a sample horizon,
   0 / 0.5 / 1 / 2 extra frames give 569 / 638 / 713 / 873 frames (steep = 2°/°).
 - **Plan tab – fewer frames:** each row now places its frames only over the stretches where the
   strip enters that row's altitude zone, as few as the overlap allows. Before, frames sat on a fixed

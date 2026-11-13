@@ -57,6 +57,29 @@ jobs:
           name: HorizonMapper-windows
           path: HorizonMapper-windows.zip
 
+      # Folder version: no unpacking at every start, so it starts much faster (antivirus scans fewer files)
+      - name: Build folder version
+        run: pyinstaller --noconfirm --onedir --windowed --name HorizonMapper-folder horizon_mapper.py
+
+      - name: Check folder version runs
+        shell: pwsh
+        run: |
+          $g = Start-Process -FilePath dist\HorizonMapper-folder\HorizonMapper-folder.exe -ArgumentList '--selftest-gui' -Wait -PassThru
+          if ($g.ExitCode -ne 0) { throw "folder version GUI self-test failed (exit code $($g.ExitCode))" }
+
+      - name: Package folder version
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package_folder | Out-Null
+          Copy-Item -Recurse dist\HorizonMapper-folder package_folder\HorizonMapper
+          Copy-Item README.md, LICENSE package_folder\
+          Compress-Archive -Path package_folder\* -DestinationPath HorizonMapper-windows-folder.zip -Force
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: HorizonMapper-windows-folder
+          path: HorizonMapper-windows-folder.zip
+
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3

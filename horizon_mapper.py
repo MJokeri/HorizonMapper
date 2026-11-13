@@ -12,7 +12,7 @@ Requires: Python 3.9+, numpy, Pillow   (pip install numpy pillow)
 Run:      python horizon_mapper.py      (GUI)
           python horizon_mapper.py --help (command line)
 """
-import argparse, hashlib, json, math, os, queue, sys, threading, time, traceback
+import argparse, hashlib, io, json, math, os, queue, re, sys, threading, time, traceback, zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -21,6 +21,7 @@ try:
 except ImportError:  # GUI will complain later
     Image = None
 
+_T0 = time.time()     # program start, for the start-up timing lines in the debug log
 APP_NAME = "Horizon Mapper for NINA"
 APP_VERSION = "1.1.0"
 # DEVELOPMENT DEFAULTS: debug log and log windows on. Set DEV_MODE = False before a release
@@ -256,17 +257,114 @@ def hrz_array(pts, az):
     return np.array([hrz_alt(pts, a) for a in az])
 
 
+def hrz_samples(az, alt, step=1.0):
+    """[(azimuth, altitude)] every `step` degrees from 0 to just below 360; each value is the max within
+    +-step/2 (keeps narrow peaks)."""
+    az = np.asarray(az); alt = np.asarray(alt)
+    out = []; a = 0.0
+    while a < 360 - 1e-9:
+        d = (az - a + 180) % 360 - 180
+        m = np.abs(d) <= step / 2
+        out.append((a, float(np.max(alt[m])) if m.any() else float(np.interp(a, az, alt, period=360))))
+        a += step
+    return out
+
+
 def write_hrz(path, az, alt, step=1.0):
     """Write NINA horizon file; each output azimuth uses the max within +-step/2 (keeps narrow peaks)."""
-    az = np.asarray(az); alt = np.asarray(alt)
     with open(path, "w", newline="\r\n") as f:
-        a = 0.0
-        while a < 360 - 1e-9:
-            d = (az - a + 180) % 360 - 180
-            m = np.abs(d) <= step / 2
-            v = float(np.max(alt[m])) if m.any() else float(np.interp(a, az, alt, period=360))
+        for a, v in hrz_samples(az, alt, step):
             f.write(f"{a:06.2f}      {v:5.2f}\n")
-            a += step
+
+
+def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None, mos=None):
+    """Write a Stellarium polygonal landscape as a ZIP (Stellarium: Sky and viewing options → Landscape →
+    Add/remove landscapes → Install a new landscape from a ZIP archive). The ZIP holds one directory with
+    landscape.ini, horizon.txt (azimuth from true north towards east, altitude, degrees) and readme.txt.
+    Altitudes below 0 are set to 0 (Stellarium wants positive values). The list is a closed polygon of distinct points (no repeated 360° vertex). Returns the landscape id."""
+    date = date or time.strftime("%Y-%m-%d")
+    lid = re.sub(r"[^a-z0-9_-]+", "_", os.path.splitext(os.path.basename(path))[0].lower()).strip("_") or "horizon_mapper"
+    # Same layout as Stellarium's own sample (Geneva): whole-degree azimuths 0..359 (no 360° vertex), tested in
+    # Stellarium. Edges on azimuth 0°/180° are handled by polygonal_angle_rotatez = 0.00001 in landscape.ini.
+    pts = [(float(int(round(a)) % 360), max(v, 0.0)) for a, v in hrz_samples(az, alt, 1.0)]
+    seen = set(); pts = [(a, v) for a, v in sorted(pts) if not (a in seen or seen.add(a))]
+    txt = (f"# Horizon measured with {APP_NAME} on {date} ({label} line).\n"
+           "# azimuth (degrees from true north towards east), altitude (degrees)\n" +
+           "".join(f"{int(a)} {v:.1f}\n" for a, v in pts))
+    pano = None
+    if mos is not None and mos.get("M") is not None:
+        buf = io.BytesIO(); Image.fromarray(panorama_rgba(mos, az, alt, 0.1), "RGBA").save(buf, "PNG", optimize=True)
+        pano = buf.getvalue()
+    if pano:       # photo (spherical) landscape: panorama image + the horizon polygon as line / altitude list
+        ini = ("[landscape]\n"
+               f"name = {lid}\n"
+               "type = spherical\n"
+               f"author = {APP_NAME}\n"
+               f"description = Horizon measured with {APP_NAME} on {date} ({label} line): grey tones of the mosaic below the horizon line, transparent sky above it.\n"
+               "maptex = panorama.png\n"
+               "maptex_illum = panorama.png\n"          # drawn on top at night, so the picture stays visible in the dark
+               "angle_rotatez = 0\n"
+               "polygonal_horizon_list = horizon.txt\n"
+               "polygonal_angle_rotatez = 0.00001\n"
+               "horizon_line_color = .25,.15,.15\n"
+               "minimal_brightness = 0.5\n")
+    else:          # polygon only
+        ini = ("[landscape]\n"
+               f"name = {lid}\n"
+               "type = polygonal\n"
+               f"author = {APP_NAME}\n"
+               f"description = Horizon measured with {APP_NAME} on {date} ({label} line).\n"
+               "polygonal_horizon_list = horizon.txt\n"
+               "polygonal_angle_rotatez = 0.00001\n"
+               "ground_color = .15,.45,.45\n"
+               "horizon_line_color = .25,.15,.15\n"
+               "minimal_brightness = 0.15\n")
+    readme = (f"Stellarium landscape made by {APP_NAME} on {date}: the measured horizon ({label} line) "
+              "of the imaging site.\nInstall: Stellarium → Sky and viewing options (F4) → Landscape → "
+              "Add/remove landscapes → Install a new landscape from a ZIP archive.\n"
+              "Or unzip this folder into Stellarium's 'landscapes' folder "
+              "(Windows: %APPDATA%\\Stellarium\\landscapes). Restart Stellarium if it is not listed.\n")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(f"{lid}/landscape.ini", ini); z.writestr(f"{lid}/horizon.txt", txt)
+        if pano:
+            z.writestr(f"{lid}/panorama.png", pano)
+        z.writestr(f"{lid}/readme.txt", readme)
+    return lid
+
+
+def panorama_rgba(mos, az, alt, step=0.1, ground=(95, 100, 95)):
+    """Equirectangular panorama (RGBA, uint8) of the measured horizon for a Stellarium *spherical* landscape.
+    Width 360/step, height 180/step; altitude +90 at the top, -90 at the bottom; the LEFT border is EAST
+    (azimuth 90°) and azimuth grows to the right (east → south → west → north), which Stellarium expects
+    with angle_rotatez = 0. Above the horizon line the image is transparent (sky); below it the grey
+    tones of the mosaic are shown (dark obstructions, lighter gaps) and a flat ground colour where
+    the mosaic has no data (below the imaged altitudes)."""
+    W = int(round(360 / step)); H = int(round(180 / step))
+    M = mos["M"]; res = mos["res"]; alt0 = mos["alt0"]; NH, NA = M.shape
+    cov = np.isfinite(M).astype(np.float32); Mz = np.nan_to_num(M, nan=0.0).astype(np.float32)
+    v = M[np.isfinite(M)]
+    lo, hi = (np.percentile(v, [1, 99.5]) if v.size else (0.0, 1.0))
+    g = np.clip((Mz - lo) / max(hi - lo, 1e-6), 0, 1) * cov
+    # shrink the columns of the mosaic (azimuth 0..360 from its left edge) to W columns, rows stay
+    gi = np.asarray(Image.fromarray(g).resize((W, NH), Image.BOX)); ci = np.asarray(Image.fromarray(cov).resize((W, NH), Image.BOX))
+    gi = np.where(ci > 0.5, gi / np.maximum(ci, 1e-6), 0.0); ci = (ci > 0.5).astype(np.float32)
+    # rows: output altitude of row y, linear interpolation between mosaic rows
+    a_out = 90.0 - (np.arange(H) + 0.5) * step
+    r = (a_out - alt0) / res
+    ok = (r >= 0) & (r <= NH - 1)
+    r0 = np.clip(np.floor(r).astype(int), 0, NH - 1); r1 = np.clip(r0 + 1, 0, NH - 1); w1 = (r - np.floor(r))[:, None].astype(np.float32)
+    G = gi[r0] * (1 - w1) + gi[r1] * w1; Cv = (ci[r0] * (1 - w1) + ci[r1] * w1 > 0.5) & ok[:, None]
+    shift = int(round(90.0 / step))                       # output column 0 = azimuth 90° (east)
+    G = np.roll(G, -shift, axis=1); Cv = np.roll(Cv, -shift, axis=1)
+    tone = 45 + G * 210                                   # same contrast stretch as the preview in the app (dark .. light grey)
+    rgb = np.where(Cv[..., None], tone[..., None], np.array(ground, np.float32)[None, None, :])
+    # the horizon line for every output column; opaque below it, a one pixel soft edge
+    az_x = (90.0 + (np.arange(W) + 0.5) * step) % 360.0
+    azs = np.asarray(az, float); o = np.argsort(azs); azs = azs[o]; als = np.asarray(alt, float)[o]
+    line = np.interp(az_x, np.concatenate([azs - 360, azs, azs + 360]), np.concatenate([als, als, als]))
+    alpha = np.clip((line[None, :] - a_out[:, None]) / step + 0.5, 0, 1)
+    out = np.dstack([np.clip(rgb, 0, 255), alpha * 255]).astype(np.uint8)
+    return out
 
 
 def sky_area_sqdeg(az_deg, alt_deg):
@@ -960,6 +1058,573 @@ class NinaApi:
                 errs.append(str(e))
         return errs
 
+    # the device operations the capture run uses (the Alpaca client offers the same ones)
+    kind, label = "nina", "NINA"
+
+    def unpark(self):
+        self.get("/equipment/mount/unpark", timeout=120)
+
+    def park(self):
+        self.get("/equipment/mount/park", timeout=10)
+
+    def set_tracking(self, on=True):
+        self.get("/equipment/mount/tracking", mode=0 if on else 4)
+
+    def slew_altaz(self, alt, az, lat, lst_hours, timeout):
+        """Slew to an alt/az direction; returns when NINA says the slew is over."""
+        ra, dec = altaz_to_radec_j2000(alt, az, lat, lst_hours)
+        return self.get("/equipment/mount/slew", ra=round(ra, 5), dec=round(dec, 5),
+                        waitForResult=True, timeout=timeout)
+
+    def rotate(self, mech):
+        self.get("/equipment/rotator/move-mechanical", position=round(mech, 2))
+
+    def prepare_camera(self, binning, gain, log):
+        if binning:
+            self.get("/equipment/camera/set-binning", binning=f"{int(binning)}x{int(binning)}")
+
+    def flat_state(self):
+        """'open', 'closed', 'moving' or 'unknown' (None: no flat panel connected in NINA)."""
+        try:
+            info = self.get("/equipment/flatdevice/info") or {}
+        except NinaApiError:
+            return None
+        if not info.get("Connected", True):
+            return None
+        st = str(info.get("CoverState", "")).lower()
+        return {"open": "open", "closed": "closed", "neitheropennorclosed": "moving"}.get(st, "unknown")
+
+    def flat_cover(self, closed):
+        """Close or open the flat panel's cover (the panel must be connected in NINA)."""
+        self.get("/equipment/flatdevice/set-cover", closed=bool(closed), timeout=90)
+
+
+# =============================================================================
+#  CAPTURE – drive the devices directly through ASCOM Alpaca (no NINA)
+# =============================================================================
+
+class AlpacaError(NinaApiError):
+    number = 0
+
+
+def precess_j2000(ra, dec, t_utc, to_date=True):
+    """Precess RA/Dec (degrees) between J2000 and the equinox of date (IAU 1976)."""
+    T = ((t_utc / 86400.0 + 2440587.5) - 2451545.0) / 36525.0
+    as2r = math.pi / 180 / 3600
+    zeta = (2306.2181 * T + 0.30188 * T * T + 0.017998 * T ** 3) * as2r
+    z = (2306.2181 * T + 1.09468 * T * T + 0.018203 * T ** 3) * as2r
+    th = (2004.3109 * T - 0.42665 * T * T - 0.041833 * T ** 3) * as2r
+    cz, sz, cZ, sZ, ct, st = math.cos(zeta), math.sin(zeta), math.cos(z), math.sin(z), math.cos(th), math.sin(th)
+    P = [[cz * ct * cZ - sz * sZ, -sz * ct * cZ - cz * sZ, -st * cZ],
+         [cz * ct * sZ + sz * cZ, -sz * ct * sZ + cz * cZ, -st * sZ],
+         [cz * st, -sz * st, ct]]                                            # J2000 -> date
+    a, d = math.radians(ra), math.radians(dec)
+    v = [math.cos(d) * math.cos(a), math.cos(d) * math.sin(a), math.sin(d)]
+    if to_date:
+        w = [sum(P[r][c] * v[c] for c in range(3)) for r in range(3)]
+    else:
+        w = [sum(P[r][c] * v[r] for r in range(3)) for c in range(3)]
+    return math.degrees(math.atan2(w[1], w[0])) % 360, math.degrees(math.asin(max(-1, min(1, w[2]))))
+
+
+def local_ipv4s():
+    """IPv4 addresses of this computer's network interfaces (best effort)."""
+    import socket
+    out = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in out and not ip.startswith("127."):
+                out.append(ip)
+    except OSError:
+        pass
+    try:                                              # the interface that reaches the network
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.connect(("192.0.2.1", 9))
+        ip = sk.getsockname()[0]; sk.close()
+        if ip not in out and not ip.startswith("127."):
+            out.append(ip)
+    except OSError:
+        pass
+    return out
+
+
+def alpaca_discover(timeout=2.5, port=32227):
+    """Find Alpaca servers on the local network (UDP broadcast to port 32227, answered by the server's
+    discovery responder). Returns [(host, port)]. The request goes out from every network interface."""
+    import socket
+    found = []; targets = []
+    for ip in local_ipv4s():                          # each interface's /24 broadcast, sent from that interface
+        targets.append((ip, ip.rsplit(".", 1)[0] + ".255"))
+    targets.append(("", "255.255.255.255"))
+    targets.append(("127.0.0.1", "127.0.0.1"))
+    socks = []
+    try:
+        for src, dst in targets:
+            try:
+                sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sk.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sk.bind((src, 0)); sk.settimeout(0.2)
+                sk.sendto(b"alpacadiscovery1", (dst, port))
+                socks.append(sk)
+                dlog(f"Alpaca discovery: asked {dst}:{port} from {src or 'any'}")
+            except OSError as e:
+                dlog(f"Alpaca discovery: cannot send to {dst} from {src or 'any'}: {e}")
+        end = time.time() + timeout
+        while time.time() < end and socks:
+            for sk in list(socks):
+                try:
+                    data, (ip, _) = sk.recvfrom(1024)
+                    hit = (ip, int(json.loads(data.decode("utf-8", "replace"))["AlpacaPort"]))
+                    if hit not in found:
+                        found.append(hit)
+                except socket.timeout:
+                    continue
+                except ConnectionResetError:          # Windows: 'port unreachable' from an address with no responder
+                    socks.remove(sk); sk.close()
+                except Exception as e:
+                    dlog(f"Alpaca discovery: reply not understood: {e}")
+    finally:
+        for sk in socks:
+            sk.close()
+    dlog(f"Alpaca discovery found {found}")
+    return found
+
+
+def alpaca_image(body, content_type=""):
+    """Decode an Alpaca ImageArray reply (binary 'imagebytes' or JSON) into a 2-D array with the
+    rows top-down (row 0 = top of the sensor), as NINA stores them. Colour planes are averaged."""
+    import struct
+    if "imagebytes" in (content_type or "").lower():
+        if len(body) < 44:
+            raise AlpacaError("Alpaca camera: image data too short")
+        ver, err, _, _, start, _, ttype, rank, d1, d2, d3 = struct.unpack("<iiIIiiiiiii", body[:44])
+        if err:
+            raise AlpacaError(f"Alpaca camera imagearray: {body[start:].decode('utf-8', 'replace')[:200]}")
+        dt = {1: "<i2", 2: "<i4", 3: "<f8", 4: "<f4", 5: "<u8", 6: "u1", 7: "<i8", 8: "<u2"}.get(ttype)
+        if dt is None or rank not in (2, 3):
+            raise AlpacaError(f"Alpaca camera: unsupported image format (type {ttype}, rank {rank})")
+        n = d1 * d2 * (d3 if rank == 3 else 1)
+        if len(body) < start + n * np.dtype(dt).itemsize:
+            raise AlpacaError("Alpaca camera: image data incomplete")
+        a = np.frombuffer(body, dtype=dt, offset=start, count=n)
+        a = a.reshape(d1, d2) if rank == 2 else a.reshape(d1, d2, d3)
+    else:
+        try:
+            data = json.loads(body.decode("utf-8", "replace"))
+        except Exception as e:
+            raise AlpacaError(f"Alpaca camera imagearray: reply not understood ({e})")
+        if data.get("ErrorNumber"):
+            raise AlpacaError(f"Alpaca camera imagearray: {data.get('ErrorMessage')}")
+        a = np.array(data.get("Value"))
+        if a.ndim not in (2, 3):
+            raise AlpacaError("Alpaca camera: image is not 2- or 3-dimensional")
+    if a.ndim == 3:
+        a = a.mean(axis=2)
+    return np.ascontiguousarray(a.T)            # Alpaca sends [x][y]; rows = y
+
+
+def write_fits(path, img, cards):
+    """Write a 2-D image as a FITS file. `cards` = [(keyword, value, comment)]. Whole numbers that fit
+    16 bits are stored as unsigned 16-bit (BZERO 32768), anything else as 32-bit floats. The file
+    appears under its name only when complete."""
+    a = np.asarray(img)
+    ny, nx = a.shape
+    as16 = np.issubdtype(a.dtype, np.integer) and a.size and a.min() >= 0 and a.max() <= 65535
+    if not as16 and a.size and np.all(a == np.floor(a)) and a.min() >= 0 and a.max() <= 65535:
+        as16 = True
+
+    def card(k, v, c=""):
+        if isinstance(v, bool):
+            t = f"{k:<8}= {'T' if v else 'F':>20}"
+        elif isinstance(v, (int, np.integer)):
+            t = f"{k:<8}= {int(v):>20d}"
+        elif isinstance(v, (float, np.floating)):
+            t = f"{k:<8}= {float(v):>20.10G}"
+        else:
+            q = "'" + str(v).replace("'", "''")[:60].ljust(8) + "'"
+            t = f"{k:<8}= {q:<20}"
+        if c:
+            t += " / " + c
+        return t[:80].ljust(80)
+    head = [card("SIMPLE", True, "FITS standard"), card("BITPIX", 16 if as16 else -32), card("NAXIS", 2),
+            card("NAXIS1", nx), card("NAXIS2", ny)]
+    if as16:
+        head += [card("BZERO", 32768), card("BSCALE", 1)]
+    head += [card(k, v, c) for k, v, c in cards if v is not None]
+    head.append("END".ljust(80))
+    hb = "".join(head).encode("ascii", "replace")
+    hb += b" " * (-len(hb) % 2880)
+    if as16:
+        db = (a.astype(np.int32) - 32768).astype(">i2").tobytes()
+    else:
+        db = a.astype(">f4").tobytes()
+    db += b"\0" * (-len(db) % 2880)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".part"
+    with open(tmp, "wb") as f:
+        f.write(hb); f.write(db)
+    os.replace(tmp, path)
+    return path
+
+
+def default_capture_dir():
+    """Where the Alpaca method saves images unless told otherwise (on this computer)."""
+    docs = os.path.join(os.path.expanduser("~"), "Documents")
+    base = docs if os.path.isdir(docs) else os.path.expanduser("~")
+    return os.path.join(base, "Horizon Mapper", "Captures")
+
+
+def limit_rotator(angle, mode="full", start=0.0):
+    """Keep a mechanical rotator angle inside a limited range from `start`: 'half' = 180°, 'quarter' = 90°,
+    'full' leaves the angle as planned. The frame is rectangular, so turning it by 180° covers the same
+    sky: the angle is first folded into [start, start+180). A 90° range cannot reproduce every angle that
+    way, so an angle beyond start+90° goes to the nearer end (start+90° or start); that frame is then
+    tilted by up to 45° against the plan."""
+    if angle is None or mode not in ("half", "quarter"):
+        return angle
+    a = (angle - start) % 180.0
+    if mode == "quarter" and a > 90.0:
+        a = 90.0 if a - 90.0 < 180.0 - a else 0.0
+    return (start + a) % 360.0
+
+
+class AlpacaApi:
+    """Client for ASCOM Alpaca devices (telescope, camera, rotator) on one Alpaca server, e.g.
+    ASCOM Remote. Offers the same operations as NinaApi, with the same result keys."""
+
+    kind, label = "alpaca", "Alpaca"
+    CAMERA_STATES = ("Idle", "Waiting", "Exposing", "Reading", "Download", "Error")
+
+    def __init__(self, host="localhost", port=11111, telescope=0, camera=0, rotator=0, timeout=15.0,
+                 focal_mm=None, pixel_um=None, flat=None):
+        import random
+        self.root = f"http://{host}:{int(port)}"
+        self.dev = {"telescope": telescope, "camera": camera, "rotator": rotator,
+                    "covercalibrator": flat}   # rotator, flat panel None: not used
+        self.timeout = timeout
+        self.focal_mm, self.pixel_um = focal_mm, pixel_um
+        self.cid = random.randint(1, 65535); self.tid = 0
+        self._static = {}
+        self.cam = {}
+        self.rot_key = f"{host}:{int(port)}/{rotator}"
+        mode = (load_settings().get("alpaca_rotmode") or {}).get(self.rot_key)
+        self.rot_mode = mode if mode in self.ROT_MODES else self.ROT_MODES[0]
+
+    # ---------------------------------------------------------------- transport
+    def _http(self, verb, url, params, timeout, accept=None):
+        import urllib.request, urllib.parse, urllib.error
+        self.tid += 1
+        q = {k: (str(v).lower() if isinstance(v, bool) else v) for k, v in params.items() if v is not None}
+        q.update(ClientID=self.cid, ClientTransactionID=self.tid)
+        enc = urllib.parse.urlencode(q)
+        req = urllib.request.Request(url + ("?" + enc if verb == "GET" else ""),
+                                     data=enc.encode() if verb == "PUT" else None, method=verb)
+        if verb == "PUT":
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        if accept:
+            req.add_header("Accept", accept)
+        what = url[len(self.root):]
+        t0 = time.time()
+        dlog(f"Alpaca → {verb} {what} { {k: v for k, v in q.items() if not k.startswith('Client')} or ''}")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
+                return r.read(), r.headers.get("Content-Type", "")
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", "replace")
+            msg = " ".join(re.sub(r"<[^>]*>", " ", raw).split())[:300] or str(e)       # HTML error page -> its text
+            dlog(f"Alpaca ✗ {what} after {time.time() - t0:.2f} s: HTTP {e.code} {msg}")
+            if e.code == 400 and "<html" in raw.lower():
+                raise AlpacaError(
+                    f"Alpaca {what}: the server answered 'Bad Request' ({msg}). That is Windows' own web "
+                    "service refusing the address used: ASCOM Remote is most likely set to listen on "
+                    "localhost (127.0.0.1) only. In ASCOM Remote → Setup → Server Configuration choose this "
+                    "computer's network address (or all addresses) as the server IP address, then restart it.") from e
+            raise AlpacaError(f"Alpaca {what}: HTTP {e.code} {msg}") from e
+        except Exception as e:                      # connection refused, timeout, …
+            dlog(f"Alpaca ✗ {what} after {time.time() - t0:.2f} s: {type(e).__name__}: {e}")
+            hint = ""
+            low = str(e).lower()
+            if "refused" in low:
+                hint = (" – nothing is listening at that address and port: start ASCOM Remote (or the "
+                        "Alpaca server) there, check the port, and that its server address is not localhost only")
+            elif "timed out" in low or "unreachable" in low:
+                hint = " – no answer: check the address and the Windows firewall (TCP port 11111) on that computer"
+            raise AlpacaError(f"Alpaca {what}: {e}{hint}") from e
+
+    def _call(self, verb, dev, name, timeout=None, **params):
+        num = self.dev.get(dev)
+        if num is None:
+            raise AlpacaError(f"no Alpaca {dev} selected")
+        url = f"{self.root}/api/v1/{dev}/{int(num)}/{name}"
+        body, _ = self._http(verb, url, params, timeout)
+        try:
+            data = json.loads(body.decode("utf-8", "replace"))
+        except Exception as e:
+            raise AlpacaError(f"Alpaca {dev} {name}: reply not understood ({e})")
+        if _DBG["on"]:
+            dlog(f"Alpaca ← {dev}/{name} ErrorNumber={data.get('ErrorNumber')} Value={str(data.get('Value'))[:120]}")
+        if data.get("ErrorNumber"):
+            err = AlpacaError(f"Alpaca {dev} {name}: {data.get('ErrorMessage') or 'error ' + str(data.get('ErrorNumber'))}")
+            err.number = int(data.get("ErrorNumber") or 0)
+            raise err
+        return data.get("Value")
+
+    def get(self, dev, name, timeout=None, **params):
+        return self._call("GET", dev, name, timeout, **params)
+
+    def put(self, dev, name, timeout=None, **params):
+        return self._call("PUT", dev, name, timeout, **params)
+
+    def opt(self, dev, name, default=None):
+        """A property the device may not offer."""
+        try:
+            v = self.get(dev, name)
+            return default if v is None else v
+        except AlpacaError:
+            return default
+
+    def static(self, dev, name, default=None):
+        """A property that does not change during a session (read once)."""
+        k = (dev, name)
+        if k not in self._static:
+            self._static[k] = self.opt(dev, name, default)
+        return self._static[k]
+
+    # ---------------------------------------------------------------- server
+    def configured(self):
+        """Devices the server offers: [dict(DeviceName, DeviceType, DeviceNumber)]."""
+        body, _ = self._http("GET", f"{self.root}/management/v1/configureddevices", {}, None)
+        try:
+            return list(json.loads(body.decode("utf-8", "replace")).get("Value") or [])
+        except Exception as e:
+            raise AlpacaError(f"Alpaca server: device list not understood ({e})")
+
+    def version(self):
+        try:
+            body, _ = self._http("GET", f"{self.root}/management/v1/description", {}, None)
+            v = json.loads(body.decode("utf-8", "replace")).get("Value") or {}
+            return " ".join(str(v.get(k, "")) for k in ("ServerName", "ManufacturerVersion")).strip() or "Alpaca server"
+        except AlpacaError:
+            return "Alpaca server"
+
+    def connect(self):
+        """Connect the chosen devices (the server connects their drivers). Returns notes for the log."""
+        notes = []
+        for dev in ("telescope", "camera", "rotator", "covercalibrator"):
+            if self.dev.get(dev) is None:
+                continue
+            nm = {"telescope": "mount", "covercalibrator": "flat panel"}.get(dev, dev)
+            try:
+                if not self.get(dev, "connected"):
+                    self.put(dev, "connected", timeout=60, Connected=True)
+                    end = time.time() + 30
+                    while not self.get(dev, "connected") and time.time() < end:
+                        time.sleep(0.5)
+                notes.append(f"{nm} {'connected' if self.get(dev, 'connected') else 'NOT connected'}")
+            except AlpacaError as e:
+                notes.append(f"{nm} ? ({e})")
+        return notes
+
+    # ---------------------------------------------------------------- state (NINA-style keys)
+    def mount(self):
+        t = "telescope"
+        if not self.get(t, "connected"):
+            return {"Connected": False}
+        ra_h = float(self.get(t, "rightascension")); dec = float(self.get(t, "declination"))
+        lst = float(self.get(t, "siderealtime"))
+        if int(self.static(t, "equatorialsystem", 1) or 1) == 2:        # J2000 mount: report of date
+            ra_d, dec = precess_j2000(ra_h * 15.0, dec, time.time(), to_date=True); ra_h = ra_d / 15.0
+        lat = self.static(t, "sitelatitude"); lon = self.static(t, "sitelongitude")
+        alt = self.opt(t, "altitude"); az = self.opt(t, "azimuth")
+        if (alt is None or az is None) and lat is not None:
+            alt, az = hadec_to_altaz((lst * 15.0 - ra_h * 15.0 + 180) % 360 - 180, dec, float(lat))
+        sop = self.opt(t, "sideofpier", -1)
+        return {"Connected": True, "RightAscension": ra_h, "Declination": dec, "SiderealTime": lst,
+                "Altitude": float(alt or 0.0), "Azimuth": float(az or 0.0),
+                "Slewing": bool(self.opt(t, "slewing", False)),
+                "TrackingEnabled": bool(self.opt(t, "tracking", False)),
+                "AtPark": bool(self.opt(t, "atpark", False)),
+                "SideOfPier": {0: "pierEast", 1: "pierWest"}.get(sop, "pierUnknown"),
+                "SiteLatitude": lat, "SiteLongitude": lon}
+
+    def rotator(self):
+        r = "rotator"
+        if self.dev.get(r) is None or not self.get(r, "connected"):
+            return {"Connected": False}
+        pos = self.opt(r, "mechanicalposition")
+        if pos is None:
+            pos = self.get(r, "position")
+        return {"Connected": True, "MechanicalPosition": float(pos), "IsMoving": bool(self.get(r, "ismoving"))}
+
+    def camera(self):
+        c = "camera"
+        if not self.get(c, "connected"):
+            return {"Connected": False}
+        st = self.opt(c, "camerastate", 0)
+        return {"Connected": True,
+                "CameraState": self.CAMERA_STATES[st] if isinstance(st, int) and 0 <= st < 6 else str(st)}
+
+    # ---------------------------------------------------------------- operations
+    def unpark(self):
+        self.put("telescope", "unpark", timeout=120)
+
+    def park(self):
+        self.put("telescope", "park", timeout=180)
+
+    def set_tracking(self, on=True):
+        self.put("telescope", "tracking", Tracking=bool(on))
+
+    def slew_altaz(self, alt, az, lat, lst_hours, timeout):
+        """Slew to an alt/az direction; returns when the mount says it no longer slews."""
+        t = "telescope"
+        if self.static(t, "canslewasync", True):
+            if int(self.static(t, "equatorialsystem", 1) or 1) == 2:
+                ra, dec = altaz_to_radec_j2000(alt, az, lat, lst_hours)
+            else:
+                ra, dec = altaz_to_radec_date(alt, az, lat, lst_hours)
+            self.put(t, "slewtocoordinatesasync", RightAscension=round(ra / 15.0, 6), Declination=round(dec, 5))
+        elif self.static(t, "canslewaltazasync", False):
+            self.put(t, "slewtoaltazasync", Azimuth=round(az % 360, 5), Altitude=round(alt, 5))
+        else:
+            raise AlpacaError("this mount's driver cannot slew on command (CanSlewAsync is false)")
+        t0 = time.time(); quiet = 0
+        while True:
+            time.sleep(0.4)
+            quiet = 0 if self.get(t, "slewing") else quiet + 1
+            if quiet >= 2 and time.time() - t0 > 1.0:        # some mounts report 'slewing' late
+                return True
+            if time.time() - t0 > timeout:
+                raise AlpacaError(f"timeout after {timeout:.0f} s waiting for the slew")
+
+    # How a rotator is told to go to a mechanical angle. The standard says MoveMechanical, but some
+    # drivers do something else with it (the ZWO CAA driver moves by that amount instead), so the run
+    # checks where the rotator ended up and switches method when it is wrong (see next_rot_mode).
+    # MoveAbsolute (with the driver's offset corrected) is tried first: every driver implements it and
+    # a wrong guess with it cannot make the rotator turn by the whole angle, as MoveMechanical can.
+    ROT_MODES = ("abs", "mech", "rel")
+    ROT_MODE_TEXT = {"mech": "MoveMechanical (absolute mechanical angle)",
+                     "abs": "MoveAbsolute (sky angle, corrected by the driver's offset)",
+                     "rel": "Move (relative, by the angle still to go)"}
+
+    def rot_offset(self):
+        """Sky angle minus mechanical angle, as the driver reports them (0 if it has no mechanical angle)."""
+        pos = self.opt("rotator", "position"); mech = self.opt("rotator", "mechanicalposition")
+        return 0.0 if pos is None or mech is None else (float(pos) - float(mech) + 180) % 360 - 180
+
+    def rotate(self, mech):
+        mech = mech % 360
+        if self.rot_mode == "rel":
+            cur = float(self.rotator()["MechanicalPosition"])
+            self.put("rotator", "move", Position=round((mech - cur + 180) % 360 - 180, 3))
+            return
+        if self.rot_mode == "mech":
+            try:
+                self.put("rotator", "movemechanical", Position=round(mech, 3))
+                return
+            except AlpacaError as e:
+                if e.number != 0x400 and "not implemented" not in str(e).lower():
+                    raise
+                self.rot_mode = "abs"                        # older rotator drivers have no MoveMechanical
+        self.put("rotator", "moveabsolute", Position=round((mech + self.rot_offset()) % 360, 3))
+
+    def next_rot_mode(self, tried=()):
+        """Switch to the next way of moving the rotator that has not been tried yet (in ROT_MODES order)."""
+        left = [m for m in self.ROT_MODES if m not in tried and m != self.rot_mode]
+        self.rot_mode = left[0] if left else self.ROT_MODES[(self.ROT_MODES.index(self.rot_mode) + 1) % len(self.ROT_MODES)]
+        dlog(f"rotator move method now '{self.rot_mode}'")
+        return self.rot_mode
+
+    def confirm_rotator(self):
+        """The rotator reached the angle asked for: remember the method that worked for the next run."""
+        st = load_settings().get("alpaca_rotmode") or {}
+        if st.get(self.rot_key) != self.rot_mode:
+            st[self.rot_key] = self.rot_mode
+            save_settings(alpaca_rotmode=st)
+            dlog(f"rotator move method '{self.rot_mode}' remembered for {self.rot_key}")
+
+    COVER_STATES = {0: "none", 1: "closed", 2: "moving", 3: "open", 4: "unknown", 5: "error"}
+
+    def flat_state(self):
+        """'open', 'closed', 'moving', 'unknown' or 'error' (None: no flat panel selected / connected)."""
+        d = "covercalibrator"
+        if self.dev.get(d) is None:
+            return None
+        try:
+            if not self.get(d, "connected"):
+                return None
+            return self.COVER_STATES.get(self.get(d, "coverstate"), "unknown")
+        except AlpacaError:
+            return None
+
+    def flat_cover(self, closed):
+        """Close or open the flat panel's cover (ASCOM CoverCalibrator)."""
+        d = "covercalibrator"
+        if self.dev.get(d) is None:
+            raise AlpacaError("no flat panel (cover calibrator) selected")
+        if not self.get(d, "connected"):
+            self.put(d, "connected", timeout=60, Connected=True)
+        self.put(d, "closecover" if closed else "opencover", timeout=30)
+
+    def stop_all(self):
+        """Stop every movement and exposure at once; errors are collected, not raised."""
+        errs = []
+        for dev, name in (("telescope", "abortslew"), ("rotator", "halt"), ("camera", "abortexposure")):
+            if self.dev.get(dev) is None:
+                continue
+            try:
+                self.put(dev, name, timeout=5)
+            except AlpacaError as e:
+                low = str(e).lower()
+                if e.number == 0x400 or "not implemented" in low:
+                    continue                                 # nothing to stop on this device
+                errs.append(str(e))
+        return errs
+
+    def prepare_camera(self, binning, gain, log):
+        c = "camera"
+        xs, ys = int(self.get(c, "cameraxsize")), int(self.get(c, "cameraysize"))
+        b = max(1, int(binning or 1))
+        mb = int(self.static(c, "maxbinx", 1) or 1)
+        if b > mb:
+            log(f"The camera bins at most {mb}x{mb} – using that instead of {b}x{b}."); b = mb
+        self.put(c, "binx", BinX=b); self.put(c, "biny", BinY=b)
+        self.put(c, "startx", StartX=0); self.put(c, "starty", StartY=0)
+        self.put(c, "numx", NumX=xs // b); self.put(c, "numy", NumY=ys // b)
+        if gain is not None:
+            try:
+                self.put(c, "gain", Gain=int(gain))
+            except AlpacaError as e:
+                log(f"Gain not set ({e}) – the camera keeps its current gain.")
+        st = int(self.static(c, "sensortype", 0) or 0)
+        self.cam = dict(bin=b, pixel=self.static(c, "pixelsizex"), sensortype=st,
+                        bayer=(int(self.static(c, "bayeroffsetx", 0) or 0), int(self.static(c, "bayeroffsety", 0) or 0)),
+                        name=self.static(c, "name", ""), expmin=float(self.static(c, "exposuremin", 0) or 0),
+                        gain=self.opt(c, "gain"))
+        return self.cam
+
+    def start_exposure(self, duration):
+        d = max(float(duration), float(self.cam.get("expmin") or 0.0))
+        self.put("camera", "startexposure", Duration=round(d, 6), Light=True)
+        return d
+
+    def image_ready(self):
+        if self.opt("camera", "camerastate", 0) == 5:
+            raise AlpacaError("the camera reports an error state")
+        return bool(self.get("camera", "imageready"))
+
+    def download_image(self, timeout=180):
+        url = f"{self.root}/api/v1/camera/{int(self.dev['camera'])}/imagearray"
+        body, ctype = self._http("GET", url, {}, timeout, accept="application/imagebytes, application/json")
+        return alpaca_image(body, ctype)
+
+    def bayer_pattern(self):
+        """FITS BAYERPAT for a colour sensor, or None."""
+        if self.cam.get("sensortype") != 2:                   # 2 = RGGB Bayer matrix
+            return None
+        ox, oy = self.cam.get("bayer", (0, 0))
+        return {(0, 0): "RGGB", (1, 0): "GRBG", (0, 1): "GBRG", (1, 1): "BGGR"}.get((ox % 2, oy % 2), "RGGB")
+
 
 def altaz_to_radec_date(alt, az, lat, lst_hours):
     """Alt/az → apparent RA/Dec of date (JNow), degrees (refraction ignored)."""
@@ -1005,9 +1670,11 @@ def sun_separation(alt, az, lat, lon, t_utc=None):
 
 
 class CaptureRunner:
-    """Shoots a list of frames through NINA, one at a time: slew → rotator → capture → find file.
+    """Shoots a list of frames, one at a time: slew → rotator → capture → file. The devices are
+    reached through `api`: NinaApi (NINA takes and saves the image) or AlpacaApi (the image is
+    downloaded and saved here, in `image_folder`).
 
-    Every wait polls NINA, so pause() takes effect at once: it stops the mount, the rotator and
+    Every wait polls the devices, so pause() takes effect at once: it stops the mount, the rotator and
     the exposure, and the run holds until resume(); the interrupted frame is then repeated from
     its start. Any error or timeout pauses the run (it is never skipped silently). stop() ends it.
     Events go to `emit(kind, **data)`: 'log', 'state', 'frame' (index, status, path), 'done'.
@@ -1016,14 +1683,20 @@ class CaptureRunner:
     def __init__(self, api, frames, emit, exposure=1.0, gain=None, binning=None, target="Horizon mapping",
                  settle=1.0, sun_min=30.0, floor=0.0, unpark=True, park=False, image_folder="",
                  slew_timeout=180.0, rot_timeout=120.0, rot_tol=0.5, start_index=0, poll=0.5, save_wait=5.0,
-                 order=None, status=None, paths=None, names=None):
+                 order=None, status=None, paths=None, names=None, ceiling=90.0, rot_range="full",
+                 rot_start=0.0, open_flat=False, close_flat=False):
         self.api, self.emit = api, emit
+        self.open_flat, self.close_flat = open_flat, close_flat
+        self._cam_dirty = False
         self.frames = list(frames)
-        # rotator target for every frame (a plan only lists the moves; carry the angle forward)
+        self.ceiling, self.rot_range, self.rot_start = ceiling, rot_range, rot_start
+        # rotator target for every frame (a plan only lists the moves; carry the angle forward),
+        # brought inside the allowed rotator range
         self.rot = []; cur = None
         for _, _, r in self.frames:
             cur = r if r is not None else cur
-            self.rot.append(cur)
+            self.rot.append(limit_rotator(cur, rot_range, rot_start))
+        self._tracking_switched = False
         self.exposure, self.gain, self.binning, self.target = exposure, gain, binning, target
         self.settle, self.sun_min, self.floor = settle, sun_min, floor
         self.unpark, self.park, self.image_folder = unpark, park, image_folder
@@ -1133,14 +1806,30 @@ class CaptureRunner:
         return None
 
     def _prepare(self):
+        via = "in NINA" if self.api.kind == "nina" else "on the Alpaca server"
+        if self.api.kind == "alpaca":
+            for note in self.api.connect():
+                dlog(f"Alpaca connect: {note}")
+            if not os.path.isdir(self.image_folder or ""):
+                try:
+                    os.makedirs(self.image_folder or default_capture_dir(), exist_ok=True)
+                except OSError as e:
+                    raise NinaApiError(f"the folder for the images cannot be created ({e})")
+        if self.open_flat:
+            self._flat_cover(False, must=True)
+        elif self.api.flat_state() == "closed":
+            self.emit("log", msg="Warning: the flat panel cover is closed – it blocks the sky. "
+                                 "Use 'Open flat panel' (under Safety and Peripherals) if the frames come out dark.")
         m = self.api.mount()
         if not m.get("Connected"):
-            raise NinaApiError("the mount is not connected in NINA")
+            raise NinaApiError(f"the mount is not connected {via}")
+        if m.get("SiteLatitude") is None or m.get("SiteLongitude") is None:
+            raise NinaApiError("the mount does not report the site latitude/longitude – set them in its driver")
         if m.get("AtPark"):
             if not self.unpark:
-                raise NinaApiError("the mount is parked (enable 'Unpark at start' or unpark it in NINA)")
+                raise NinaApiError("the mount is parked (enable 'Unpark at start' or unpark it yourself)")
             self.emit("log", msg="Unparking the mount…")
-            self.api.get("/equipment/mount/unpark", timeout=120)
+            self.api.unpark()
             self._wait_until(lambda: not self.api.mount().get("AtPark"), 120, "unpark")
         # Tracking is not needed: exposures are milliseconds long and every slew is aimed at where
         # the target is at that moment. So the tracking command (which some drivers, e.g. the ZWO
@@ -1148,12 +1837,222 @@ class CaptureRunner:
         dlog(f"tracking at start: {m.get('TrackingEnabled')}")
         self._tracking_info_shown = False
         if not self.api.camera().get("Connected"):
-            raise NinaApiError("the camera is not connected in NINA")
+            raise NinaApiError(f"the camera is not connected {via}")
         if any(r is not None for r in self.rot) and not self.api.rotator().get("Connected"):
-            raise NinaApiError("the plan uses the rotator, but no rotator is connected in NINA")
-        if self.binning:
-            self.api.get("/equipment/camera/set-binning", binning=f"{int(self.binning)}x{int(self.binning)}")
+            raise NinaApiError(f"the plan uses the rotator, but no rotator is connected {via}")
+        self.api.prepare_camera(self.binning, self.gain, lambda msg: self.emit("log", msg=msg))
         return m
+
+    def _sun_guard(self, lat, lon):
+        """While the mount moves: stop at once if it comes much closer to the Sun than planned
+        (the real path of a mount can differ from the estimate), or if it cannot be reached."""
+        if time.time() - getattr(self, "_guard_t", 0) < 1.0:
+            return
+        self._guard_t = time.time()
+        sun = sun_altaz(time.time(), lat, lon)
+        if sun[0] < -2.0:
+            return
+        m = self.api.mount()
+        if m.get("RightAscension") is None:
+            return
+        ha = (float(m["SiderealTime"]) * 15.0 - float(m["RightAscension"]) * 15.0 + 180) % 360 - 180
+        alt, az = hadec_to_altaz(ha, float(m["Declination"]), lat)
+        sep = angular_sep(alt, az, sun[0], sun[1])
+        if sep < 0.6 * self.sun_min:
+            raise NinaApiError(f"the mount came within {sep:.0f}° of the Sun during the slew "
+                               f"(limit {self.sun_min:.0f}°) – movement stopped")
+
+    def _slew(self, alt, az, lat, lon, lst):
+        """One slew, in a background thread, while this thread watches for PAUSE / Stop and the Sun."""
+        box = {}
+
+        def do_slew():
+            try:
+                box["r"] = self.api.slew_altaz(alt, az, lat, lst, self.slew_timeout + 15)
+            except NinaApiError as e:
+                # some drivers only slew while tracking: switch it on (its answer may say "failed"
+                # even when it works) and try the slew once more
+                try:
+                    if not self.api.mount().get("TrackingEnabled", True) and not self._stop.is_set() \
+                            and not self._pause.is_set():
+                        dlog(f"slew refused ({e}) while not tracking: switching tracking on, retrying once")
+                        try:
+                            self.api.set_tracking(True); self._tracking_switched = True
+                        except NinaApiError as e2:
+                            dlog(f"tracking command answered: {e2}")
+                        time.sleep(1.0)
+                        box["r"] = self.api.slew_altaz(alt, az, lat, float(self.api.mount()["SiderealTime"]),
+                                                       self.slew_timeout + 15)
+                        return
+                except NinaApiError as e3:
+                    e = e3
+                box["e"] = e
+        th = threading.Thread(target=do_slew, daemon=True); th.start()
+
+        def over():
+            if th.is_alive():
+                self._sun_guard(lat, lon)
+                return False
+            return True
+        self._wait_until(over, self.slew_timeout + 20, "the slew")
+        self._check()                                   # a pause stops the slew: not an arrival
+        if "e" in box:
+            raise box["e"]
+
+    def set_camera(self, exposure=None, gain=None, binning=None, settle=None):
+        """Change the camera settings while the run goes on: used from the next frame (the gain and binning are
+        sent to the camera before it). Returns a list describing what changed."""
+        ch = []
+        if exposure is not None and exposure != self.exposure:
+            ch.append(f"exposure {self.exposure:g} → {exposure:g} s"); self.exposure = exposure
+        if gain != self.gain and not (gain is None and self.gain is None):
+            ch.append(f"gain {'as set' if self.gain is None else self.gain} → {'as set' if gain is None else gain}")
+            self.gain = gain; self._cam_dirty = True
+        if binning is not None and binning != self.binning:
+            ch.append(f"binning {self.binning} → {binning}"); self.binning = binning; self._cam_dirty = True
+        if settle is not None and settle != self.settle:
+            ch.append(f"settle {self.settle:g} → {settle:g} s"); self.settle = settle
+        if ch:
+            dlog("camera settings changed during the run: " + "; ".join(ch))
+        return ch
+
+    def _flat_cover(self, closed, must):
+        """Open or close the flat panel's cover and wait until it is there. At the start (`must`) a failure
+        stops the run; at the end it is only logged."""
+        want = "closed" if closed else "open"; word = "Closing" if closed else "Opening"
+        st = self.api.flat_state()
+        if st is None:
+            if must:
+                raise NinaApiError(f"cannot {'close' if closed else 'open'} the flat panel: none is connected "
+                                   f"{'in NINA' if self.api.kind == 'nina' else '(choose it as Flat panel)'}")
+            self.emit("log", msg=f"Flat panel not closed: none is connected."); return
+        if st == want:
+            self.emit("log", msg=f"The flat panel cover is already {want}."); return
+        self.emit("log", msg=f"{word} the flat panel…")
+        try:
+            self.api.flat_cover(closed)
+            end = time.time() + 90
+            while st != want and time.time() < end:
+                self._check(); time.sleep(1.0); st = self.api.flat_state()
+        except NinaApiError as e:
+            if must:
+                raise NinaApiError(f"the flat panel cover could not be {want}: {e}")
+            self.emit("log", msg=f"Flat panel cover not closed: {e}"); return
+        if st != want:
+            msg = f"the flat panel cover is {st}, not {want}"
+            if must:
+                raise NinaApiError(msg)
+            self.emit("log", msg=f"Flat panel: {msg}.")
+        else:
+            self.emit("log", msg=f"The flat panel cover is {want}.")
+
+    def _rotate_checked(self, tgt):
+        """Alpaca rotator: move, wait until it stops, and check where it ended up. Rotator drivers differ in
+        what the 'move to a mechanical angle' call does, so a wrong end position switches to the next
+        method (at most once through each) instead of waiting for an angle that never comes."""
+        api = self.api
+        tries = len(api.ROT_MODES); tried = []
+        for attempt in range(tries):
+            start = api.rotator().get("MechanicalPosition")
+            api.rotate(tgt)
+            time.sleep(self.poll)
+            self._wait_until(lambda: not api.rotator().get("IsMoving"), self.rot_timeout, "the rotator")
+            rr = api.rotator(); pos = float(rr.get("MechanicalPosition", 0))
+            if abs((pos - tgt + 180) % 360 - 180) <= max(self.rot_tol, 1.0):
+                api.confirm_rotator()
+                return
+            used = api.rot_mode; tried.append(used)
+            dlog(f"rotator: asked for {tgt:.2f}° with '{used}' from {start}, ended at {pos:.2f}° "
+                 f"(sky position {api.opt('rotator', 'position')}, offset {api.rot_offset():.2f})")
+            if attempt + 1 >= tries:
+                raise NinaApiError(
+                    f"the rotator ended at {pos:.1f}° instead of {tgt:.1f}° with every move method tried "
+                    f"(started at {start}); check the rotator driver and its limits")
+            nxt = api.next_rot_mode(tried)
+            self.emit("log", msg=f"Rotator: this driver treats the {api.ROT_MODE_TEXT[used].split(' (')[0]} call differently "
+                                 f"(ended at {pos:.1f}° instead of {tgt:.1f}°). Correcting with "
+                                 f"{api.ROT_MODE_TEXT[nxt].split(' (')[0]}; the working method is remembered, so this happens once.")
+
+    def _capture_nina(self, i):
+        """NINA takes the image and saves the FITS with its usual headers (CENTALT, CENTAZ, ROTATOR, …)."""
+        n0 = int(self.api.get("/image-history", count=True) or 0)
+        self.api.get("/equipment/camera/capture", duration=self.exposure, gain=self.gain, save=True,
+                     imageType="LIGHT", targetName=self.target, omitImage=True, skipAutoStretch=True)
+
+        def captured():
+            try:
+                return self.api.get("/equipment/camera/capture", getResult=True, omitImage=True) \
+                    != "Capture already in progress"
+            except NinaApiError:
+                return False
+        self._wait_until(captured, self.exposure + 120, "the exposure and download")
+        # NINA saves in the background and the file can take a while to appear: look briefly,
+        # then move on; the folder scan (match_late_files) picks the file up when it arrives
+        name = None
+        end = time.time() + self.save_wait
+        while time.time() < end:
+            self._check()
+            if int(self.api.get("/image-history", count=True) or 0) > n0:
+                h = self.api.get("/image-history", index=n0)
+                entry = h[0] if isinstance(h, list) and h else (h if isinstance(h, dict) else {})
+                name = entry.get("Filename"); break
+            time.sleep(self.poll)
+        path = self._locate(name)
+        dlog(f"frame {i + 1}: NINA file name {name!r}, found in the image folder: {path!r}")
+        return name, path
+
+    def _capture_alpaca(self, i, lat, lon):
+        """Take the image through Alpaca, download it and save it here as FITS, with the headers
+        the Build tab reads (the same ones NINA writes)."""
+        api = self.api
+        m = api.mount()                                   # where the mount points for this frame
+        rot = api.rotator() if self.rot[i] is not None else {}
+        t_utc = time.time()
+        dur = api.start_exposure(self.exposure)
+        self._wait_until(api.image_ready, dur + 120, "the exposure")
+        self._check()
+        img = api.download_image()
+        self._check()
+        cam = api.cam
+        b = int(cam.get("bin") or 1)
+        pix = cam.get("pixel") or api.pixel_um
+        if not pix or not api.focal_mm:
+            raise NinaApiError("pixel size or focal length unknown – fill them in on the Plan tab")
+        gm = time.gmtime(t_utc); lt = time.localtime(t_utc); frac = f"{t_utc % 1:.3f}"[1:]
+        cards = [
+            ("IMAGETYP", "LIGHT", "type of exposure"), ("EXPOSURE", float(dur), "[s] exposure time"),
+            ("EXPTIME", float(dur), "[s] exposure time"),
+            ("DATE-OBS", time.strftime("%Y-%m-%dT%H:%M:%S", gm) + frac, "start of exposure, UTC"),
+            ("DATE-LOC", time.strftime("%Y-%m-%dT%H:%M:%S", lt) + frac, "start of exposure, local time"),
+            ("XBINNING", b, ""), ("YBINNING", b, ""),
+            ("GAIN", cam.get("gain") if isinstance(cam.get("gain"), (int, float)) else None, "camera gain"),
+            ("XPIXSZ", float(pix) * b, "[um] pixel size, binned"), ("YPIXSZ", float(pix) * b, "[um] pixel size, binned"),
+            ("INSTRUME", cam.get("name") or "Alpaca camera", "camera"),
+            ("FOCALLEN", float(api.focal_mm), "[mm] focal length (Plan tab)"),
+            ("RA", float(m["RightAscension"]) * 15.0, "[deg] mount RA, of date"),
+            ("DEC", float(m["Declination"]), "[deg] mount declination, of date"),
+            ("CENTALT", float(m["Altitude"]), "[deg] altitude of the mount"),
+            ("CENTAZ", float(m["Azimuth"]), "[deg] azimuth of the mount"),
+            ("PIERSIDE", {"pierEast": "East", "pierWest": "West"}.get(m.get("SideOfPier"), "Unknown"), "side of pier"),
+            ("SITELAT", float(lat), "[deg] site latitude"), ("SITELONG", float(lon), "[deg] site longitude"),
+            ("ROTATOR", float(rot["MechanicalPosition"]) if rot.get("Connected") else None, "[deg] mechanical rotator angle"),
+            ("ROTATANG", float(rot["MechanicalPosition"]) if rot.get("Connected") else None, "[deg] mechanical rotator angle"),
+            ("OBJECT", self.target, "target name"),
+            ("BAYERPAT", api.bayer_pattern(), "Bayer colour pattern"),
+            ("ROWORDER", "TOP-DOWN", "row 0 is the top of the sensor"),
+            ("HMFRAME", i + 1, "frame number in the Horizon Mapper plan"),
+            ("SWCREATE", f"{APP_NAME} {APP_VERSION} (Alpaca)", "software"),
+        ]
+        alt, az, _ = self.frames[i]
+        safe = "".join(ch if ch.isalnum() or ch in " -_" else "_" for ch in (self.target or "capture")).strip() or "capture"
+        folder = os.path.join(self.image_folder or default_capture_dir(), time.strftime("%Y-%m-%d", lt))
+        name = f"{safe}_{time.strftime('%Y-%m-%d_%H-%M-%S', lt)}_f{i + 1:04d}_alt{alt:.1f}_az{az:.1f}.fits"
+        try:
+            path = write_fits(os.path.join(folder, name), img, cards)
+        except OSError as e:
+            raise NinaApiError(f"the image could not be saved in {folder} ({e})")
+        dlog(f"frame {i + 1}: saved {path} ({img.shape[1]}x{img.shape[0]})")
+        return name, path
 
     def _frame(self, i, site):
         alt, az, _ = self.frames[i]
@@ -1161,6 +2060,8 @@ class CaptureRunner:
         lat, lon = site
         if alt < self.floor - 1e-6:
             return "skipped", f"below the lowest altitude ({alt:.1f}° < {self.floor:.1f}°)"
+        if alt > self.ceiling + 1e-6:
+            return "skipped", f"above the highest altitude ({alt:.1f}° > {self.ceiling:.1f}°)"
         sep = sun_separation(alt, az, lat, lon)
         if sep < self.sun_min:
             return "skipped", f"too close to the Sun ({sep:.0f}° < {self.sun_min:.0f}°)"
@@ -1179,44 +2080,11 @@ class CaptureRunner:
                     return "skipped", f"the slew there would pass {psep:.0f}° from the Sun (no safe route)"
                 self.emit("log", msg=f"Frame {i + 1}: the direct slew would pass {psep:.0f}° from the Sun – "
                                      f"going via alt {w[0]:.0f}°, az {w[1]:.0f}° first.")
-                wra, wdec = altaz_to_radec_j2000(w[0], w[1], lat, lst_at_slew)
-                self.api.get("/equipment/mount/slew", ra=round(wra, 5), dec=round(wdec, 5),
-                             waitForResult=True, timeout=self.slew_timeout + 15)
-                self._check()
+                self.emit("frame", index=i, status="slewing")
+                self._slew(w[0], w[1], lat, lon, lst_at_slew)
                 m = self.api.mount(); lst_at_slew = float(m["SiderealTime"])
-        ra, dec = altaz_to_radec_j2000(alt, az, lat, lst_at_slew)
         self.emit("frame", index=i, status="slewing")
-        # NINA's own slew handling decides when the slew is over: the request waits for it, in a
-        # background thread, while this thread keeps checking for PAUSE / Stop (which stop the slew).
-        box = {}
-
-        def do_slew():
-            try:
-                box["r"] = self.api.get("/equipment/mount/slew", ra=round(ra, 5), dec=round(dec, 5),
-                                        waitForResult=True, timeout=self.slew_timeout + 15)
-            except NinaApiError as e:
-                # some drivers only slew while tracking: switch it on (its answer may say "failed"
-                # even when it works) and try the slew once more
-                try:
-                    if not self.api.mount().get("TrackingEnabled", True) and not self._stop.is_set() \
-                            and not self._pause.is_set():
-                        dlog(f"slew refused ({e}) while not tracking: switching tracking on, retrying once")
-                        try:
-                            self.api.get("/equipment/mount/tracking", mode=0)
-                        except NinaApiError as e2:
-                            dlog(f"tracking command answered: {e2}")
-                        time.sleep(1.0)
-                        box["r"] = self.api.get("/equipment/mount/slew", ra=round(ra, 5), dec=round(dec, 5),
-                                                waitForResult=True, timeout=self.slew_timeout + 15)
-                        return
-                except NinaApiError as e3:
-                    e = e3
-                box["e"] = e
-        th = threading.Thread(target=do_slew, daemon=True); th.start()
-        self._wait_until(lambda: not th.is_alive(), self.slew_timeout + 20, "the slew")
-        self._check()                                   # a pause stops the slew: not an arrival
-        if "e" in box:
-            raise box["e"]
+        self._slew(alt, az, lat, lon, lst_at_slew)
         # some mounts report the end a moment early: wait until it is not slewing and stands still
         last = [None]
 
@@ -1260,42 +2128,29 @@ class CaptureRunner:
             r = self.api.rotator()
             if abs((float(r.get("MechanicalPosition", 0)) - tgt + 180) % 360 - 180) > self.rot_tol:
                 self.emit("frame", index=i, status="rotating")
-                self.api.get("/equipment/rotator/move-mechanical", position=round(tgt, 2))
-                time.sleep(self.poll)
+                if self.api.kind == "alpaca":
+                    self._rotate_checked(tgt)
+                    r = None
+                else:
+                    self.api.rotate(tgt)
+                    time.sleep(self.poll)
 
-                def rot_done():
-                    rr = self.api.rotator()
-                    return (not rr.get("IsMoving")) and \
-                        abs((float(rr.get("MechanicalPosition", 0)) - tgt + 180) % 360 - 180) <= max(self.rot_tol, 1.0)
-                self._wait_until(rot_done, self.rot_timeout, "the rotator")
+                    def rot_done():
+                        rr = self.api.rotator()
+                        return (not rr.get("IsMoving")) and \
+                            abs((float(rr.get("MechanicalPosition", 0)) - tgt + 180) % 360 - 180) <= max(self.rot_tol, 1.0)
+                    self._wait_until(rot_done, self.rot_timeout, "the rotator")
         self._wait(self.settle)
-        # 3 – capture (NINA saves the FITS with its usual headers: CENTALT, CENTAZ, ROTATOR, …)
+        # 3 – capture
+        if self._cam_dirty:                                 # gain / binning changed during the run
+            self._cam_dirty = False
+            self.api.prepare_camera(self.binning, self.gain, lambda msg: self.emit("log", msg=msg))
         self.emit("frame", index=i, status="exposing")
-        n0 = int(self.api.get("/image-history", count=True) or 0)
-        self.api.get("/equipment/camera/capture", duration=self.exposure, gain=self.gain, save=True,
-                     imageType="LIGHT", targetName=self.target, omitImage=True, skipAutoStretch=True)
-
-        def captured():
-            try:
-                return self.api.get("/equipment/camera/capture", getResult=True, omitImage=True) \
-                    != "Capture already in progress"
-            except NinaApiError:
-                return False
-        self._wait_until(captured, self.exposure + 120, "the exposure and download")
-        # 4 – NINA saves in the background and the file can take a while to appear: look briefly,
-        #     then move on; the folder scan (match_late_files) picks the file up when it arrives
-        name = None
-        end = time.time() + self.save_wait
-        while time.time() < end:
-            self._check()
-            if int(self.api.get("/image-history", count=True) or 0) > n0:
-                h = self.api.get("/image-history", index=n0)
-                entry = h[0] if isinstance(h, list) and h else (h if isinstance(h, dict) else {})
-                name = entry.get("Filename"); break
-            time.sleep(self.poll)
+        if self.api.kind == "alpaca":
+            name, path = self._capture_alpaca(i, lat, lon)
+        else:
+            name, path = self._capture_nina(i)
         self.names[i] = name
-        path = self._locate(name)
-        dlog(f"frame {i + 1}: NINA file name {name!r}, found in the image folder: {path!r}")
         return "done", path
 
     def _run(self):
@@ -1350,9 +2205,20 @@ class CaptureRunner:
         stopped = self._stop.is_set()
         if self.park and not stopped:
             try:
-                self.emit("log", msg="Parking the mount…"); self.api.get("/equipment/mount/park", timeout=10)
+                self.emit("log", msg="Parking the mount…"); self.api.park()
             except NinaApiError as e:
                 self.emit("log", msg=f"Park failed: {e}")
+        if self.close_flat and not stopped:
+            try:
+                self._flat_cover(True, must=False)
+            except Exception as e:
+                self.emit("log", msg=f"Flat panel not closed: {e}")
+        elif self._tracking_switched and self.api.kind == "alpaca":
+            try:                                        # leave the mount as it was found: not tracking
+                self.api.set_tracking(False)
+                self.emit("log", msg="Tracking, switched on for the slews, is off again.")
+            except NinaApiError as e:
+                self.emit("log", msg=f"Tracking is still on (it was switched on for the slews): {e}")
         self._set_state("stopped" if stopped else "done")
         self.emit("done", ok=not stopped)
 
@@ -1504,6 +2370,15 @@ def match_late_files(folder, frames, waiting, names=None, since=0.0, seen=None, 
 CAPTURE_FILE_VERSION = 1
 
 
+def capture_file_name(target, status, when=None):
+    """Default name for a saved capture: '<target> <date time>_completed.hmcap.json' when every frame is
+    taken, '..._partial.hmcap.json' otherwise (frames still to shoot, skipped or with an error)."""
+    done = bool(status) and all(x == "done" for x in status)
+    base = (target or "").strip() or "capture"
+    base = re.sub(r'[<>:"/\\|?*]+', "_", base)
+    return f"{base} {time.strftime('%Y-%m-%d %H%M', when or time.localtime())}{'_completed' if done else '_partial'}.hmcap.json"
+
+
 def save_capture_file(path, frames, status, paths, names, fw, fh, source="", settings=None,
                       horizon_files=None):
     """Save a capture's progress (frames, each frame's state, file paths and names, settings) as JSON,
@@ -1539,6 +2414,127 @@ def load_capture_file(path):
     return dict(frames=frames, status=status, paths=paths, names=names, fw=float(d["fw"]), fh=float(d["fh"]),
                 source=d.get("source", ""), settings=d.get("settings", {}),
                 horizon_files=d.get("horizon_files", []), missing=missing, saved=d.get("saved", ""))
+
+
+ROUTE_SEC = dict(per_deg=0.45, rot_move=2.0, rot_per_deg=0.6, flip=60.0, frame=9.4)   # measured on real runs
+
+
+def _sky_sep_matrix(alt, az):
+    a = np.radians(np.asarray(alt, float)); z = np.radians(np.asarray(az, float))
+    c = np.sin(a)[:, None] * np.sin(a)[None, :] + np.cos(a)[:, None] * np.cos(a)[None, :] * np.cos(z[:, None] - z[None, :])
+    return np.degrees(np.arccos(np.clip(c, -1.0, 1.0)))
+
+
+def route_seconds(frames, order, ideal=None, tol=3.0, start=None):
+    """Rough time (s) of shooting `order`: per frame, slew distance, rotator moves (those larger than `tol`
+    from the angle it stands at) and one meridian flip for every crossing of azimuth 180° (the mount turns
+    over). Measured: about 9.4 s per frame, 0.45 s per degree, 60 s per flip. Returns (seconds, slews
+    longer than 10°, flips, rotator moves, total degrees slewed)."""
+    R = ROUTE_SEC; t = 0.0; far = flips = rots = 0; deg = 0.0
+    prev = start; cur = None
+    for i in order:
+        alt, az = frames[i][0], frames[i][1]
+        if prev is not None:
+            d = float(_sky_sep_matrix([prev[0], alt], [prev[1], az])[0, 1]); deg += d; t += R["per_deg"] * d
+            far += d > 10.0
+            if (prev[1] % 360 < 180) != (az % 360 < 180):
+                flips += 1; t += R["flip"]
+        if ideal is not None:
+            a = ideal[i] % 180.0
+            if cur is None or min(abs(a - cur), 180 - abs(a - cur)) > tol:
+                if cur is not None:
+                    t += R["rot_move"] + R["rot_per_deg"] * min(abs(a - cur), 180 - abs(a - cur))
+                rots += 1; cur = a
+        t += R["frame"]; prev = (alt, az)
+    return t, far, flips, rots, deg
+
+
+def optimize_route(frames, order, lat, rot_offset=0.0, rot_sign=1, tol=3.0, start=None, rotator=True):
+    """Shorter order for shooting the frames in `order` (indices into `frames` = [(alt, az, rotator)]).
+
+    Why: the planned order follows the areas, which overlap and interleave, so the mount zig-zags between
+    them, crosses the meridian again and again (each flip costs about a minute) and the rotator is turned
+    back and forth. Here the frames of the east half (azimuth < 180°) are shot first, then the west half
+    (or the other way round, as in the plan): one flip only. Inside a half the path is shortened by a
+    nearest-neighbour walk and 2-opt, with a cost made of slew distance and rotator moves.
+
+    Returns (new_order, new_rot, ideal) where ideal[i] is the ideal angle (mod 180, None if unknown) and new_rot[i] is the rotator angle the frame has to be shot with
+    (None = the rotator stays where it is). The rotator angles are the ideal ones from the frame
+    position, using the Plan tab's offset and direction when they reproduce the angles the planned frames
+    already have (else the planned angles are carried on)."""
+    order = list(order)
+    if len(order) < 3:
+        return order, {i: frames[i][2] for i in order}, None
+    alt = np.array([frames[i][0] for i in order], float); az = np.array([frames[i][1] for i in order], float)
+    # ideal rotator angle (mod 180: a rectangular frame turned by 180° covers the same sky)
+    ideal = None
+    if rotator:
+        ex = [(i, frames[i][2]) for i in range(len(frames)) if frames[i][2] is not None]
+        for extra in (0.0, 90.0):
+            f = lambda i: (rot_sign * (parallactic_angle(frames[i][0], frames[i][1], lat) + extra - rot_offset)) % 180.0
+            if ex and all(abs((r % 180.0 - f(i) + 90.0) % 180.0 - 90.0) < 1.0 for i, r in ex):
+                ideal = np.array([f(i) for i in order]); break
+        if ideal is None:                                  # unknown rule: carry the planned angles on
+            cur = None; carried = {}
+            for i in range(len(frames)):
+                if frames[i][2] is not None:
+                    cur = frames[i][2]
+                carried[i] = cur
+            if all(carried.get(i) is not None for i in order):
+                ideal = np.array([carried[i] % 180.0 for i in order]); tol = tol / 2.0
+    R = ROUTE_SEC
+    D = _sky_sep_matrix(alt, az)
+    C = R["per_deg"] * D
+    if ideal is not None:
+        dr = np.abs(ideal[:, None] - ideal[None, :]); dr = np.minimum(dr, 180.0 - dr)
+        C = C + np.where(dr > tol, R["rot_move"] + R["rot_per_deg"] * dr, 0.0)
+    east = az % 360 < 180
+    first_side = bool(east[0])
+    groups = [np.flatnonzero(east == first_side), np.flatnonzero(east != first_side)]
+    out = []; prev = None
+    for g in groups:
+        if len(g) == 0:
+            continue
+        sub = C[np.ix_(g, g)]
+        if prev is not None:
+            st = int(np.argmin(C[prev, g]))
+        elif start is not None:
+            st = int(np.argmin(_sky_sep_matrix([start[0]] + list(alt[g]), [start[1]] + list(az[g]))[0, 1:]))
+        else:
+            st = 0
+        n = len(g); left = np.ones(n, bool); path = [st]; left[st] = False
+        for _ in range(n - 1):                              # nearest neighbour
+            c = np.where(left, sub[path[-1]], np.inf); j = int(np.argmin(c)); path.append(j); left[j] = False
+        path = np.array(path)
+        for _ in range(60):                                 # 2-opt (open path, start fixed)
+            improved = False
+            for a in range(0, n - 2):
+                pa, pb = path[a], path[a + 1]
+                pc = path[a + 2:]; pd = np.append(path[a + 3:], -1)
+                old = sub[pa, pb] + np.where(pd >= 0, sub[pc, np.maximum(pd, 0)], 0.0)
+                new = sub[pa, pc] + np.where(pd >= 0, sub[pb, np.maximum(pd, 0)], 0.0)
+                gain = old - new
+                k = int(np.argmax(gain))
+                if gain[k] > 1e-6:
+                    b = a + 1; e = a + 2 + k
+                    path[b:e + 1] = path[b:e + 1][::-1]; improved = True
+            if not improved:
+                break
+        out.extend(int(g[j]) for j in path); prev = g[path[-1]]
+    new_order = [order[j] for j in out]
+    # rotator angles for the new order
+    new_rot = {}; cur = None
+    for k, i in enumerate(new_order):
+        if ideal is None or not rotator:
+            new_rot[i] = frames[i][2]; continue
+        a = float(ideal[out[k]])
+        cands = [a, a + 180.0]
+        tgt = min(cands) if cur is None else min(cands, key=lambda c: abs(c - cur))
+        if cur is None or abs(tgt - cur) > tol:
+            new_rot[i] = tgt; cur = tgt
+        else:
+            new_rot[i] = None
+    return new_order, new_rot, (None if ideal is None else {i: float(ideal[k]) for k, i in enumerate(order)})
 
 
 def frames_to_shoot(status, first=1, last=None, reshoot=False):
@@ -2042,20 +3038,29 @@ def render_mosaic(mos, lines=(), scale=2, legend=True):
 # =============================================================================
 
 def run_gui(selftest=False):
+    _marks = [("run_gui entered", time.time())]
     import types
     import tkinter as _tk_mod
-    from tkinter import ttk as _ttk_mod, filedialog, messagebox
+    _marks.append(("import tkinter", time.time()))
+    from tkinter import ttk as _ttk_mod
+    _marks.append(("import tkinter.ttk", time.time()))
+    from tkinter import filedialog, messagebox
+    _marks.append(("import tkinter.filedialog and messagebox", time.time()))
     # Private copies of the tkinter / ttk namespaces: the hover and click-logging wrappers below
     # replace classes here only. Never patch the tkinter modules themselves – ttk builds Combobox
     # and Spinbox on ttk.Entry internally, and a patched Entry breaks them.
     tk = types.SimpleNamespace(**{k: getattr(_tk_mod, k) for k in dir(_tk_mod) if not k.startswith("__")})
     ttk = types.SimpleNamespace(**{k: getattr(_ttk_mod, k) for k in dir(_ttk_mod) if not k.startswith("__")})
+    _marks.append(("tkinter imported", time.time()))
     try:
         from PIL import ImageTk
     except ImportError:
         ImageTk = None
+    _marks.append(("PIL.ImageTk imported", time.time()))
 
     debug_enable(load_settings().get("debug_log", DEV_MODE))   # default: on during development
+    for _n, _t in _marks:
+        dlog(f"startup: {_t - _T0:.1f} s – {_n}")
 
     # hover explanations: shown after a short pause over any setting, choice or button
     _selftest_hovers = []
@@ -2320,11 +3325,17 @@ def run_gui(selftest=False):
         return e
 
     # ------------------------------------------------------------------ PLAN
+    dlog(f"startup: {time.time() - _T0:.1f} s – window created, building the Plan tab")
     plan_tab = ttk.Frame(nb); nb.add(plan_tab, text="1. Plan sequence")
-    cap_tab = ttk.Frame(nb); nb.add(cap_tab, text="2. Capture (NINA)")      # filled in below
+    cap_tab = ttk.Frame(nb); nb.add(cap_tab, text="2. Capture")      # filled in below
     left, plan_fixed = topbar(plan_tab)
     right = ttk.Frame(plan_tab); right.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     P = PlanParams()
+    _site = load_settings()
+    try:
+        P.lat = float(_site["site_lat"])               # saved site (settings.json), default for the whole app
+    except Exception:
+        pass
     V = {}
     current_hz = tk.StringVar(value="")   # shared: Plan tab horizon file -> Build tab comparison
 
@@ -2580,7 +3591,10 @@ def run_gui(selftest=False):
     show_order = tk.BooleanVar(value=True)
     ttk.Checkbutton(btns, text="Show shooting order", variable=show_order,
                     command=lambda: draw_plan()).pack(side="top", anchor="w", padx=4, pady=2)
-    sun_lon = tk.StringVar(value="25.0")
+    try:
+        sun_lon = tk.StringVar(value=str(float(_site["site_lon"])))
+    except Exception:
+        sun_lon = tk.StringVar(value="25.0")
     sb = ttk.Frame(btns); sb.pack(side="top", fill="x", pady=2)
     ttk.Label(sb, text="Longitude (°E)").pack(side="left", padx=4)
     ttk.Entry(sb, textvariable=sun_lon, width=8).pack(side="left")
@@ -2603,6 +3617,30 @@ def run_gui(selftest=False):
         state["sun_job"] = root.after(400, draw_plan)        # wait until typing pauses
     for _v in (sun_start, sun_keep, sun_lon, sun_date):
         _v.trace_add("write", sun_fields_changed)
+
+    def site_changed(*_):
+        """Latitude / longitude edited (or read from a FITS file): remember them in settings.json."""
+        if state.get("site_job"):
+            try:
+                root.after_cancel(state["site_job"])
+            except Exception:
+                pass
+        def store():
+            try:
+                la = float(V["lat"].get()); lo = float(sun_lon.get())
+            except Exception:
+                return                                  # half-typed value: wait for a valid one
+            if -90 <= la <= 90 and -180 <= lo <= 360:
+                st = load_settings()
+                if st.get("site_lat") != la or st.get("site_lon") != lo:
+                    save_settings(site_lat=la, site_lon=lo)
+        state["site_job"] = root.after(600, store)
+    V["lat"].trace_add("write", site_changed); sun_lon.trace_add("write", site_changed)
+    if "site_lat" not in _site or "site_lon" not in _site:
+        try:
+            save_settings(site_lat=float(V["lat"].get()), site_lon=float(sun_lon.get()))
+        except Exception:
+            pass
 
     def plan_start_time():
         """Planned start in local time: 'Start date' (blank = today) at 'Start time' (blank = now)."""
@@ -2646,6 +3684,7 @@ def run_gui(selftest=False):
     update_fov()
 
     # ------------------------------------------------------------------ PROCESS
+    dlog(f"startup: {time.time() - _T0:.1f} s – Plan and Capture tabs built, building the Build tab")
     proc = ttk.Frame(nb); nb.add(proc, text="3. Build horizon")
     pl, build_fixed = topbar(proc)
     pr = ttk.Frame(proc); pr.pack(side="top", fill="both", expand=True, padx=6, pady=6)
@@ -3022,6 +4061,23 @@ def run_gui(selftest=False):
         messagebox.showinfo(APP_NAME, f"Saved the {which} horizon:\n{f}\n\n"
                                       "In NINA: Options → General → Astrometry → Horizon.")
 
+    def save_stellarium():
+        if E["solid"] is None:
+            messagebox.showerror(APP_NAME, "Build the horizon first."); return
+        which = save_which.get()
+        az, s_, b_ = final_lines()
+        vals = b_ if which == "with branches" else s_
+        name = time.strftime("horizon_mapper_%Y-%m-%d") + ("_with_branches" if which == "with branches" else "") + ".zip"
+        f = filedialog.asksaveasfilename(title="Save Stellarium landscape", defaultextension=".zip", initialfile=name,
+                                         filetypes=[("Stellarium landscape (ZIP)", "*.zip"), ("All", "*.*")])
+        if not f:
+            return
+        lid = write_stellarium_landscape(f, az, vals, which, mos=result.get("mos"))
+        dlog(f"stellarium landscape saved: {f} ({lid})")
+        messagebox.showinfo(APP_NAME, f"Saved the {which} horizon as a Stellarium landscape:\n{f}\n\n"
+                                      "In Stellarium: Sky and viewing options (F4) → Landscape → Add/remove "
+                                      "landscapes → Install a new landscape from a ZIP archive.")
+
     def import_capture():
         """Bring a capture to this tab: its file list (as a folder entry), the rotator offset and the
         current horizon; then offer to build. Source: the Capture tab's capture, or a saved one."""
@@ -3198,6 +4254,7 @@ def run_gui(selftest=False):
                  hover="Which line to save: 'solid' (buildings, trunks, dense trees) or 'with branches' (also thin branches).",
                  state="readonly").pack(side="top", anchor="w", padx=4, pady=2)
     ttk.Button(hz_box, text="Save horizon file…", command=save_outputs).pack(side="top", fill="x", padx=4, pady=2)
+    ttk.Button(hz_box, text="Save Stellarium landscape…", command=save_stellarium).pack(side="top", fill="x", padx=4, pady=2)
 
     def poll():
         try:
@@ -3238,9 +4295,28 @@ def run_gui(selftest=False):
     def cvar(n, v, kind=tk.StringVar):
         cv_[n] = kind(value=v); return cv_[n]
 
-    g = group(cbar, "NINA – Advanced API plugin")
-    labeled(g, 0, "Host", cvar("host", "192.168.0.10" if DEV_MODE else "localhost"), width=12)   # DEV_MODE: test rig
-    labeled(g, 1, "Port", cvar("port", "1888"), width=12)
+    _st = load_settings()
+    g = group(cbar, "Connect through")
+    cvar("method", _st.get("cap_method", "nina") if _st.get("cap_method") in ("nina", "alpaca") else "nina")
+    mrow = ttk.Frame(g); mrow.grid(row=0, column=0, columnspan=3, sticky="w")
+    method_widgets = [ttk.Radiobutton(mrow, text="NINA", variable=cv_["method"], value="nina"),
+                      ttk.Radiobutton(mrow, text="Alpaca (without NINA)", variable=cv_["method"], value="alpaca")]
+    for w_ in method_widgets:
+        w_.pack(side="left", padx=4)
+    nina_box = ttk.Frame(g); nina_box.grid(row=1, column=0, columnspan=3, sticky="w")
+    labeled(nina_box, 0, "Host", cvar("host", "localhost"), width=12)
+    labeled(nina_box, 1, "Port", cvar("port", "1888"), width=12)
+    alp_box = ttk.Frame(g); alp_box.grid(row=1, column=0, columnspan=3, sticky="w")
+    labeled(alp_box, 0, "Alpaca host", cvar("ahost", _st.get("alpaca_host") or ("localhost")), width=14)
+    ttk.Button(alp_box, text="Find", width=5, command=lambda: cap_discover()).grid(row=0, column=2, sticky="w")
+    labeled(alp_box, 1, "Alpaca port", cvar("aport", str(_st.get("alpaca_port") or "11111")), width=14)
+    alp_combo = {}
+    for r_, (key_, lab_) in enumerate((("atel", "Mount"), ("acam", "Camera"), ("arot", "Rotator"),
+                                       ("aflat", "Flat panel")), start=2):
+        ttk.Label(alp_box, text=lab_).grid(row=r_, column=0, sticky="w", padx=4, pady=1)
+        alp_combo[key_] = ttk.Combobox(alp_box, textvariable=cvar(key_, str(_st.get("alpaca_" + key_, "none" if key_ == "aflat" else "0"))), width=22,
+                                       values=["0"] + (["none"] if key_ in ("arot", "aflat") else []))
+        alp_combo[key_].grid(row=r_, column=1, columnspan=2, sticky="w", padx=4, pady=1)
     ttk.Button(g, text="Test connection", command=lambda: cap_connect()).grid(row=2, column=0, columnspan=2,
                                                                           sticky="w", padx=4, pady=2)
     conn_lbl = ttk.Label(g, text="Not connected", foreground="#666", wraplength=260, justify="left")
@@ -3264,43 +4340,141 @@ def run_gui(selftest=False):
     frames_lbl.grid(row=3, column=0, sticky="w", padx=4)
     g = group(cbar, "Capture")
     labeled(g, 0, "Exposure (s)", cvar("exposure", V["exposure"].get()), width=7)
-    labeled(g, 1, "Gain (-1 = NINA default)", cvar("gain", V["gain"].get()), width=7)
+    labeled(g, 1, "Gain (-1 = leave as set)", cvar("gain", V["gain"].get()), width=7)
     labeled(g, 2, "Binning", cvar("binning", V["binning"].get()), width=7)
     labeled(g, 3, "Settle after moves (s)", cvar("settle", "1.0"), width=7)
     for k in ("exposure", "gain", "binning"):          # follow the Plan tab
         V[k].trace_add("write", lambda *a, k=k: cv_[k].set(V[k].get()))
-    g = group(cbar, "Safety")
+
+    cam_after = {}
+
+    def cam_apply():
+        """Camera settings changed while a run is on (also paused): the runner uses them from the next frame."""
+        cam_after.pop("id", None)
+        r = C.get("runner")
+        if r is None or r.state not in ("running", "paused"):
+            return
+        try:
+            ex = float(cv_["exposure"].get()); gain = int(float(cv_["gain"].get()))
+            binning = int(float(cv_["binning"].get())); settle = float(cv_["settle"].get())
+            if ex <= 0 or binning < 1 or settle < 0:
+                raise ValueError
+        except ValueError:
+            return                                          # still typing: wait for a valid value
+        ch = r.set_camera(exposure=ex, gain=(gain if gain >= 0 else None), binning=binning, settle=settle)
+        if ch:
+            clog_add("Camera settings changed during the run (" + ", ".join(ch) + ") – used from the next frame.")
+
+    def cam_changed(*a):
+        if C.get("setting_cam"):
+            return
+        C["cam_user"] = True                                # the user's values win over a sequence file's
+        if cam_after.get("id"):
+            root.after_cancel(cam_after["id"])
+        cam_after["id"] = root.after(800, cam_apply)
+    for k in ("exposure", "gain", "binning", "settle"):
+        cv_[k].trace_add("write", cam_changed)
+    g = group(cbar, "Safety and Peripherals")
     labeled(g, 0, "Keep away from the Sun (°)", cvar("sun", "30"), width=6)
     labeled(g, 1, "Never below altitude (°)", cvar("floor", "10"), width=6)
+    labeled(g, 2, "Never above altitude (°)", cvar("ceil", "90"), width=6)
     cvar("unpark", True, tk.BooleanVar); cvar("park", V["park"].get(), tk.BooleanVar)
-    ttk.Checkbutton(g, text="Unpark at start ", variable=cv_["unpark"]).grid(row=2, column=0, sticky="w", padx=4)
-    ttk.Checkbutton(g, text="Park when finished", variable=cv_["park"]).grid(row=3, column=0, sticky="w", padx=4)
+    ttk.Checkbutton(g, text="Unpark at start ", variable=cv_["unpark"]).grid(row=3, column=0, sticky="w", padx=4)
+    ttk.Checkbutton(g, text="Park when finished", variable=cv_["park"]).grid(row=4, column=0, sticky="w", padx=4)
+    cvar("flat_open", False, tk.BooleanVar); cvar("flat_close", False, tk.BooleanVar)
+    ttk.Checkbutton(g, text="Open flat panel at start", variable=cv_["flat_open"]).grid(row=5, column=0, sticky="w", padx=4)
+    ttk.Checkbutton(g, text="Close flat panel when finished", variable=cv_["flat_close"]).grid(row=6, column=0, sticky="w", padx=4)
+    fp = ttk.Frame(g); fp.grid(row=7, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 0))
+    ttk.Button(fp, text="Open flat panel", command=lambda: flat_cover(False)).pack(side="left")
+    ttk.Button(fp, text="Close flat panel", command=lambda: flat_cover(True)).pack(side="left", padx=4)
+    flat_lbl = ttk.Label(g, text="", foreground="#666", wraplength=230, justify="left")
+    flat_lbl.grid(row=8, column=0, columnspan=3, sticky="w", padx=4)
+    g = group(cbar, "Rotator limit")
+    ROT_RANGES = ("Half turn (180°)", "Quarter turn (90°)", "Full turn (360°)")
+    ttk.Label(g, text="Rotator range").grid(row=0, column=0, sticky="w", padx=4, pady=2)
+    ttk.Combobox(g, textvariable=cvar("rot_range", ROT_RANGES[0]), values=ROT_RANGES, width=16,
+                 state="readonly").grid(row=0, column=1, sticky="w", padx=4, pady=2)
+    labeled(g, 1, "Range starts at (mech °)", cvar("rot_start", "0"), width=6)
+    rot_lbl = ttk.Label(g, text="", foreground="#666", wraplength=230, justify="left")
+    rot_lbl.grid(row=2, column=0, columnspan=3, sticky="w", padx=4)
+
+    def rot_span():
+        """Rotator range chosen: 180 or 90 (degrees), 0 = full turn."""
+        t = cv_["rot_range"].get()
+        return 180 if t.startswith("Half") else 90 if t.startswith("Quarter") else 0
+
+    def rot_note(*a):
+        try:
+            span = rot_span()
+            if span:
+                a0 = float(cv_["rot_start"].get()) % 360
+                rot_lbl.config(text=f"The rotator stays within {a0:g}°–{(a0 + span) % 360:g}° (mechanical); "
+                                    + ("angles outside are shot turned by 180°, which covers the same sky." if span == 180 else
+                                       "angles that 180° turns cannot bring inside go to the nearer end, so some frames are "
+                                       "tilted by up to 45° and the coverage can have gaps."))
+            else:
+                rot_lbl.config(text="The rotator goes to the planned angles.")
+        except ValueError:
+            rot_lbl.config(text="Range starts at: enter an angle.")
+    cv_["rot_range"].trace_add("write", rot_note); cv_["rot_start"].trace_add("write", rot_note); rot_note()
     g = group(cbar, "Range")
     labeled(g, 0, "From frame", cvar("first", "1"), width=6)
     labeled(g, 1, "To frame (blank = last)", cvar("last", ""), width=6)
     cvar("reshoot", False, tk.BooleanVar)
     ttk.Checkbutton(g, text="Re-shoot frames already taken", variable=cv_["reshoot"]).grid(
         row=2, column=0, columnspan=3, sticky="w", padx=4)
-    range_lbl = ttk.Label(g, text="", foreground="#666", wraplength=230); range_lbl.grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
+    cvar("optimise", True, tk.BooleanVar)
+    ttk.Checkbutton(g, text="Optimise route", variable=cv_["optimise"]).grid(
+        row=3, column=0, columnspan=3, sticky="w", padx=4)
+    range_lbl = ttk.Label(g, text="", foreground="#666", wraplength=230); range_lbl.grid(row=4, column=0, columnspan=3, sticky="w", padx=4)
     g = group(cbar, "Files")
     labeled(g, 0, "Target name", cvar("target", "Horizon mapping"), width=18)
-    ttk.Label(g, text="NINA image folder (found automatically)").grid(row=1, column=0, columnspan=3, sticky="w", padx=4)
-    ttk.Entry(g, textvariable=cvar("folder", ""), width=30, hover=TIPS["NINA image folder (found automatically)"]).grid(row=2, column=0, columnspan=2, sticky="w", padx=4)
+    nina_files = ttk.Frame(g); nina_files.grid(row=1, column=0, columnspan=3, sticky="w")
+    ttk.Label(nina_files, text="NINA image folder (found automatically)").grid(row=0, column=0, columnspan=2, sticky="w", padx=4)
+    ttk.Entry(nina_files, textvariable=cvar("folder", ""), width=30, hover=TIPS["NINA image folder (found automatically)"]).grid(row=1, column=0, sticky="w", padx=4)
+    ttk.Button(nina_files, text="…", width=3, hover="Choose NINA's image folder.", command=lambda: cv_["folder"].set(
+        filedialog.askdirectory() or cv_["folder"].get())).grid(row=1, column=1, sticky="w")
+    alp_files = ttk.Frame(g); alp_files.grid(row=1, column=0, columnspan=3, sticky="w")
+    ttk.Label(alp_files, text="Save images in (on this computer)").grid(row=0, column=0, columnspan=2, sticky="w", padx=4)
+    ttk.Entry(alp_files, textvariable=cvar("afolder", _st.get("alpaca_folder") or default_capture_dir()), width=30,
+              hover=TIPS["Save images in (on this computer)"]).grid(row=1, column=0, sticky="w", padx=4)
+    ttk.Button(alp_files, text="…", width=3, hover="Choose the folder on this computer where the images are saved.",
+               command=lambda: cv_["afolder"].set(filedialog.askdirectory() or cv_["afolder"].get())).grid(row=1, column=1, sticky="w")
     cvar("thumbs", True, tk.BooleanVar); cvar("flip", False, tk.BooleanVar)
 
+    def is_alpaca():
+        return cv_["method"].get() == "alpaca"
+
+    def image_folder():
+        """Where this method's images are: NINA's image folder, or the local folder for Alpaca."""
+        return cv_["afolder"].get().strip() if is_alpaca() else cv_["folder"].get()
+
     def folder_changed(*a):
-        C["folder_snap"] = cv_["folder"].get(); C["seen"] = {}
+        C["folder_snap"] = image_folder(); C["seen"] = {}
         r_ = C.get("runner")
         if r_ is not None:                      # the run's own look-up uses the new folder from now on
             r_.image_folder = C["folder_snap"]; r_._dir_hint = None
         dlog(f"image folder set to {C['folder_snap']!r} (exists: {os.path.isdir(C['folder_snap'])})")
-    cv_["folder"].trace_add("write", folder_changed)
+    cv_["folder"].trace_add("write", folder_changed); cv_["afolder"].trace_add("write", folder_changed)
+
+    def method_changed(*a):
+        """Show the chosen method's settings only; the device status starts afresh."""
+        alp = is_alpaca()
+        for box_, on_ in ((nina_box, not alp), (nina_files, not alp), (alp_box, alp), (alp_files, alp)):
+            box_.grid() if on_ else box_.grid_remove()
+        C["poll_gen"] = C.get("poll_gen", 0) + 1; C["polling"] = False; C["api"] = None
+        C.pop("mount_pos", None); C.pop("site", None)
+        try:
+            conn_lbl.config(text="Not connected"); dev_lbl.config(text="Devices: –")
+        except NameError:
+            pass
+        folder_changed()
+        dlog(f"capture method: {cv_['method'].get()}")
+    cv_["method"].trace_add("write", method_changed)
     ttk.Checkbutton(g, text="Show finished frames in the picture", variable=cv_["thumbs"],
                     command=lambda: draw_cap()).grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
     ttk.Checkbutton(g, text="Turn previews 180°", variable=cv_["flip"],
                     command=lambda: cap_rethumb()).grid(row=4, column=0, columnspan=3, sticky="w", padx=4)
-    ttk.Button(g, text="…", width=3, hover="Choose NINA's image folder.", command=lambda: cv_["folder"].set(
-        filedialog.askdirectory() or cv_["folder"].get())).grid(row=2, column=2, sticky="w")
 
     # fixed on the right: run controls (Pause always visible) and the log
     runb = ttk.LabelFrame(cfixed, text="Run"); runb.pack(side="left", fill="y", pady=2)
@@ -3353,6 +4527,7 @@ def run_gui(selftest=False):
 
     cright = ttk.Frame(cmain); cright.pack(side="top", fill="both", expand=True, padx=6, pady=6)
     dev_lbl = ttk.Label(cright, text="Devices: –", font=("Segoe UI", 10)); dev_lbl.pack(anchor="w")
+    method_changed()
     lg = ttk.Frame(cright); lg.pack(anchor="w", fill="x")
     ttk.Label(lg, text="Blue = to do · yellow = in progress · green = done (picture in its slot; light green = file not"
               " arrived yet) · orange = skipped"
@@ -3365,11 +4540,95 @@ def run_gui(selftest=False):
         clog.insert("end", time.strftime("%H:%M:%S ") + m + "\n"); clog.see("end")
 
     def api_now():
-        return NinaApi(cv_["host"].get().strip() or "localhost", int(cv_["port"].get() or 1888), timeout=15)
+        """The device connection for the chosen method (raises ValueError on unusable settings)."""
+        if not is_alpaca():
+            return NinaApi(cv_["host"].get().strip() or "localhost", int(cv_["port"].get() or 1888), timeout=15)
+
+        def num(key, what, none_ok=False):
+            txt = cv_[key].get().strip().split(":")[0].strip().lower()
+            if none_ok and txt in ("", "none", "-"):
+                return None
+            try:
+                return int(txt)
+            except ValueError:
+                raise ValueError(f"Choose the Alpaca {what} (a device number such as 0).")
+
+        def fl(key):
+            try:
+                return float(V[key].get())
+            except ValueError:
+                return None
+        try:
+            port = int(cv_["aport"].get() or 11111)
+        except ValueError:
+            raise ValueError("The Alpaca port must be a number (ASCOM Remote uses 11111).")
+        return AlpacaApi(cv_["ahost"].get().strip() or "localhost", port, telescope=num("atel", "mount"),
+                         camera=num("acam", "camera"), rotator=num("arot", "rotator", True), flat=num("aflat", "flat panel", True), timeout=15,
+                         focal_mm=fl("focal_mm"), pixel_um=fl("pixel_um"))
+
+    def flat_cover(closed):
+        """Close or open the flat panel (in the background; the result goes to the label under the buttons)."""
+        try:
+            api = api_now()
+        except ValueError as e:
+            messagebox.showerror(APP_NAME, str(e)); return
+        if closed and not messagebox.askyesno(
+                APP_NAME, "Close the flat panel cover? Make sure nothing is in its way. A closed cover blocks the sky."):
+            return
+        word = "Closing" if closed else "Opening"
+        flat_lbl.config(text=f"{word} the flat panel…")
+
+        def job():
+            try:
+                api.flat_cover(closed)
+                want = "closed" if closed else "open"
+                end = time.time() + 90; st = api.flat_state()
+                while st not in (want, None) and st != "error" and time.time() < end:
+                    time.sleep(1.0); st = api.flat_state()
+                if st == want or st is None:
+                    C["q"].put(("flat", f"Flat panel cover {want}." if st else f"Flat panel {'closing' if closed else 'opening'} command sent."))
+                else:
+                    C["q"].put(("flat", f"Flat panel cover: {st} (wanted {want})."))
+            except NinaApiError as e:
+                C["q"].put(("flat", f"Flat panel: {e}"))
+        threading.Thread(target=job, daemon=True, name="flat-panel").start()
+
+    def cap_discover():
+        """Look for Alpaca servers on the local network (in the background)."""
+        conn_lbl.config(text="Looking for Alpaca servers on the network…")
+
+        def job():
+            try:
+                C["q"].put(("discovered", alpaca_discover(2.5)))
+            except Exception as e:
+                dlog_exc("Alpaca discovery"); C["q"].put(("discovered", []))
+        threading.Thread(target=job, daemon=True, name="alpaca-discovery").start()
 
     def cap_connect():
-        """Check the plugin, read device states and NINA's image folder (in the background)."""
-        api = api_now()
+        """Check the connection and read the device states (in the background). NINA: also its image
+        folder. Alpaca: list the server's devices and connect the chosen ones."""
+        try:
+            api = api_now()
+        except ValueError as e:
+            messagebox.showerror(APP_NAME, str(e)); return
+        if is_alpaca():
+            listed = C.get("alp_listed") == api.root
+
+            def ajob():
+                try:
+                    devs = api.configured(); ver = api.version()
+                    by = {}
+                    for d_ in devs:
+                        by.setdefault(str(d_.get("DeviceType", "")).lower(), []).append(d_)
+                    # connect only when it is clear which devices are meant
+                    clear = listed or all(len(by.get(t_, [])) <= 1 for t_ in ("telescope", "camera", "rotator", "covercalibrator"))
+                    parts = api.connect() if clear else []
+                    C["q"].put(("connected_alpaca", (api.root, ver, devs, parts, clear)))
+                except NinaApiError as e:
+                    C["q"].put(("conn_error", str(e)))
+            threading.Thread(target=ajob, daemon=True, name="alpaca-connect").start()
+            conn_lbl.config(text="Connecting…")
+            return
 
         def job():
             try:
@@ -3392,19 +4651,25 @@ def run_gui(selftest=False):
 
     def poll_devices():
         """Device status line, every 2 s while connected."""
+        gen = C.get("poll_gen", 0)
+
         def job():
-            while C["polling"]:
+            while C["polling"] and C.get("poll_gen", 0) == gen:
                 api = C["api"]
+                if api is None:
+                    break
                 try:
                     m = api.mount()
+                    if not m.get("Connected", True):
+                        raise NinaApiError("mount not connected")
                     C["mount_pos"] = (float(m.get("Altitude", 0)), float(m.get("Azimuth", 0)))
                     if m.get("SiteLatitude") is not None:
                         C["site"] = (float(m["SiteLatitude"]), float(m["SiteLongitude"]))
                     txt = (f"Mount: alt {m.get('Altitude', 0):.1f}°  az {m.get('Azimuth', 0):.1f}°  "
                                             f"{str(m.get('SideOfPier', '')).replace('pier', 'pier ')}"
                                             f"{'  PARKED' if m.get('AtPark') else ''}{'  slewing' if m.get('Slewing') else ''}")
-                except NinaApiError:
-                    txt = "Mount: ?"
+                except NinaApiError as e:
+                    txt = "Mount: not connected" if "not connected" in str(e) else "Mount: ?"
                 try:
                     r = api.rotator()
                     txt += f"   ·   Rotator: {r.get('MechanicalPosition', 0):.1f}° mech{'  moving' if r.get('IsMoving') else ''}" \
@@ -3415,7 +4680,10 @@ def run_gui(selftest=False):
                     c = api.camera(); txt += f"   ·   Camera: {c.get('CameraState', '?')}" if c.get("Connected") else "   ·   Camera: not connected"
                 except NinaApiError:
                     txt += "   ·   Camera: ?"
-                C["q"].put(("dev", txt)); time.sleep(2.0)
+                if C.get("poll_gen", 0) == gen:
+                    C["q"].put(("dev", txt))
+                rn = C.get("runner")                       # every 2 s during a run, every 5 s otherwise
+                time.sleep(2.0 if rn is not None and rn.state in ("running", "paused") else 5.0)
         if not C["polling"]:
             C["polling"] = True; threading.Thread(target=job, daemon=True).start()
 
@@ -3493,9 +4761,14 @@ def run_gui(selftest=False):
 
     def _cap_loaded(plan, label, p, st, after):
         C["loading"] = False
-        for k in ("exposure", "gain", "binning"):
-            if st.get(k) is not None:
-                cv_[k].set(st[k])
+        if after is None and not C.get("cam_user"):         # the file's camera settings: a suggestion at the first
+            C["setting_cam"] = True                         # load only, never over what the user has set (or at Start)
+            try:
+                for k in ("exposure", "gain", "binning"):
+                    if st.get(k) is not None:
+                        cv_[k].set(st[k])
+            finally:
+                C["setting_cam"] = False
         C["frames"] = list(plan["frames"]); C["plan"] = plan; C["source"] = label; C["params"] = p
         C["status"] = ["pending"] * len(C["frames"]); C["runner"] = None; C["cur"] = None
         n_ = len(C["frames"])
@@ -3568,8 +4841,9 @@ def run_gui(selftest=False):
         cv_[_k].trace_add("write", update_range_label)
 
     def capture_settings():
-        keys = ("host", "port", "exposure", "gain", "binning", "settle", "sun", "floor", "unpark", "park",
-                "target", "folder", "first", "last", "reshoot", "src", "file")
+        keys = ("method", "host", "port", "ahost", "aport", "atel", "acam", "arot", "aflat", "exposure", "gain", "binning",
+                "settle", "sun", "floor", "ceil", "rot_range", "rot_start", "unpark", "park", "flat_open", "flat_close",
+                "target", "folder", "afolder", "first", "last", "reshoot", "optimise", "src", "file")
         return {k: cv_[k].get() for k in keys}
 
     def write_capture(path):
@@ -3595,7 +4869,7 @@ def run_gui(selftest=False):
         d = os.path.join(app_data_dir(), "captures"); os.makedirs(d, exist_ok=True)
         fn = filedialog.asksaveasfilename(
             title="Save current capture", initialdir=d, defaultextension=".hmcap.json",
-            initialfile=time.strftime(f"{cv_['target'].get() or 'capture'} %Y-%m-%d %H%M.hmcap.json"),
+            initialfile=capture_file_name(cv_["target"].get(), progress_lists()[0]),
             filetypes=[("Horizon Mapper capture", "*.hmcap.json"), ("JSON", "*.json")])
         if not fn:
             return
@@ -3721,11 +4995,35 @@ def run_gui(selftest=False):
         start_btn.config(state="disabled" if (running or paused) else "normal")
         busy = running or C.get("loading")
         load_cap_btn.config(state="disabled" if busy else "normal")
-        for w_ in src_widgets:
+        for w_ in src_widgets + method_widgets:
             try:
                 w_.config(state="disabled" if (running or paused) else "normal")
             except Exception:
                 pass
+
+    def optimise_start(order, status, paths, names):
+        """Shorter shooting order: the frames still to shoot swap places among their own slots (the frames
+        already taken stay where they are), so frame numbers, saved files and resuming keep working."""
+        fr = C["frames"]
+        lat_ = (C.get("site") or (float(V["lat"].get()), 0.0))[0]
+        kw = dict(lat=lat_, rot_offset=float(V["rot_offset"].get()), rot_sign=int(float(V["rot_sign"].get())),
+                  tol=float(V["rot_tolerance"].get()), rotator=bool(V["rotator"].get()))
+        new_order, new_rot, ideal = optimize_route(fr, order, start=C.get("mount_pos"), **kw)
+        before = route_seconds(fr, order, ideal, kw["tol"], C.get("mount_pos"))
+        after = route_seconds(fr, new_order, ideal, kw["tol"], C.get("mount_pos"))
+        if after[0] >= before[0] - 20.0:                   # not worth reshuffling
+            return order, "Route: the planned order is already about as short as it gets."
+        slots = sorted(order)
+        nf = list(fr)
+        for slot, src in zip(slots, new_order):
+            nf[slot] = (fr[src][0], fr[src][1], new_rot[src])
+        C["frames"] = nf
+        C["plan"] = dict(C["plan"], frames=nf, grid=rows_of(nf))
+        dlog(f"route optimised: {before[0] / 60:.0f} -> {after[0] / 60:.0f} min, flips {before[2]} -> {after[2]}")
+        return slots, (f"Route optimised: about {max(0, (before[0] - after[0]) / 60):.0f} min shorter "
+                       f"(estimated {before[0] / 60:.0f} → {after[0] / 60:.0f} min; meridian crossings {before[2]} → {after[2]}, "
+                       f"rotator moves {before[3]} → {after[3]}, slews over 10°: {before[1]} → {after[1]}). "
+                       "The frame numbers of the frames still to shoot changed.")
 
     def cap_start():
         if C["runner"] and C["runner"].state in ("running", "paused"):
@@ -3744,15 +5042,58 @@ def run_gui(selftest=False):
         try:
             ex = float(cv_["exposure"].get()); gain = int(float(cv_["gain"].get()))
             binning = int(float(cv_["binning"].get())); settle = float(cv_["settle"].get())
-            sun = float(cv_["sun"].get()); floor_ = float(cv_["floor"].get())
+            sun = float(cv_["sun"].get()); floor_ = float(cv_["floor"].get()); ceil_ = float(cv_["ceil"].get())
+            rot_mode = {180: "half", 90: "quarter", 0: "full"}[rot_span()]; rot_start = float(cv_["rot_start"].get() or 0)
             first, last = range_values()
         except ValueError as e:
-            messagebox.showerror(APP_NAME, f"Check the capture, safety and range values. {e}"); return
+            messagebox.showerror(APP_NAME, f"Check the capture, safety, rotator and range values. {e}"); return
+        try:
+            api = api_now()
+        except ValueError as e:
+            messagebox.showerror(APP_NAME, str(e)); return
+        if is_alpaca():
+            if not api.focal_mm or not api.pixel_um:
+                messagebox.showerror(APP_NAME, "With Alpaca the images are saved by this program, which needs the "
+                                               "pixel size and focal length: fill them in on the Plan tab."); return
+            if not image_folder():
+                cv_["afolder"].set(default_capture_dir())
+            try:
+                os.makedirs(image_folder(), exist_ok=True)
+            except OSError as e:
+                messagebox.showerror(APP_NAME, f"The folder for the images cannot be used:\n{image_folder()}\n{e}"); return
+            save_settings(cap_method="alpaca", alpaca_host=cv_["ahost"].get(), alpaca_port=cv_["aport"].get(),
+                          alpaca_folder=cv_["afolder"].get(), alpaca_atel=cv_["atel"].get(),
+                          alpaca_acam=cv_["acam"].get(), alpaca_arot=cv_["arot"].get(),
+                          alpaca_aflat=cv_["aflat"].get())
+        else:
+            save_settings(cap_method="nina")
         status, paths, names = progress_lists()
-        order = frames_to_shoot(status, first, last, cv_["reshoot"].get())
+        reshoot = cv_["reshoot"].get()
+        if not reshoot and first > 1 and status[first - 1] == "done":
+            n_taken = sum(1 for i in range(first - 1, last) if status[i] == "done")
+            ans = messagebox.askyesnocancel(
+                APP_NAME, f"Frame {first} (the 'From frame') is already taken, and so are {n_taken} frames of "
+                          f"{first}–{last}.\n\nYes = shoot frames {first}–{last} again, also the ones already taken "
+                          f"(frames before {first} stay as they are)\nNo = shoot only the frames of this range that "
+                          "are not taken yet\nCancel = don't start", icon="question")
+            if ans is None:
+                return
+            reshoot = bool(ans)
+        order = frames_to_shoot(status, first, last, reshoot)
         if not order:
             messagebox.showinfo(APP_NAME, f"Frames {first}–{last} are all taken already.\n"
                                           "Tick 'Re-shoot frames already taken' to shoot them again."); return
+        route_note = ""
+        if cv_["optimise"].get() and len(order) > 2:
+            if any(status[i] == "done" for i in order):
+                route_note = "Route not optimised: frames already taken are shot again."
+            else:
+                try:
+                    order, route_note = optimise_start(order, status, paths, names)
+                except Exception:
+                    dlog_exc("optimise route"); route_note = "Route not optimised (error, see the debug log)."
+        if route_note:
+            clog_add(route_note)
         try:
             rk = capture_sun_risk(order)
         except Exception:
@@ -3784,23 +5125,27 @@ def run_gui(selftest=False):
                     messagebox.showinfo(APP_NAME, "No frames left to shoot in this range."); return
         taken_in = sum(1 for i in range(first - 1, last) if status[i] == "done")
         if not messagebox.askokcancel(APP_NAME,
-                f"Shoot {len(order)} frames through NINA?\n"
+                f"Shoot {len(order)} frames through {api.label}?\n"
                 f"Range: frames {first}–{last} of {len(C['frames'])} ({C['source']})"
-                + (f"; {taken_in} already taken are {'shot again' if cv_['reshoot'].get() else 'skipped'}" if taken_in else "")
-                + ".\n\nThe mount, rotator and camera will move on their own.\n"
+                + (f"; {taken_in} already taken are {'shot again' if reshoot else 'skipped'}" if taken_in else "")
+                + "."
+                + (f"\nThe images are saved on this computer in:\n{image_folder()}" if is_alpaca() else "")
+                + "\n\nThe mount, rotator and camera will move on their own.\n"
                 "Stay nearby – PAUSE (or Esc) stops every movement at once.", icon="warning"):
             return
         for i in order:                                   # frames to shoot start from scratch
             status[i] = "pending"
         q_ = C["q"]
-        runner = CaptureRunner(api_now(), C["frames"], lambda kind, **d: q_.put(("run", (kind, d, runner))),
+        runner = CaptureRunner(api, C["frames"], lambda kind, **d: q_.put(("run", (kind, d, runner))),
                                exposure=ex, gain=(gain if gain >= 0 else None), binning=binning,
                                target=cv_["target"].get() or "Horizon mapping", settle=settle, sun_min=sun,
                                floor=floor_, unpark=cv_["unpark"].get(), park=cv_["park"].get(),
-                               image_folder=cv_["folder"].get(), order=order, status=status, paths=paths,
-                               names=names)
+                               image_folder=image_folder(), order=order, status=status, paths=paths,
+                               names=names, ceiling=ceil_, rot_range=rot_mode,
+                               rot_start=rot_start, open_flat=cv_["flat_open"].get(), close_flat=cv_["flat_close"].get())
         C["runner"] = runner; C["status"] = list(runner.status); update_progress()
-        clog_add(f"Start: {len(order)} frames ({first}–{last}), exposure {ex} s, sun ≥ {sun}°, altitude ≥ {floor_}°.")
+        clog_add(f"Start through {api.label}: {len(order)} frames ({first}–{last}), exposure {ex} s, sun ≥ {sun}°, "
+                 f"altitude {floor_:g}–{ceil_:g}°" + (f", rotator within {rot_start % 360:g}–{(rot_start + rot_span()) % 360:g}°" if rot_span() else "") + ".")
         dlog(f"start: order {order[:10]}{' …' if len(order) > 10 else ''}")
         if not C["polling"]:
             C["api"] = api_now(); poll_devices()
@@ -3860,7 +5205,7 @@ def run_gui(selftest=False):
         if C.get("scanning"):
             return
         C["scanning"] = True; C["seen"] = {}
-        C["folder_snap"] = cv_["folder"].get()          # kept up to date by a trace on the field
+        C["folder_snap"] = image_folder()               # kept up to date by a trace on the field
 
         def job():
             idle_until = None
@@ -3905,10 +5250,10 @@ def run_gui(selftest=False):
         wait = waiting_frames(r)
         current = r is C["runner"]
         if wait and current:
-            msg += (f"\n\n{len(wait)} files have not appeared in NINA's image folder yet. The app keeps looking "
+            msg += (f"\n\n{len(wait)} files have not appeared in the image folder yet. The app keeps looking "
                     "for 10 minutes and adds them to the picture and the list as they arrive.")
         elif wait:
-            msg += f"\n\n{len(wait)} files of that run had not appeared in NINA's image folder yet."
+            msg += f"\n\n{len(wait)} files of that run had not appeared in the image folder yet."
         clog_add(msg.replace("\n", " "))
         if current:
             cap_buttons(r.state)
@@ -3925,7 +5270,9 @@ def run_gui(selftest=False):
             while time.time() - t0 < 0.08:
                 kind, val = C["q"].get_nowait(); n += 1
                 ui_beat["doing"] = f"capture event {kind}"
-                if kind == "connected":
+                if kind == "flat":
+                    flat_lbl.config(text=val); clog_add(val)
+                elif kind == "connected":
                     ver, folder, ftype, parts = val
                     conn_lbl.config(text=f"Advanced API {ver}: " + ", ".join(parts))
                     if folder and not cv_["folder"].get():
@@ -3934,8 +5281,49 @@ def run_gui(selftest=False):
                         clog_add(f"Note: NINA saves {ftype} files – set NINA to FITS for the Build tab.")
                     clog_add("Connected to NINA: " + ", ".join(parts))
                     C["api"] = api_now(); poll_devices()
+                elif kind == "connected_alpaca":
+                    root_, ver, devs, parts, clear = val
+                    C["alp_listed"] = root_
+                    for key_, typ_ in (("atel", "telescope"), ("acam", "camera"), ("arot", "rotator"),
+                                        ("aflat", "covercalibrator")):
+                        vals = [f"{d_.get('DeviceNumber')}: {d_.get('DeviceName')}" for d_ in devs
+                                if str(d_.get("DeviceType", "")).lower() == typ_]
+                        alp_combo[key_].config(values=vals + (["none"] if key_ in ("arot", "aflat") else []))
+                        cur_ = cv_[key_].get().strip().split(":")[0].strip()
+                        hit_ = next((v_ for v_ in vals if v_.split(":")[0] == cur_), None)
+                        if hit_:
+                            cv_[key_].set(hit_)
+                        elif key_ in ("arot", "aflat") and not vals:
+                            cv_[key_].set("none")
+                        elif vals and cur_.lower() not in ("none",):
+                            cv_[key_].set(vals[0])
+                    if clear:
+                        conn_lbl.config(text=f"{ver}: " + ", ".join(parts))
+                        clog_add(f"Connected to the Alpaca server ({ver}): " + ", ".join(parts))
+                        try:
+                            C["api"] = api_now(); poll_devices()
+                        except ValueError:
+                            pass
+                    else:
+                        conn_lbl.config(text=f"{ver}: several devices of one kind – choose Mount, Camera and "
+                                             "Rotator, then press Test connection again.")
+                        clog_add("The Alpaca server offers: " + "; ".join(
+                            f"{d_.get('DeviceType')} {d_.get('DeviceNumber')} = {d_.get('DeviceName')}" for d_ in devs)
+                            + ". Choose the devices, then press Test connection again.")
+                elif kind == "discovered":
+                    if not val:
+                        conn_lbl.config(text="No Alpaca server answered – enter its address and port by hand. (Discovery needs "
+                                             "UDP port 32227 open inbound on the server computer.)")
+                    else:
+                        local = [h_ for h_ in val if h_[0].startswith("127.")]
+                        host_, port_ = (local or val)[0]
+                        cv_["ahost"].set("localhost" if host_.startswith("127.") else host_); cv_["aport"].set(str(port_))
+                        conn_lbl.config(text=f"Found {len(val)} Alpaca server{'s' if len(val) > 1 else ''} – press Test connection.")
+                        clog_add("Alpaca servers found: " + ", ".join(f"{h_}:{p_}" for h_, p_ in val))
                 elif kind == "conn_error":
-                    conn_lbl.config(text="Not connected – is NINA running with the Advanced API plugin enabled?")
+                    conn_lbl.config(text="Not connected – is the Alpaca server (e.g. ASCOM Remote) running at that address?"
+                                    if is_alpaca() else
+                                    "Not connected – is NINA running with the Advanced API plugin enabled?")
                     clog_add(val)
                 elif kind == "dev":
                     dev_lbl.config(text=val)
@@ -4224,12 +5612,30 @@ def run_gui(selftest=False):
                 traceback.print_exc(); os._exit(1)
             root.destroy()
         root.after(1500, _selftest)
+    dlog(f"startup: {time.time() - _T0:.1f} s – all tabs built, starting the main loop")
+    root.after(50, lambda: dlog(f"startup: {time.time() - _T0:.1f} s – window shown"))
     root.mainloop()
 
 
 # Hover explanations for every setting, choice and button (key = the text shown in the window).
 # Add an entry for every new control – the debug log lists controls that still have none.
 TIPS = {
+    "Save images in (on this computer)": "Folder on this computer where the frames shot through Alpaca are saved as FITS files (in a subfolder per date). Can be changed at any time; the next frame goes to the new folder.",
+    "Range starts at (mech °)": "Mechanical rotator angle where the allowed half turn begins; the rotator then stays between this angle and this angle + 180°.",
+    "Rotator range": "Half turn (180°, the default): the rotator stays within 180° from 'Range starts at'; angles outside are shot turned by 180°, which covers the same sky and spares the cables. Quarter turn (90°): it stays within 90°; angles that cannot be reached by a 180° turn go to the nearer end, so some frames are tilted by up to 45° and gaps can appear. Full turn: the rotator goes to the planned angles.",
+    "Open flat panel": "Open the flat panel's cover (NINA: the flat device connected in NINA; Alpaca: the 'Flat panel' device). The cover must be open to see the sky.",
+    "Close flat panel": "Close the flat panel's cover (asks first). NINA: the flat device connected in NINA; Alpaca: the 'Flat panel' device.",
+    "Flat panel": "The Alpaca flat panel / cover calibrator, or 'none' (default) if there is none. Choose it to use Open / Close flat panel; the run warns if its cover is closed.",
+    "Never above altitude (°)": "Frames above this altitude are skipped and never slewed to (e.g. where the camera would hit the tripod). 90 = no limit.",
+    "Gain (-1 = leave as set)": "Camera gain for the frames; -1 leaves the gain as it is set now (in NINA, or in the camera driver with Alpaca).",
+    "Rotator": "The Alpaca rotator, or 'none' if there is none (then the plan must not use the rotator).",
+    "Camera": "The Alpaca camera that takes the frames (not the guide camera). Test connection lists the cameras the server offers.",
+    "Mount": "The Alpaca telescope (mount) device to drive. Test connection lists the devices the server offers.",
+    "Find": "Look for Alpaca servers on the local network and fill in the address and port of the one found.",
+    "Alpaca port": "Port of the Alpaca server (ASCOM Remote uses 11111 by default).",
+    "Alpaca host": "Address of the computer running the Alpaca server (localhost = this computer, or its IP address, e.g. 192.168.0.10). ASCOM Remote is part of ASCOM Platform 7.",
+    "Alpaca (without NINA)": "Shoot without NINA: this program drives the mount, camera and rotator itself through an ASCOM Alpaca server (e.g. ASCOM Remote on the observatory computer) and saves the images on this computer.",
+    "NINA": "Shoot through NINA's Advanced API plugin: NINA drives the devices and saves the images in its own image folder.",
     # ---- Plan tab: camera & telescope
     "Sensor width (px)": "Width of the camera sensor in pixels (ASI2600MC Pro: 6248).",
     "Sensor height (px)": "Height of the camera sensor in pixels (ASI2600MC Pro: 4176).",
@@ -4238,7 +5644,7 @@ TIPS = {
     "Orientation": "How the camera is turned: landscape, portrait, or auto (whichever needs fewer frames).",
     "Read from a FITS file…": "Fill in sensor size, pixel size and focal length from the header of one of your FITS files.",
     # ---- Plan tab: site & area
-    "Latitude (°)": "Your site's latitude in degrees (north positive). Needed for the rotator and the Sun check.",
+    "Latitude (°)": "Your site's latitude in degrees (north positive). Needed for the rotator and the Sun check. Remembered in settings.json and used as the default next time.",
     "Fixed altitude band": "Image a band of constant altitude all the way round (set the two band limits).",
     "Around current horizon": "Image a strip that follows your current horizon file(s), with the margins below and above it.",
     "Band: alt min (°)": "Lowest altitude of the band to image (fixed-band mode).",
@@ -4275,29 +5681,31 @@ TIPS = {
     "Save NINA sequence…": "Save the plan as a NINA Advanced Sequencer file.",
     "Show shooting order": "Draw the order in which the frames are taken (green = first → magenta = last).",
     "Sun check": "Show where the Sun is at the given time and whether any frame is too close to it.",
-    "Longitude (°E)": "Your site's longitude in degrees east – used for the Sun check.",
+    "Longitude (°E)": "Your site's longitude in degrees east – used for the Sun check. Remembered in settings.json and used as the default next time.",
     "Start date": "Planned start date: 2026-11-12, 12.11.2026 or 12.11. (this year); blank = today. With the start time it sets where the preview draws the Sun.",
     "Start time (HH:MM)": "Planned start time (local; blank = the current time of day). The preview shows the Sun's path from then until the plan's estimated end.",
     "Sun distance (°)": "Keep-away distance from the Sun for the preview: frames inside it are drawn red, slews passing it get a red cross.",
     # ---- Capture tab
     "Host": "Address of the computer running NINA (localhost = this computer, or its IP address, e.g. 192.168.0.10).",
     "Port": "Port of NINA's Advanced API plugin (default 1888).",
-    "Test connection": "Check that NINA's Advanced API answers, show the devices and find NINA's image folder.",
+    "Test connection": "Check the connection and show the devices. NINA: also finds NINA's image folder. Alpaca: lists the server's devices and connects the chosen mount, camera and rotator.",
     "Plan from the Plan tab": "Shoot the plan made with the Plan tab's settings.",
     "Fill-in frames from the Build tab": "Shoot the fill-in frames generated on the Build tab.",
     "Saved sequence file": "Shoot the frames of a sequence saved for NINA (plan or fill-in).",
     "Browse…": "Choose a file.",
-    "Gain (-1 = NINA default)": "Camera gain for the frames; -1 keeps NINA's current camera setting.",
     "Settle after moves (s)": "Wait this long after each slew or rotator move before exposing.",
     "Keep away from the Sun (°)": "Frames closer to the Sun than this are skipped and never slewed to.",
     "Never below altitude (°)": "Frames below this altitude are skipped and never slewed to.",
     "Unpark at start ": "Unpark the mount before the first frame.",
+    "Open flat panel at start": "Open the flat panel's cover before the first frame (the run waits until it is open; if it cannot be opened the run stops). Needs a flat panel: connected in NINA, or chosen as 'Flat panel' for Alpaca.",
+    "Close flat panel when finished": "Close the flat panel's cover when the run has finished (after parking; not after End run).",
     "Park when finished": "Park the mount when the run has finished (not after End run).",
     "From frame": "First frame to shoot (frame numbers follow the shooting order shown in the picture).",
     "To frame (blank = last)": "Last frame to shoot; leave blank for the last frame of the plan.",
+    "Optimise route": "Before the run, put the frames still to shoot in a shorter order: the east half first and then the west half (one meridian flip instead of many), short slews and few rotator moves. The frame numbers of the frames still to shoot change; frames already taken stay as they are. Off = shoot in the planned order.",
     "Re-shoot frames already taken": "Also shoot frames in the range that are already taken (normally they are left out).",
-    "Target name": "Target name NINA uses for the files (and their folder, depending on NINA's file pattern).",
-    "NINA image folder (found automatically)": "Folder where NINA saves the images. Filled in by Test connection; can be changed at any time.",
+    "Target name": "Name used for the files: NINA uses it in its file pattern; with Alpaca it starts each file name and is written to the FITS header.",
+    "NINA image folder (found automatically)": "Folder where NINA saves the images, as seen from this computer (a shared folder if NINA runs on another computer). Filled in by Test connection; can be changed at any time.",
     "Show finished frames in the picture": "Draw each taken frame's picture in its slot.",
     "Turn previews 180°": "Turn the frame pictures upside down if they appear the wrong way round.",
     "⏸  PAUSE  (Esc)": "Stop slew, rotator and exposure at once and hold. Esc does the same from anywhere in the app.",
@@ -4305,7 +5713,7 @@ TIPS = {
     "▶ Resume": "Continue a paused run; the interrupted frame is shot again from its start.",
     "Skip frame": "While paused: leave out the current frame and continue with the next one on Resume.",
     "■ End run": "End the run. Frames taken so far are kept; Start later shoots what is still missing.",
-    "Save current capture…": "Save the frames, the progress and the file paths, so the capture can be resumed later.",
+    "Save current capture…": "Save the frames, the progress and the file paths, so the capture can be resumed later. The suggested file name ends in _completed if every frame is taken, otherwise in _partial.",
     "Load saved capture…": "Load a saved capture: its progress, settings and the pictures of the frames already taken.",
     # ---- Build tab
     "Import from Capture…": "Bring a capture's frames (from the Capture tab or a saved capture), the rotator offset and the current horizon here, then build.",
@@ -4328,6 +5736,7 @@ TIPS = {
     "Horizon line near gaps within (°)": "Fill-in: also cover places where the horizon line is this close to a spot without pictures (0 = off).",
     "Generate fill-in frames": "Plan extra frames where the horizon is uncertain, near gaps or at steep edges, and show them.",
     "Save fill-in sequence…": "Save the fill-in frames as a NINA sequence (or shoot them on the Capture tab).",
+    "Save Stellarium landscape…": "Save the selected horizon line (solid or with branches, edits and side margin included) as a Stellarium landscape: one ZIP with the horizon line and, when the mosaic is built, a panorama image of it (grey tones below the line, transparent sky above). Install it in Stellarium (F4 → Landscape → Add/remove landscapes).",
     "Save horizon file…": "Save the selected horizon line as a NINA .hrz file.",
     "Edit:": "Which line a left-drag on the image redraws.",
     "off": "No editing: dragging on the image does nothing.",
@@ -4361,9 +5770,11 @@ DISCLAIMER AND SAFETY WARNING – read before use
      is an aid only, based on estimates, and NO GUARANTEE – stay with the equipment during
      daytime runs and be ready to stop it (PAUSE / Esc). Full text: README.md.
 
-WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
+WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
 1. Plan sequence
    • Enter camera/telescope (or 'Read from a FITS file…'). The field of view is computed.
+   • Enter your site's latitude and longitude once: they are saved in settings.json and used as
+     the defaults next time (changing them in the window updates the file).
    • Choose the area: a fixed altitude band, or a strip around your current horizon file
      (optionally plus a second estimate, e.g. from an all-sky camera); the strip spans both,
      plus margins. The current horizon is also filled in on the Build tab for comparison.
@@ -4398,33 +5809,76 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
      preview draws the Sun's track from the start to the plan's estimated end with the keep-away
      zone; frames too close at their time are red, slews passing near it get a red ×.
 
-2. Capture (NINA)  – shoot the frames from here, through NINA's Advanced API plugin
-   • Setup once: install 'Advanced API' in NINA (Plugins), enable its server (port 1888), let
+2. Capture  – shoot the frames from here, through NINA or directly through ASCOM Alpaca
+   • 'Connect through' chooses the method; the rest of the tab works the same for both.
+     NINA: NINA drives the devices and saves the images in its image folder.
+     Alpaca (without NINA): this program drives mount, camera and rotator through an Alpaca
+     server (e.g. ASCOM Remote, part of ASCOM Platform 7) and saves the images on THIS computer.
+   • NINA setup once: install 'Advanced API' in NINA (Plugins), enable its server (port 1888), let
      NINA save FITS, connect mount, camera and rotator in NINA. No NINA sequence at the same time.
-   • 'Test connection' (in the NINA group) shows the devices, starts the live device line and finds NINA's image
-     folder. 'Frames to shoot': the Plan tab plan, the Build tab fill-in frames, or a saved
+   • Alpaca setup once, on the computer with the equipment: ASCOM Platform 7 with the ASCOM
+     drivers of mount, camera (its ASCOM driver, not the native one) and rotator; add them in
+     ASCOM Remote. IMPORTANT: ASCOM Remote listens on localhost only at first – in Setup →
+     Server Configuration choose the computer's network address (or all addresses), then restart
+     it. Windows firewall: allow inbound TCP 11111 (Alpaca) and UDP 32227 (only for 'Find').
+     Check from the other computer: http://<address>:11111/management/v1/description in a
+     browser. Alpaca has no password: use it only in your own network or through a VPN.
+   • Alpaca rotators: if the driver does not go to the angle asked for (the ZWO CAA moves BY it),
+     the run starts with MoveAbsolute, checks the result, tries the other move methods if it is
+     wrong and remembers the one that works.
+   • Alpaca on this tab: 'Alpaca host' / 'Alpaca port' ('Find' looks for servers on the network);
+     'Test connection' lists the devices for 'Mount', 'Camera', 'Rotator' (or 'none') and connects
+     them – with several devices of a kind, choose and press it again. 'Save images in (on this
+     computer)' is where the FITS files go (a subfolder per date). Focal length comes from the
+     Plan tab. The files are complete at once, so pictures appear immediately.
+   • 'Test connection' with NINA shows the devices, starts the live device line and finds NINA's
+     image folder. 'Frames to shoot': the Plan tab plan, the Build tab fill-in frames, or a saved
      sequence file (Browse…; exposure, gain and binning come from it). Choosing a source shows its
      frames; a fresh Start takes them from the source as it is then.
    • Range: 'From frame' / 'To frame' (numbers in shooting order) limit the run; frames already
-     taken are left out unless 'Re-shoot frames already taken' is ticked.
+     taken are left out unless 'Re-shoot frames already taken' is ticked. If 'From frame' (above 1)
+     is a frame that is already taken, Start asks: shoot the range again from there (frames before
+     it stay) or only the frames not taken yet.
+   • 'Optimise route' (default on): at Start the frames still to shoot are put in a shorter order –
+     east half first, then west (one meridian flip instead of many), short slews, few rotator moves
+     (angles recomputed, within the Plan tab's tolerance). The log shows the estimated saving. The
+     numbers of the frames still to shoot change; frames already taken stay. Off = planned order.
+   • Exposure, gain, binning and settle can be changed while a run is going (also paused): they
+     are used from the next frame. A saved sequence file only suggests them the first time it is
+     loaded; it never overwrites values you have set, and Start does not reset them.
    • 'Save current capture…' stores frames, progress, file paths and settings (.hmcap.json);
+     the suggested file name ends in _completed when every frame is taken, else in _partial;
      'Load saved capture…' restores them, shows the pictures from the original paths and sets
      frames whose file is gone back to 'to do'. Start then shoots only what is missing.
      Progress is also saved automatically after every frame (captures\\last_capture.hmcap.json).
    • The picture is drawn like the Plan preview (strip, horizon, frames, shooting order); blue =
      to do, yellow = in progress, green = done, orange = skipped, red = error. Finished frames
      are shown in their slots (projected like the mosaic; 'Turn previews 180°' if upside down).
-   • Safety: frames nearer the Sun than the limit (default 30°) or below the altitude limit
-     (default 10°) are skipped and never slewed to. Unpark at start / park when finished.
+   • Safety: frames nearer the Sun than the limit (default 30°), below 'Never below altitude'
+     (default 10°) or above 'Never above altitude' (default 90 = no limit) are skipped and never
+     slewed to. Unpark at start / park when finished.
+     'Rotator limit': 'Half turn (180°)' (default) keeps the rotator between 'Range starts at' and
+     that angle + 180°; angles outside are shot turned by 180° (same sky, spares the cables).
+     'Quarter turn (90°)' keeps it within 90°: angles that a 180° turn cannot bring inside go to
+     the nearer end, so some frames are tilted by up to 45° and the coverage can have gaps.
+   • Safety and Peripherals: next to the safety limits, 'Open flat panel' / 'Close flat panel'
+     operate the flat panel cover (NINA: the flat device connected in NINA; Alpaca: choose the
+     'Flat panel' device). 'Open flat panel at start' / 'Close flat panel when finished' do it
+     automatically around a run (close: after parking, not after End run). A closed cover blocks the
+     sky, so a run without the automatic opening warns at the start if the cover is closed.
+     The mount is watched during every slew: if it comes much closer to the Sun than planned, or
+     cannot be reached, everything is stopped and the run pauses. The mount's own limits
+     (altitude, meridian) stay in charge; a slew they stop is noticed and pauses the run.
      Slew paths are checked as well: a slew that would pass near the Sun goes via a safe
      intermediate position (or the frame is skipped). At Start, frames that will be too close
      to the Sun during the run are listed: Yes = shoot as planned, No = leave them out.
-   • 'Start' asks first. Per frame: slew → rotator → settle → expose; NINA saves the FITS.
+   • 'Start' asks first. Per frame: slew → rotator → settle → expose; NINA saves the FITS, or
+     with Alpaca this program downloads the image and saves the FITS itself.
    • ⏸ PAUSE (red button) or Esc anywhere: stops slew, rotator and exposure at once and holds.
      'Resume' repeats the interrupted frame; 'Skip frame' skips it; 'End run' ends the run.
    • Any error or timeout pauses the run automatically – nothing is skipped silently.
-   • The NINA image folder can be changed during a run – file look-ups always use the current
-     value.
+   • The image folder (NINA's, or 'Save images in' for Alpaca) can be changed during a run – the
+     current value is always used.
    • The log runs down the right side of the tab (scrollable). The progress bar shows the
      percentage of the run. 'Save / Load Capture' sits right of 'Run'.
    • A preview is made only when the FITS file is complete (NINA may still be writing it);
@@ -4435,11 +5889,15 @@ WORKFLOW   1. Plan sequence → 2. Capture (NINA) → 3. Build horizon
    • At the end the list of files is added to the Build tab ('Start' again can continue a
      stopped run).
 
+TESTED: the capture through NINA and through Alpaca, the rotator handling, the flat panel opening and closing and the Stellarium landscape have
+been tested on the author's real equipment and in Stellarium. Test carefully on your own setup first.
+
 HOVER over any setting, choice or button for a short explanation.
 
 DEBUG MENU
-   • 'Debug log (all actions)' writes every click, NINA request (with timing and answer), capture
-     step, pause, error and window stall to %LOCALAPPDATA%\\HorizonMapper\\logs. On by default
+   • 'Debug log (all actions)' writes every click, NINA or Alpaca request (with timing and answer), capture
+     step, pause, error and window stall to %LOCALAPPDATA%\\HorizonMapper\\logs, plus 'startup: N s' lines
+     with the start-up timing. On by default
      for now. 'Open log folder' opens it – please attach the log when reporting a problem.
    • 'Show log windows' shows or hides the log panes (the Capture log can be made wider or
      narrower by dragging its divider).
@@ -4492,6 +5950,12 @@ DEBUG MENU
    • 'Save horizon file…' (below the fill-in buttons) saves one NINA .hrz file: choose 'solid'
      or 'with branches' next to the button. Edits and the side margin are included.
      In NINA: Options → General → Astrometry → Horizon file.
+   • 'Save Stellarium landscape…' saves the same selected line as a Stellarium landscape: one ZIP with
+     landscape.ini, horizon.txt (azimuth from true north towards east, altitude; negative altitudes
+     become 0) and, when the mosaic is built, panorama.png: the mosaic's grey tones below the line,
+     transparent sky above it (a 'photo' landscape; without a mosaic it is a plain polygon landscape). In Stellarium: F4 → Landscape → Add/remove landscapes → Install a new
+     landscape from a ZIP archive (remove an older version of the landscape first). The command line
+     writes ..._stellarium.zip files next to the .hrz.
 
 NOTES
    • Very close objects (observatory walls) appear as smooth blurred shapes; they still
@@ -4518,7 +5982,7 @@ def main():
     pp.add_argument("--fov", nargs=2, type=float, metavar=("W", "H"))
     pp.add_argument("--sensor", nargs=3, type=float, metavar=("WPX", "HPX", "UM"), default=[6248, 4176, 3.76])
     pp.add_argument("--focal", type=float, default=408)
-    pp.add_argument("--lat", type=float, default=60.0)
+    pp.add_argument("--lat", type=float, default=float(load_settings().get("site_lat", 60.0)))
     pp.add_argument("--band", nargs=2, type=float, metavar=("MIN", "MAX"))
     pp.add_argument("--hrz", nargs="+", help="1-2 horizon files")
     pp.add_argument("--below", type=float, default=4); pp.add_argument("--above", type=float, default=4)
@@ -4604,6 +6068,8 @@ def main():
                                          det["solid"])
         write_hrz(a.outbase + ".hrz", det["az"], det["solid"])
         write_hrz(a.outbase + "_with_branches.hrz", det["az"], det["branches"])
+        write_stellarium_landscape(a.outbase + "_stellarium.zip", det["az"], det["solid"], "solid", mos=mos)
+        write_stellarium_landscape(a.outbase + "_with_branches_stellarium.zip", det["az"], det["branches"], "with branches", mos=mos)
         lines = [("Solid obstructions", det["az"], det["solid"], (230, 40, 30)),
                  ("Incl. thin branches", det["az"], det["branches"], (0, 200, 240))]
         if a.old:
