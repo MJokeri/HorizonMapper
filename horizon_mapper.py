@@ -3040,7 +3040,11 @@ def run_gui(selftest=False):
     _marks = [("run_gui entered", time.time())]
     import types
     import tkinter as _tk_mod
-    from tkinter import ttk as _ttk_mod, filedialog, messagebox
+    _marks.append(("import tkinter", time.time()))
+    from tkinter import ttk as _ttk_mod
+    _marks.append(("import tkinter.ttk", time.time()))
+    from tkinter import filedialog, messagebox
+    _marks.append(("import tkinter.filedialog and messagebox", time.time()))
     # Private copies of the tkinter / ttk namespaces: the hover and click-logging wrappers below
     # replace classes here only. Never patch the tkinter modules themselves – ttk builds Combobox
     # and Spinbox on ttk.Entry internally, and a patched Entry breaks them.
