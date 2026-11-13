@@ -122,6 +122,8 @@
   default site is now a neutral latitude 60°, longitude 25°).
 
 ### Fixed
+- **Stellarium picture was almost black at night**: the panorama is brighter (greys 60–210, ground 70) and
+  `minimal_brightness` is 0.4 in the photo landscape.
 - **Stellarium landscape did not draw correctly**: the export now follows the layout of Stellarium's own sample
   landscape (whole-degree azimuths 0–359 without a 360° point, `polygonal_angle_rotatez = 0.00001`, ground and
   horizon line colours, `minimal_brightness`); tested to load and draw the ground in Stellarium. Re-save the

@@ -499,7 +499,7 @@ accepts such a list like a folder.
 the mosaic. Below the horizon line it shows the mosaic's grey tones (dark obstructions, lighter gaps;
 flat dark ground below the imaged altitudes); above the line it is transparent, so the sky shows through.
 The picture is 3600 × 1800 pixels (0.1° per pixel), left edge = east, and is a *spherical* (photo)
-landscape in Stellarium. It is grey only (the mosaic has no colour). The horizon polygon is included
+landscape in Stellarium. It is grey only (the mosaic has no colour). Stellarium darkens landscapes at night, so the file sets `minimal_brightness = 0.4` to keep the picture visible; you can change it with the **Minimal brightness** option on Stellarium's Landscape tab. The horizon polygon is included
 as the horizon line, so the line and the altitude list still work. Without a built mosaic (for example
 if you only loaded lines) the file is the plain polygon landscape without the picture. The command
 line writes `<name>_stellarium.zip` and `<name>_with_branches_stellarium.zip` next to the `.hrz` files.

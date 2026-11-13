@@ -305,7 +305,7 @@ def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None
                "polygonal_horizon_list = horizon.txt\n"
                "polygonal_angle_rotatez = 0.00001\n"
                "horizon_line_color = .25,.15,.15\n"
-               "minimal_brightness = 0.15\n")
+               "minimal_brightness = 0.4\n")
     else:          # polygon only
         ini = ("[landscape]\n"
                f"name = {lid}\n"
@@ -330,7 +330,7 @@ def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None
     return lid
 
 
-def panorama_rgba(mos, az, alt, step=0.1, ground=(30, 32, 30)):
+def panorama_rgba(mos, az, alt, step=0.1, ground=(70, 76, 70)):
     """Equirectangular panorama (RGBA, uint8) of the measured horizon for a Stellarium *spherical* landscape.
     Width 360/step, height 180/step; altitude +90 at the top, -90 at the bottom; the LEFT border is EAST
     (azimuth 90°) and azimuth grows to the right (east → south → west → north), which Stellarium expects
@@ -354,7 +354,7 @@ def panorama_rgba(mos, az, alt, step=0.1, ground=(30, 32, 30)):
     G = gi[r0] * (1 - w1) + gi[r1] * w1; Cv = (ci[r0] * (1 - w1) + ci[r1] * w1 > 0.5) & ok[:, None]
     shift = int(round(90.0 / step))                       # output column 0 = azimuth 90° (east)
     G = np.roll(G, -shift, axis=1); Cv = np.roll(Cv, -shift, axis=1)
-    tone = 25 + G * 120                                   # dark obstructions .. lighter gaps, never glaring
+    tone = 60 + G * 150                                   # dark obstructions .. lighter gaps; bright enough to show at night
     rgb = np.where(Cv[..., None], tone[..., None], np.array(ground, np.float32)[None, None, :])
     # the horizon line for every output column; opaque below it, a one pixel soft edge
     az_x = (90.0 + (np.arange(W) + 0.5) * step) % 360.0
