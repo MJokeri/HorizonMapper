@@ -3,6 +3,9 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Folder version of the Windows build** (`HorizonMapper-windows-folder.zip`): starts faster than the single-file
+  `.exe`, which unpacks itself at every start (the debug log showed about 10 s before the window was created).
+  Start-up timing lines now also cover the imports.
 - Debug log: `startup: N s – …` lines record how long each part of the start-up takes.
 - **Stellarium landscape now includes a picture**: the one ZIP from *Save Stellarium landscape…* also holds
   `panorama.png` (grey tones of the mosaic below the horizon line, transparent sky above) and becomes a

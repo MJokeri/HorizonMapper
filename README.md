@@ -163,6 +163,11 @@ Please attach the log when reporting a problem.
 [Actions → Build Windows exe](../../actions) run and download the build from there.
 Unzip it and run `HorizonMapper.exe`. No Python is needed.
 
+**If it starts slowly** (the single-file `.exe` unpacks itself at every start, and virus scanners can make that
+take 10 seconds or more): use the **folder version**, `HorizonMapper-windows-folder.zip` (artifact
+`HorizonMapper-windows-folder`). Unzip it anywhere and run `HorizonMapper\HorizonMapper-folder.exe`; it does
+not unpack anything at start.
+
 **From source:** install Python 3.10 or newer from https://www.python.org (tick **"Add python.exe to PATH"**).
 Then double-click **`Start Horizon Mapper.bat`**. The first time, it installs `numpy` and `Pillow`.
 `build_exe.bat` builds the `.exe` yourself.

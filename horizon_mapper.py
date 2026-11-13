@@ -3037,6 +3037,7 @@ def render_mosaic(mos, lines=(), scale=2, legend=True):
 # =============================================================================
 
 def run_gui(selftest=False):
+    _marks = [("run_gui entered", time.time())]
     import types
     import tkinter as _tk_mod
     from tkinter import ttk as _ttk_mod, filedialog, messagebox
@@ -3045,12 +3046,16 @@ def run_gui(selftest=False):
     # and Spinbox on ttk.Entry internally, and a patched Entry breaks them.
     tk = types.SimpleNamespace(**{k: getattr(_tk_mod, k) for k in dir(_tk_mod) if not k.startswith("__")})
     ttk = types.SimpleNamespace(**{k: getattr(_ttk_mod, k) for k in dir(_ttk_mod) if not k.startswith("__")})
+    _marks.append(("tkinter imported", time.time()))
     try:
         from PIL import ImageTk
     except ImportError:
         ImageTk = None
+    _marks.append(("PIL.ImageTk imported", time.time()))
 
     debug_enable(load_settings().get("debug_log", DEV_MODE))   # default: on during development
+    for _n, _t in _marks:
+        dlog(f"startup: {_t - _T0:.1f} s – {_n}")
 
     # hover explanations: shown after a short pause over any setting, choice or button
     _selftest_hovers = []
