@@ -2,7 +2,7 @@
 
 ## 1.1.0 – 2026-11-10
 
-_Tested on the author's real equipment (ASI mount, ASI2600MC, ZWO CAA rotator, NINA and ASCOM Remote 7.0.1) and the
+_Tested on the author's real equipment (ASI mount, ASI2600MC, ZWO CAA rotator, flat panel opening/closing, NINA and ASCOM Remote 7.0.1) and the
 Stellarium landscape, including the picture, checked and working in Stellarium (13 Nov 2026)._
 
 ### Added

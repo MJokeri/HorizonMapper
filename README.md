@@ -29,7 +29,7 @@ own network or a VPN.
   saved captures named `_completed` or `_partial`.
 - **Build tab:** **Save Stellarium landscape…** next to the NINA horizon file.
 
-**Tested:** the capture through NINA and through Alpaca, the rotator handling, and the Stellarium landscape (loaded and
+**Tested:** the capture through NINA and through Alpaca, the rotator handling, the flat panel opening and closing, and the Stellarium landscape (loaded and
 checked in Stellarium, picture included) have been tested on the author's real equipment (ASI mount, ASI2600MC,
 ZWO CAA rotator, ASCOM Remote 7.0.1). Test it carefully on your own setup before leaving a run unattended.
 
