@@ -5889,6 +5889,9 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
    • At the end the list of files is added to the Build tab ('Start' again can continue a
      stopped run).
 
+TESTED: the capture through NINA and through Alpaca, the rotator handling and the Stellarium landscape have
+been tested on the author's real equipment and in Stellarium. Test carefully on your own setup first.
+
 HOVER over any setting, choice or button for a short explanation.
 
 DEBUG MENU
