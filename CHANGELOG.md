@@ -127,6 +127,9 @@
   default site is now a neutral latitude 60°, longitude 25°).
 
 ### Fixed
+- **Stellarium picture still faint at night**: the picture uses the same contrast stretch as the preview in the app
+  (greys 45–255, ground 95), is also set as the night illumination texture (`maptex_illum`), and
+  `minimal_brightness` is 0.5.
 - **Stellarium picture was almost black at night**: the panorama is brighter (greys 60–210, ground 70) and
   `minimal_brightness` is 0.4 in the photo landscape.
 - **Stellarium landscape did not draw correctly**: the export now follows the layout of Stellarium's own sample

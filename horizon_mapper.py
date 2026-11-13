@@ -302,11 +302,12 @@ def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None
                f"author = {APP_NAME}\n"
                f"description = Horizon measured with {APP_NAME} on {date} ({label} line): grey tones of the mosaic below the horizon line, transparent sky above it.\n"
                "maptex = panorama.png\n"
+               "maptex_illum = panorama.png\n"          # drawn on top at night, so the picture stays visible in the dark
                "angle_rotatez = 0\n"
                "polygonal_horizon_list = horizon.txt\n"
                "polygonal_angle_rotatez = 0.00001\n"
                "horizon_line_color = .25,.15,.15\n"
-               "minimal_brightness = 0.4\n")
+               "minimal_brightness = 0.5\n")
     else:          # polygon only
         ini = ("[landscape]\n"
                f"name = {lid}\n"
@@ -331,7 +332,7 @@ def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None
     return lid
 
 
-def panorama_rgba(mos, az, alt, step=0.1, ground=(70, 76, 70)):
+def panorama_rgba(mos, az, alt, step=0.1, ground=(95, 100, 95)):
     """Equirectangular panorama (RGBA, uint8) of the measured horizon for a Stellarium *spherical* landscape.
     Width 360/step, height 180/step; altitude +90 at the top, -90 at the bottom; the LEFT border is EAST
     (azimuth 90°) and azimuth grows to the right (east → south → west → north), which Stellarium expects
@@ -355,7 +356,7 @@ def panorama_rgba(mos, az, alt, step=0.1, ground=(70, 76, 70)):
     G = gi[r0] * (1 - w1) + gi[r1] * w1; Cv = (ci[r0] * (1 - w1) + ci[r1] * w1 > 0.5) & ok[:, None]
     shift = int(round(90.0 / step))                       # output column 0 = azimuth 90° (east)
     G = np.roll(G, -shift, axis=1); Cv = np.roll(Cv, -shift, axis=1)
-    tone = 60 + G * 150                                   # dark obstructions .. lighter gaps; bright enough to show at night
+    tone = 45 + G * 210                                   # same contrast stretch as the preview in the app (dark .. light grey)
     rgb = np.where(Cv[..., None], tone[..., None], np.array(ground, np.float32)[None, None, :])
     # the horizon line for every output column; opaque below it, a one pixel soft edge
     az_x = (90.0 + (np.arange(W) + 0.5) * step) % 360.0
