@@ -494,8 +494,14 @@ accepts such a list like a folder.
 
 ### Stellarium landscape
 
-**Save Stellarium landscape…** (Build tab) writes a ZIP named after the horizon file (for example
-`horizon_2026-11-11.zip`) holding **one folder** with `landscape.ini` and `horizon.txt`. The command
+**Save Stellarium landscape…** (Build tab) writes **one ZIP** holding **one folder** with `landscape.ini`,
+`horizon.txt` and, once the mosaic has been built, **`panorama.png`**: a picture of your horizon made from
+the mosaic. Below the horizon line it shows the mosaic's grey tones (dark obstructions, lighter gaps;
+flat dark ground below the imaged altitudes); above the line it is transparent, so the sky shows through.
+The picture is 3600 × 1800 pixels (0.1° per pixel), left edge = east, and is a *spherical* (photo)
+landscape in Stellarium. It is grey only (the mosaic has no colour). The horizon polygon is included
+as the horizon line, so the line and the altitude list still work. Without a built mosaic (for example
+if you only loaded lines) the file is the plain polygon landscape without the picture. The command
 line writes `<name>_stellarium.zip` and `<name>_with_branches_stellarium.zip` next to the `.hrz` files.
 
 - **Install:** in Stellarium press **F4 → Landscape → Add/remove landscapes… → Install a new landscape

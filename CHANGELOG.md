@@ -3,6 +3,10 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- **Stellarium landscape now includes a picture**: the one ZIP from *Save Stellarium landscape…* also holds
+  `panorama.png` (grey tones of the mosaic below the horizon line, transparent sky above) and becomes a
+  spherical (photo) landscape; the horizon polygon stays in it as the horizon line. Without a mosaic it
+  is the plain polygon landscape. The command line writes the same files.
 - **Site latitude and longitude are saved in `settings.json`** (`site_lat`, `site_lon`) and used as the
   defaults at start-up; changing them in the Plan tab (or reading them from a FITS file) updates the file.
   `plan --lat` on the command line defaults to the saved latitude.

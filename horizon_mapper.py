@@ -12,7 +12,7 @@ Requires: Python 3.9+, numpy, Pillow   (pip install numpy pillow)
 Run:      python horizon_mapper.py      (GUI)
           python horizon_mapper.py --help (command line)
 """
-import argparse, hashlib, json, math, os, queue, re, sys, threading, time, traceback, zipfile
+import argparse, hashlib, io, json, math, os, queue, re, sys, threading, time, traceback, zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -276,7 +276,7 @@ def write_hrz(path, az, alt, step=1.0):
             f.write(f"{a:06.2f}      {v:5.2f}\n")
 
 
-def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None):
+def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None, mos=None):
     """Write a Stellarium polygonal landscape as a ZIP (Stellarium: Sky and viewing options → Landscape →
     Add/remove landscapes → Install a new landscape from a ZIP archive). The ZIP holds one directory with
     landscape.ini, horizon.txt (azimuth from true north towards east, altitude, degrees) and readme.txt.
@@ -290,16 +290,33 @@ def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None
     txt = (f"# Horizon measured with {APP_NAME} on {date} ({label} line).\n"
            "# azimuth (degrees from true north towards east), altitude (degrees)\n" +
            "".join(f"{int(a)} {v:.1f}\n" for a, v in pts))
-    ini = ("[landscape]\n"
-           f"name = {lid}\n"
-           "type = polygonal\n"
-           f"author = {APP_NAME}\n"
-           f"description = Horizon measured with {APP_NAME} on {date} ({label} line).\n"
-           "polygonal_horizon_list = horizon.txt\n"
-           "polygonal_angle_rotatez = 0.00001\n"
-           "ground_color = .15,.45,.45\n"
-           "horizon_line_color = .25,.15,.15\n"
-           "minimal_brightness = 0.15\n")
+    pano = None
+    if mos is not None and mos.get("M") is not None:
+        buf = io.BytesIO(); Image.fromarray(panorama_rgba(mos, az, alt, 0.1), "RGBA").save(buf, "PNG", optimize=True)
+        pano = buf.getvalue()
+    if pano:       # photo (spherical) landscape: panorama image + the horizon polygon as line / altitude list
+        ini = ("[landscape]\n"
+               f"name = {lid}\n"
+               "type = spherical\n"
+               f"author = {APP_NAME}\n"
+               f"description = Horizon measured with {APP_NAME} on {date} ({label} line): grey tones of the mosaic below the horizon line, transparent sky above it.\n"
+               "maptex = panorama.png\n"
+               "angle_rotatez = 0\n"
+               "polygonal_horizon_list = horizon.txt\n"
+               "polygonal_angle_rotatez = 0.00001\n"
+               "horizon_line_color = .25,.15,.15\n"
+               "minimal_brightness = 0.15\n")
+    else:          # polygon only
+        ini = ("[landscape]\n"
+               f"name = {lid}\n"
+               "type = polygonal\n"
+               f"author = {APP_NAME}\n"
+               f"description = Horizon measured with {APP_NAME} on {date} ({label} line).\n"
+               "polygonal_horizon_list = horizon.txt\n"
+               "polygonal_angle_rotatez = 0.00001\n"
+               "ground_color = .15,.45,.45\n"
+               "horizon_line_color = .25,.15,.15\n"
+               "minimal_brightness = 0.15\n")
     readme = (f"Stellarium landscape made by {APP_NAME} on {date}: the measured horizon ({label} line) "
               "of the imaging site.\nInstall: Stellarium → Sky and viewing options (F4) → Landscape → "
               "Add/remove landscapes → Install a new landscape from a ZIP archive.\n"
@@ -307,8 +324,45 @@ def write_stellarium_landscape(path, az, alt, label="solid", step=1.0, date=None
               "(Windows: %APPDATA%\\Stellarium\\landscapes). Restart Stellarium if it is not listed.\n")
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(f"{lid}/landscape.ini", ini); z.writestr(f"{lid}/horizon.txt", txt)
+        if pano:
+            z.writestr(f"{lid}/panorama.png", pano)
         z.writestr(f"{lid}/readme.txt", readme)
     return lid
+
+
+def panorama_rgba(mos, az, alt, step=0.1, ground=(30, 32, 30)):
+    """Equirectangular panorama (RGBA, uint8) of the measured horizon for a Stellarium *spherical* landscape.
+    Width 360/step, height 180/step; altitude +90 at the top, -90 at the bottom; the LEFT border is EAST
+    (azimuth 90°) and azimuth grows to the right (east → south → west → north), which Stellarium expects
+    with angle_rotatez = 0. Above the horizon line the image is transparent (sky); below it the grey
+    tones of the mosaic are shown (dark obstructions, lighter gaps) and a flat ground colour where
+    the mosaic has no data (below the imaged altitudes)."""
+    W = int(round(360 / step)); H = int(round(180 / step))
+    M = mos["M"]; res = mos["res"]; alt0 = mos["alt0"]; NH, NA = M.shape
+    cov = np.isfinite(M).astype(np.float32); Mz = np.nan_to_num(M, nan=0.0).astype(np.float32)
+    v = M[np.isfinite(M)]
+    lo, hi = (np.percentile(v, [1, 99.5]) if v.size else (0.0, 1.0))
+    g = np.clip((Mz - lo) / max(hi - lo, 1e-6), 0, 1) * cov
+    # shrink the columns of the mosaic (azimuth 0..360 from its left edge) to W columns, rows stay
+    gi = np.asarray(Image.fromarray(g).resize((W, NH), Image.BOX)); ci = np.asarray(Image.fromarray(cov).resize((W, NH), Image.BOX))
+    gi = np.where(ci > 0.5, gi / np.maximum(ci, 1e-6), 0.0); ci = (ci > 0.5).astype(np.float32)
+    # rows: output altitude of row y, linear interpolation between mosaic rows
+    a_out = 90.0 - (np.arange(H) + 0.5) * step
+    r = (a_out - alt0) / res
+    ok = (r >= 0) & (r <= NH - 1)
+    r0 = np.clip(np.floor(r).astype(int), 0, NH - 1); r1 = np.clip(r0 + 1, 0, NH - 1); w1 = (r - np.floor(r))[:, None].astype(np.float32)
+    G = gi[r0] * (1 - w1) + gi[r1] * w1; Cv = (ci[r0] * (1 - w1) + ci[r1] * w1 > 0.5) & ok[:, None]
+    shift = int(round(90.0 / step))                       # output column 0 = azimuth 90° (east)
+    G = np.roll(G, -shift, axis=1); Cv = np.roll(Cv, -shift, axis=1)
+    tone = 25 + G * 120                                   # dark obstructions .. lighter gaps, never glaring
+    rgb = np.where(Cv[..., None], tone[..., None], np.array(ground, np.float32)[None, None, :])
+    # the horizon line for every output column; opaque below it, a one pixel soft edge
+    az_x = (90.0 + (np.arange(W) + 0.5) * step) % 360.0
+    azs = np.asarray(az, float); o = np.argsort(azs); azs = azs[o]; als = np.asarray(alt, float)[o]
+    line = np.interp(az_x, np.concatenate([azs - 360, azs, azs + 360]), np.concatenate([als, als, als]))
+    alpha = np.clip((line[None, :] - a_out[:, None]) / step + 0.5, 0, 1)
+    out = np.dstack([np.clip(rgb, 0, 255), alpha * 255]).astype(np.uint8)
+    return out
 
 
 def sky_area_sqdeg(az_deg, alt_deg):
@@ -4005,7 +4059,7 @@ def run_gui(selftest=False):
                                          filetypes=[("Stellarium landscape (ZIP)", "*.zip"), ("All", "*.*")])
         if not f:
             return
-        lid = write_stellarium_landscape(f, az, vals, which)
+        lid = write_stellarium_landscape(f, az, vals, which, mos=result.get("mos"))
         dlog(f"stellarium landscape saved: {f} ({lid})")
         messagebox.showinfo(APP_NAME, f"Saved the {which} horizon as a Stellarium landscape:\n{f}\n\n"
                                       "In Stellarium: Sky and viewing options (F4) → Landscape → Add/remove "
@@ -5667,7 +5721,7 @@ TIPS = {
     "Horizon line near gaps within (°)": "Fill-in: also cover places where the horizon line is this close to a spot without pictures (0 = off).",
     "Generate fill-in frames": "Plan extra frames where the horizon is uncertain, near gaps or at steep edges, and show them.",
     "Save fill-in sequence…": "Save the fill-in frames as a NINA sequence (or shoot them on the Capture tab).",
-    "Save Stellarium landscape…": "Save the selected horizon line (solid or with branches, edits and side margin included) as a Stellarium polygonal landscape: a ZIP to install in Stellarium (F4 → Landscape → Add/remove landscapes).",
+    "Save Stellarium landscape…": "Save the selected horizon line (solid or with branches, edits and side margin included) as a Stellarium landscape: one ZIP with the horizon line and, when the mosaic is built, a panorama image of it (grey tones below the line, transparent sky above). Install it in Stellarium (F4 → Landscape → Add/remove landscapes).",
     "Save horizon file…": "Save the selected horizon line as a NINA .hrz file.",
     "Edit:": "Which line a left-drag on the image redraws.",
     "off": "No editing: dragging on the image does nothing.",
@@ -5877,9 +5931,10 @@ DEBUG MENU
    • 'Save horizon file…' (below the fill-in buttons) saves one NINA .hrz file: choose 'solid'
      or 'with branches' next to the button. Edits and the side margin are included.
      In NINA: Options → General → Astrometry → Horizon file.
-   • 'Save Stellarium landscape…' saves the same selected line as a Stellarium landscape (a ZIP with
-     landscape.ini and horizon.txt: azimuth from true north towards east, altitude; negative
-     altitudes become 0). In Stellarium: F4 → Landscape → Add/remove landscapes → Install a new
+   • 'Save Stellarium landscape…' saves the same selected line as a Stellarium landscape: one ZIP with
+     landscape.ini, horizon.txt (azimuth from true north towards east, altitude; negative altitudes
+     become 0) and, when the mosaic is built, panorama.png: the mosaic's grey tones below the line,
+     transparent sky above it (a 'photo' landscape; without a mosaic it is a plain polygon landscape). In Stellarium: F4 → Landscape → Add/remove landscapes → Install a new
      landscape from a ZIP archive (remove an older version of the landscape first). The command line
      writes ..._stellarium.zip files next to the .hrz.
 
@@ -5994,8 +6049,8 @@ def main():
                                          det["solid"])
         write_hrz(a.outbase + ".hrz", det["az"], det["solid"])
         write_hrz(a.outbase + "_with_branches.hrz", det["az"], det["branches"])
-        write_stellarium_landscape(a.outbase + "_stellarium.zip", det["az"], det["solid"], "solid")
-        write_stellarium_landscape(a.outbase + "_with_branches_stellarium.zip", det["az"], det["branches"], "with branches")
+        write_stellarium_landscape(a.outbase + "_stellarium.zip", det["az"], det["solid"], "solid", mos=mos)
+        write_stellarium_landscape(a.outbase + "_with_branches_stellarium.zip", det["az"], det["branches"], "with branches", mos=mos)
         lines = [("Solid obstructions", det["az"], det["solid"], (230, 40, 30)),
                  ("Incl. thin branches", det["az"], det["branches"], (0, 200, 240))]
         if a.old:
