@@ -21,6 +21,7 @@ try:
 except ImportError:  # GUI will complain later
     Image = None
 
+_T0 = time.time()     # program start, for the start-up timing lines in the debug log
 APP_NAME = "Horizon Mapper for NINA"
 APP_VERSION = "1.1.0"
 # DEVELOPMENT DEFAULTS: debug log and log windows on. Set DEV_MODE = False before a release
@@ -3314,6 +3315,7 @@ def run_gui(selftest=False):
         return e
 
     # ------------------------------------------------------------------ PLAN
+    dlog(f"startup: {time.time() - _T0:.1f} s – window created, building the Plan tab")
     plan_tab = ttk.Frame(nb); nb.add(plan_tab, text="1. Plan sequence")
     cap_tab = ttk.Frame(nb); nb.add(cap_tab, text="2. Capture")      # filled in below
     left, plan_fixed = topbar(plan_tab)
@@ -3672,6 +3674,7 @@ def run_gui(selftest=False):
     update_fov()
 
     # ------------------------------------------------------------------ PROCESS
+    dlog(f"startup: {time.time() - _T0:.1f} s – Plan and Capture tabs built, building the Build tab")
     proc = ttk.Frame(nb); nb.add(proc, text="3. Build horizon")
     pl, build_fixed = topbar(proc)
     pr = ttk.Frame(proc); pr.pack(side="top", fill="both", expand=True, padx=6, pady=6)
@@ -5599,6 +5602,8 @@ def run_gui(selftest=False):
                 traceback.print_exc(); os._exit(1)
             root.destroy()
         root.after(1500, _selftest)
+    dlog(f"startup: {time.time() - _T0:.1f} s – all tabs built, starting the main loop")
+    root.after(50, lambda: dlog(f"startup: {time.time() - _T0:.1f} s – window shown"))
     root.mainloop()
 
 
@@ -5878,7 +5883,8 @@ HOVER over any setting, choice or button for a short explanation.
 
 DEBUG MENU
    • 'Debug log (all actions)' writes every click, NINA or Alpaca request (with timing and answer), capture
-     step, pause, error and window stall to %LOCALAPPDATA%\\HorizonMapper\\logs. On by default
+     step, pause, error and window stall to %LOCALAPPDATA%\\HorizonMapper\\logs, plus 'startup: N s' lines
+     with the start-up timing. On by default
      for now. 'Open log folder' opens it – please attach the log when reporting a problem.
    • 'Show log windows' shows or hides the log panes (the Capture log can be made wider or
      narrower by dragging its divider).

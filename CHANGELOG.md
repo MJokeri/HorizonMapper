@@ -3,6 +3,7 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- Debug log: `startup: N s – …` lines record how long each part of the start-up takes.
 - **Stellarium landscape now includes a picture**: the one ZIP from *Save Stellarium landscape…* also holds
   `panorama.png` (grey tones of the mosaic below the horizon line, transparent sky above) and becomes a
   spherical (photo) landscape; the horizon polygon stays in it as the horizon line. Without a mosaic it

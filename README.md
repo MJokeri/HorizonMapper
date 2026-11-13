@@ -122,6 +122,8 @@ and the camera exposes.
 **Debug → Debug log (all actions)** writes everything the app does to a log file in
 `%LOCALAPPDATA%\HorizonMapper\logs\`, with millisecond times and the thread that did it:
 - every click and Esc press;
+- the start-up time: lines `startup: N s – …` show how long each part of the start-up took (useful if the
+  program starts slowly);
 - every NINA request with its timing and answer;
 - every step, wait, pause and state change of a capture run;
 - folder scans and redraw times;
