@@ -3,6 +3,7 @@
 ## 1.1.0 – 2026-11-10
 
 ### Added
+- README: note to unzip before running (starting the `.exe` from inside the ZIP made the start about 10 s slower).
 - **Folder version of the Windows build** (`HorizonMapper-windows-folder.zip`): starts faster than the single-file
   `.exe`, which unpacks itself at every start (the debug log showed about 10 s before the window was created).
   Start-up timing lines now also cover the imports.

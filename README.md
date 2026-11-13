@@ -161,7 +161,9 @@ Please attach the log when reporting a problem.
 **Easiest:** download `HorizonMapper-windows.zip` from the repository's
 [Releases](../../releases) page. If there's no release yet, open the latest
 [Actions → Build Windows exe](../../actions) run and download the build from there.
-Unzip it and run `HorizonMapper.exe`. No Python is needed.
+**Unzip it to a normal folder first** (right-click → Extract All) and run `HorizonMapper.exe` from there. Running it
+directly from inside the ZIP makes Windows unpack it to a temporary folder and scan it, and the start can take
+about 10 seconds. No Python is needed.
 
 **If it starts slowly** (the single-file `.exe` unpacks itself at every start, and virus scanners can make that
 take 10 seconds or more): use the **folder version**, `HorizonMapper-windows-folder.zip` (artifact
