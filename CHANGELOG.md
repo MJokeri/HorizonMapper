@@ -5,6 +5,13 @@
 _Tested on the author's real equipment (ASI mount, ASI2600MC, ZWO CAA rotator, flat panel opening/closing, NINA and ASCOM Remote 7.0.1) and the
 Stellarium landscape, including the picture, checked and working in Stellarium (13 Nov 2026)._
 
+### Changed
+- **Build tab: the mosaic and the horizon are built by separate buttons.** **Build mosaic** reads the frames and
+  stitches a new mosaic but leaves the horizon lines on the screen, manual edits included, as they are, so new
+  frames can be added without editing the horizon again. **Build horizon** (replaces *Re-detect*) detects the lines
+  from the mosaic on the screen with the current thresholds and asks first if you have edited the lines; without a
+  mosaic it builds the mosaic first.
+
 ### Added
 - **Capture tab:** estimated **time left** and **completion time** under the progress bar. It starts from the route
   model and, after 3 frames, follows the real speed of the run (paused time not counted). Without a run it shows the

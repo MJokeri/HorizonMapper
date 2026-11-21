@@ -3833,7 +3833,7 @@ def run_gui(selftest=False):
             mos = build_mosaic(frames, lat, K, opts["res"], log, progress)
             progress(0.88, "Detecting horizon")
             det = detect_horizon(mos, opts["solid"], opts["thin"], log=log)
-            q.put(("done", dict(mos=mos, det=det, K=K, lat=lat, n=len(frames))))
+            q.put(("done", dict(mos=mos, det=det, K=K, lat=lat, n=len(frames), keep=bool(opts.get("keep")))))
         except Exception as e:
             q.put(("error", f"{e}\n{traceback.format_exc()}"))
 
@@ -3843,15 +3843,35 @@ def run_gui(selftest=False):
                     res=float(pv["res"].get()), solid=float(pv["solid"].get()), thin=float(pv["thin"].get()),
                     bias=float(pv["bias"].get()) if pv["bias"].get().strip() else None, cache=pv["cache"].get())
 
-    def start():
+    def start(keep_horizon=False):
+        """Read the frames and build the mosaic. With `keep_horizon` and a horizon already on screen, the lines
+        (edits included) stay as they are and only the mosaic behind them is replaced."""
         if not folders.size():
             messagebox.showerror(APP_NAME, "Add at least one folder with FITS frames."); return
         try:
             opts = read_opts()
         except ValueError as e:
             messagebox.showerror(APP_NAME, f"Check settings: {e}"); return
-        logbox.delete("1.0", "end"); result.clear(); E["bg"].clear()
+        keep = bool(keep_horizon and E["solid"] is not None and "mos" in result)
+        opts["keep"] = keep
+        logbox.delete("1.0", "end"); E["bg"].clear()
+        if not keep:
+            result.clear()
         threading.Thread(target=worker, args=(opts,), daemon=True).start()
+
+    def build_mosaic_only():
+        """'Build mosaic': new mosaic, the horizon lines (and your edits) stay."""
+        start(keep_horizon=True)
+
+    def build_horizon():
+        """'Build horizon': detect the lines from the current mosaic (edits are replaced); without a mosaic
+        the frames are read and the mosaic is built first."""
+        if "mos" not in result:
+            start(); return
+        if E["undo"] and not messagebox.askokcancel(
+                APP_NAME, "Detect the horizon again from the mosaic?\n\nYour manual edits of the lines will be replaced."):
+            return
+        redetect()
 
     def redetect():
         if "mos" not in result:
@@ -4268,8 +4288,8 @@ def run_gui(selftest=False):
             messagebox.showinfo(APP_NAME, f"Saved {len(plan['frames'])} frames:\n{out}\n\n"
                                           "Camera, rotator and exposure settings come from the Plan tab.")
 
-    ttk.Button(bb, text="Build mosaic & horizon", command=start).pack(side="top", fill="x", pady=2)
-    ttk.Button(bb, text="Re-detect (new thresholds)", command=redetect).pack(side="top", fill="x", pady=2)
+    ttk.Button(bb, text="Build mosaic", command=build_mosaic_only).pack(side="top", fill="x", pady=2)
+    ttk.Button(bb, text="Build horizon", command=build_horizon).pack(side="top", fill="x", pady=2)
     fb = ttk.Frame(fill_box); fb.grid(row=3, column=0, padx=4, pady=2, sticky="w")
     ttk.Button(fb, text="Generate fill-in frames", command=generate_fill).pack(side="left")
     ttk.Button(fb, text="Save fill-in sequence…", command=save_fill).pack(side="left", padx=4)
@@ -4310,8 +4330,13 @@ def run_gui(selftest=False):
                 elif kind == "prog":
                     pb["value"] = val[0]; status.config(text=val[1])
                 elif kind == "done":
+                    keep = val.pop("keep", False)
                     result.update(val); pb["value"] = 1.0; status.config(text="Done")
-                    reset_edits(); report_uncertain()
+                    if keep and E["solid"] is not None and len(E["solid"]) == len(result["det"]["az"]):
+                        logbox.insert("end", "New mosaic built; the horizon lines were kept as they were.\n"); logbox.see("end")
+                        redraw_all(); refresh_fill(); report_uncertain()
+                    else:
+                        reset_edits(); report_uncertain()
                 elif kind == "error":
                     status.config(text="Error"); logbox.insert("end", val + "\n")
                     messagebox.showerror(APP_NAME, val.splitlines()[0])
@@ -5822,8 +5847,8 @@ TIPS = {
     "Bias level (blank = auto)": "Camera bias (black level) subtracted from the frames; blank = estimated automatically.",
     "Cache reduced frames": "Keep reduced copies of the frames, so building again is much faster.",
     "Clear cache": "Delete the cached reduced frames.",
-    "Build mosaic & horizon": "Read the frames, stitch the mosaic and detect the horizon lines.",
-    "Re-detect (new thresholds)": "Detect the horizon again with new thresholds, without rebuilding the mosaic.",
+    "Build mosaic": "Read the frames and stitch a new mosaic. A horizon already on the screen (with your manual edits) stays as it is, so new frames can be added without editing the lines again. The first time, the horizon is detected too.",
+    "Build horizon": "Detect the horizon lines from the mosaic on the screen with the current thresholds (no re-reading of frames; asks first if you have edited the lines). Without a mosaic it reads the frames and builds the mosaic first.",
     "Extra frames at steep edges ": "Fill-in: how many frame widths to add beside steep rises and drops of the new horizon (0 = off).",
     "steep = more than": "An edge counts as steep above this many degrees of altitude per degree of azimuth.",
     "Horizon line near gaps within (°)": "Fill-in: also cover places where the horizon line is this close to a spot without pictures (0 = off).",
@@ -6026,7 +6051,10 @@ DEBUG MENU
      their frames (orange) and the shooting order (green = first → magenta = last, numbers =
      first frame of each row; every frame is numbered at zoom 20). It follows your edits and
      the fill-in settings: after a change the plan is generated again and redrawn.
-   • 'Re-detect' applies new thresholds instantly without re-reading the frames.
+   • 'Build mosaic' reads the frames and stitches a new mosaic; a horizon already on the screen, manual
+     edits included, stays as it is. 'Build horizon' detects the lines from the mosaic on the screen with
+     the current thresholds, instantly and without re-reading the frames (it asks first if you have
+     edited the lines); without a mosaic it builds the mosaic first.
    • 'Side margin at steep edges' (toolbar above the image): where the horizon rises or drops steeply (the side of a
      tree, the end of a roof), the higher value is extended that many degrees sideways, so a
      target just beside the obstruction isn't scheduled too early. Gentle slopes are not

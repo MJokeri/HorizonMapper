@@ -450,7 +450,12 @@ accepts such a list like a folder.
 - **Current horizon (compare / fill gaps):** filled in from the Plan tab, or chosen with **Browse…**. It
   is drawn in yellow, used for the usable-sky comparison, and used for any azimuths that weren't
   imaged.
-- Click **Build mosaic & horizon**.
+- Click **Build mosaic**. The first time it also detects the horizon lines. Later, when you have shot more
+  frames, click **Build mosaic** again: the new mosaic replaces the old one but the horizon lines on the
+  screen, your manual edits included, stay as they are.
+- **Build horizon** detects the lines again from the mosaic on the screen (new thresholds, instantly, no
+  re-reading of frames). It asks first if you have edited the lines, because the edits are replaced.
+  Without a mosaic it builds the mosaic first.
 - **Save horizon file…** (below the fill-in buttons) saves one NINA `.hrz` file. Choose the line next
   to the button:
   - **solid:** trees, roofs and walls
@@ -488,7 +493,7 @@ accepts such a list like a folder.
   frame of each row numbered (every frame at zoom 20). After you edit the lines or change the
   fill-in settings, the plan is generated again and redrawn, so the image always shows what
   **Save fill-in sequence…** will write.
-- **Re-detect** applies new thresholds instantly, without re-reading the frames.
+- **Build horizon** applies new thresholds instantly, without re-reading the frames (it replaces your edits).
 - **Side margin at steep edges** (in the toolbar above the image): where the horizon rises or drops steeply (the side of a tree, the
   end of a roof), the higher value is extended this many degrees sideways. That stops NINA
   starting a target that is still right next to the obstruction. Gentle slopes stay unchanged.
