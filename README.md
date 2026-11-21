@@ -354,6 +354,9 @@ With **NINA** chosen:
      a run: the run waits until the cover is open (and stops with a message if it cannot be opened), and
      the cover is closed after parking when the run has finished (not after **End run**). Without the
      automatic opening, a run warns at the start if the cover is closed, because it blocks the sky.
+     The cover's state ("Flat panel cover: open / closed / moving") under the buttons is read together with
+     the device status line (every 2 s during a run, every 5 s otherwise), so it follows changes made by the
+     run or by another program too.
    - **The mount is watched while it slews.** About once a second its real position is compared
      with the Sun. If it comes much closer than planned (within 60 % of the keep-away distance) –
      because the mount took another route than estimated – the movement is stopped and the run

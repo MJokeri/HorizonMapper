@@ -5,6 +5,12 @@
 _Tested on the author's real equipment (ASI mount, ASI2600MC, ZWO CAA rotator, flat panel opening/closing, NINA and ASCOM Remote 7.0.1) and the
 Stellarium landscape, including the picture, checked and working in Stellarium (13 Nov 2026)._
 
+### Fixed
+- **Capture tab:** the flat panel cover state under the *Open / Close flat panel* buttons now follows the real
+  state. It was only updated by the buttons, so a cover opened or closed by the run (*Open flat panel at start*,
+  *Close flat panel when finished*) or by another program showed an old state. It is now read with the device
+  status line.
+
 ### Changed
 - **Build tab: the mosaic and the horizon are built by separate buttons.** **Build mosaic** reads the frames and
   stitches a new mosaic but leaves the horizon lines on the screen, manual edits included, as they are, so new

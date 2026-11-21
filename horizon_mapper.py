@@ -4651,7 +4651,7 @@ def run_gui(selftest=False):
                 APP_NAME, "Close the flat panel cover? Make sure nothing is in its way. A closed cover blocks the sky."):
             return
         word = "Closing" if closed else "Opening"
-        flat_lbl.config(text=f"{word} the flat panel…")
+        flat_lbl.config(text=f"{word} the flat panel…"); C["flat_busy"] = True
 
         def job():
             try:
@@ -4666,6 +4666,8 @@ def run_gui(selftest=False):
                     C["q"].put(("flat", f"Flat panel cover: {st} (wanted {want})."))
             except NinaApiError as e:
                 C["q"].put(("flat", f"Flat panel: {e}"))
+            finally:
+                C["flat_busy"] = False
         threading.Thread(target=job, daemon=True, name="flat-panel").start()
 
     def cap_discover():
@@ -4755,8 +4757,12 @@ def run_gui(selftest=False):
                     c = api.camera(); txt += f"   ·   Camera: {c.get('CameraState', '?')}" if c.get("Connected") else "   ·   Camera: not connected"
                 except NinaApiError:
                     txt += "   ·   Camera: ?"
+                try:
+                    fs = api.flat_state()                  # also changes made by the run (open at start, close at end)
+                except Exception:
+                    fs = "?"
                 if C.get("poll_gen", 0) == gen:
-                    C["q"].put(("dev", txt))
+                    C["q"].put(("dev", txt)); C["q"].put(("flat_state", fs))
                 rn = C.get("runner")                       # every 2 s during a run, every 5 s otherwise
                 time.sleep(2.0 if rn is not None and rn.state in ("running", "paused") else 5.0)
         if not C["polling"]:
@@ -5381,6 +5387,9 @@ def run_gui(selftest=False):
                 ui_beat["doing"] = f"capture event {kind}"
                 if kind == "flat":
                     flat_lbl.config(text=val); clog_add(val)
+                elif kind == "flat_state":
+                    if not C.get("flat_busy"):              # a button press shows its own progress text
+                        flat_lbl.config(text="" if val is None else f"Flat panel cover: {val}")
                 elif kind == "connected":
                     ver, folder, ftype, parts = val
                     conn_lbl.config(text=f"Advanced API {ver}: " + ", ".join(parts))
@@ -5981,7 +5990,8 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
      the nearer end, so some frames are tilted by up to 45° and the coverage can have gaps.
    • Safety and Peripherals: next to the safety limits, 'Open flat panel' / 'Close flat panel'
      operate the flat panel cover (NINA: the flat device connected in NINA; Alpaca: choose the
-     'Flat panel' device). 'Open flat panel at start' / 'Close flat panel when finished' do it
+     'Flat panel' device); the cover state shown under them is refreshed with the device status line.
+     'Open flat panel at start' / 'Close flat panel when finished' do it
      automatically around a run (close: after parking, not after End run). A closed cover blocks the
      sky, so a run without the automatic opening warns at the start if the cover is closed.
      The mount is watched during every slew: if it comes much closer to the Sun than planned, or
