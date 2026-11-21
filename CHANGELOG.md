@@ -6,6 +6,9 @@ _Tested on the author's real equipment (ASI mount, ASI2600MC, ZWO CAA rotator, f
 Stellarium landscape, including the picture, checked and working in Stellarium (13 Nov 2026)._
 
 ### Added
+- **Capture tab:** estimated **time left** and **completion time** under the progress bar. It starts from the route
+  model and, after 3 frames, follows the real speed of the run (paused time not counted). Without a run it shows the
+  estimated run time of the frames still to shoot.
 - README: note to unzip before running (starting the `.exe` from inside the ZIP made the start about 10 s slower).
 - **Folder version of the Windows build** (`HorizonMapper-windows-folder.zip`): starts faster than the single-file
   `.exe`, which unpacks itself at every start (the debug log showed about 10 s before the window was created).

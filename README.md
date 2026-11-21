@@ -400,6 +400,11 @@ With **NINA** chosen:
 The **Run** group's progress bar shows the percentage of the current run in its centre (frames done
 or skipped out of the frames this run shoots). Without a run, it shows frames taken out of all.
 
+Under it, **time left** and the **estimated completion time** are shown ("Time left about 42 min · ready about
+21:15"). The first estimate comes from the planned route (slews, rotator moves, meridian flips, about 9 s per
+frame); after 3 frames it follows the real speed of the run (exposure, download, a slow mount). Paused time is not
+counted. Before a run the same place shows the estimated run time of the frames still to shoot in the range.
+
 **Saving and resuming a capture** (group **Save / Load Capture**, right of **Run**)
 
 - **Save current capture…** writes a `.hmcap.json` file with all the frames, each frame's state

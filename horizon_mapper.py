@@ -2449,6 +2449,51 @@ def route_seconds(frames, order, ideal=None, tol=3.0, start=None):
     return t, far, flips, rots, deg
 
 
+def fmt_duration(sec):
+    """'1 h 05 min', '12 min' or '40 s' for a time span in seconds."""
+    sec = max(0, int(round(sec)))
+    if sec < 90:
+        return f"{sec} s"
+    m = int(round(sec / 60.0))
+    return f"{m // 60} h {m % 60:02d} min" if m >= 60 else f"{m} min"
+
+
+def clock_text(t_epoch, now=None):
+    """Local clock time 'HH:MM' of an epoch time; with 'tomorrow' / the date when it is not today."""
+    now = time.time() if now is None else now
+    lt, ln = time.localtime(t_epoch), time.localtime(now)
+    txt = time.strftime("%H:%M", lt)
+    if (lt.tm_year, lt.tm_yday) != (ln.tm_year, ln.tm_yday):
+        nxt = time.localtime(now + 86400)
+        txt += " tomorrow" if (lt.tm_year, lt.tm_yday) == (nxt.tm_year, nxt.tm_yday) else time.strftime(" %d %b", lt)
+    return txt
+
+
+def run_eta(frames, order, status, active_s=0.0, ideal=None, tol=3.0, start=None, min_done=3):
+    """Time left of a run: (seconds left, frames left, speed factor).
+
+    The route model (`route_seconds`) gives the time of the frames still to shoot. Once `min_done` frames of
+    the run are done, the model is scaled by how long the finished frames really took (`active_s`, the
+    time the run was running, pauses not counted), so the estimate follows the real speed (exposure,
+    download, a slow mount). Before that the factor is 1."""
+    done = [i for i in order if status[i] in ("done", "skipped")]
+    left = [i for i in order if status[i] not in ("done", "skipped", "error")]
+    factor = 1.0
+    if len(done) >= min_done and active_s > 0:
+        pred = route_seconds(frames, done, ideal, tol, start)[0]
+        if pred > 0:
+            factor = min(max(active_s / pred, 0.3), 3.0)
+    if not left:
+        return 0.0, 0, factor
+    pos = None
+    for i in order:
+        if status[i] in ("done", "skipped"):
+            pos = (frames[i][0], frames[i][1])
+        else:
+            break
+    return route_seconds(frames, left, ideal, tol, pos if pos is not None else start)[0] * factor, len(left), factor
+
+
 def optimize_route(frames, order, lat, rot_offset=0.0, rot_sign=1, tol=3.0, start=None, rotator=True):
     """Shorter order for shooting the frames in `order` (indices into `frames` = [(alt, az, rotator)]).
 
@@ -4518,6 +4563,11 @@ def run_gui(selftest=False):
     Hover(cap_pb.c, "Progress of the current run: frames done or skipped out of the frames this run shoots. "
                     "Without a run: frames taken out of all frames.")
     cap_status = ttk.Label(runb, text="Idle", wraplength=240, justify="left"); cap_status.pack(side="top", anchor="w", padx=4)
+    cap_eta = ttk.Label(runb, text="", wraplength=240, justify="left"); cap_eta.pack(side="top", anchor="w", padx=4)
+    Hover(cap_eta, "Estimated time left and completion time of the run. At first from the planned route (slews, rotator "
+                   "moves, meridian flips, about 9 s per frame); after 3 frames it follows the real speed of this run. "
+                   "Paused time is not counted, but the estimate does not include waiting for a pause to end. "
+                   "Without a run: the estimated duration of the frames still to shoot in the range.")
 
     slb = ttk.LabelFrame(cfixed, text="Save / Load Capture"); slb.pack(side="left", fill="y", padx=(6, 0), pady=2)
     save_cap_btn = ttk.Button(slb, text="Save current capture…", command=lambda: cap_save())
@@ -4825,6 +4875,40 @@ def run_gui(selftest=False):
             cap_pb.set(d_ / n_, f"{d_} / {n_} taken")
         else:
             cap_pb.set(0.0, "")
+
+    def eta_ideal():
+        return [(f_[2] if len(f_) > 2 and f_[2] is not None else 0.0) for f_ in C["frames"]]
+
+    def update_eta():
+        """Time left and completion time under the progress bar (a run), or the estimated run time (no run)."""
+        try:
+            r = C.get("runner"); fr = C["frames"]
+            if not fr:
+                cap_eta.config(text=""); return
+            tol_ = float(V["rot_tolerance"].get()) if V["rot_tolerance"].get() else 3.0
+            if r is not None and r.order and r.frames == fr and r.state in ("running", "paused"):
+                sec, n_left, fac = run_eta(fr, r.order, C["status"], C.get("run_active", 0.0), eta_ideal(), tol_, C.get("mount_pos"))
+                if not n_left:
+                    cap_eta.config(text="Time left: 0 s"); return
+                done_n = sum(1 for i in r.order if C["status"][i] in ("done", "skipped"))
+                txt = f"Time left about {fmt_duration(sec)}"
+                if r.state == "running":
+                    txt += f" · ready about {clock_text(time.time() + sec)}"
+                else:
+                    txt += " (paused)"
+                if done_n < 3:
+                    txt += " · rough, from the route model"
+                cap_eta.config(text=txt)
+            else:
+                st_ = progress_lists()[0]
+                first, last = range_values()
+                todo = frames_to_shoot(st_, first, last, cv_["reshoot"].get())
+                if not todo:
+                    cap_eta.config(text=""); return
+                sec = route_seconds(fr, todo, eta_ideal(), tol_, C.get("mount_pos"))[0]
+                cap_eta.config(text=f"Estimated run time about {fmt_duration(sec)} for {len(todo)} frames")
+        except Exception:
+            cap_eta.config(text="")
 
     def update_range_label(*a):
         if not C["frames"]:
@@ -5143,7 +5227,7 @@ def run_gui(selftest=False):
                                image_folder=image_folder(), order=order, status=status, paths=paths,
                                names=names, ceiling=ceil_, rot_range=rot_mode,
                                rot_start=rot_start, open_flat=cv_["flat_open"].get(), close_flat=cv_["flat_close"].get())
-        C["runner"] = runner; C["status"] = list(runner.status); update_progress()
+        C["runner"] = runner; C["status"] = list(runner.status); C["run_active"] = 0.0; C["eta_tick"] = None; update_progress()
         clog_add(f"Start through {api.label}: {len(order)} frames ({first}–{last}), exposure {ex} s, sun ≥ {sun}°, "
                  f"altitude {floor_:g}–{ceil_:g}°" + (f", rotator within {rot_start % 360:g}–{(rot_start + rot_span()) % 360:g}°" if rot_span() else "") + ".")
         dlog(f"start: order {order[:10]}{' …' if len(order) > 10 else ''}")
@@ -5402,6 +5486,15 @@ def run_gui(selftest=False):
             pass
         except Exception:
             dlog_exc("cap_poll")
+        now_ = time.time(); r_ = C.get("runner")
+        if r_ is not None and r_.state == "running":
+            if C.get("eta_tick"):
+                C["run_active"] = C.get("run_active", 0.0) + min(now_ - C["eta_tick"], 5.0)
+            C["eta_tick"] = now_
+        else:
+            C["eta_tick"] = None
+        if now_ - C.get("eta_upd", 0) > 1.0:
+            C["eta_upd"] = now_; update_eta()
         if C.get("autosave_due") and time.time() - C.get("last_autosave", 0) > 2.0:
             C["autosave_due"] = False; C["last_autosave"] = time.time(); autosave(); update_range_label()
         for i, (pth, due) in list(C.get("thumb_retry", {}).items()):
@@ -5880,7 +5973,9 @@ WORKFLOW   1. Plan sequence → 2. Capture → 3. Build horizon
    • The image folder (NINA's, or 'Save images in' for Alpaca) can be changed during a run – the
      current value is always used.
    • The log runs down the right side of the tab (scrollable). The progress bar shows the
-     percentage of the run. 'Save / Load Capture' sits right of 'Run'.
+     percentage of the run. Under it: time left and the estimated completion time of the run (from the
+     route model at first, from the real speed after 3 frames; paused time is not counted). Without a
+     run it shows the estimated run time of the frames still to shoot. 'Save / Load Capture' sits right of 'Run'.
    • A preview is made only when the FITS file is complete (NINA may still be writing it);
      otherwise it is tried again every 3 s for up to 3 minutes.
    • Files that NINA saves late are picked up by a scan of its image folder every few seconds
